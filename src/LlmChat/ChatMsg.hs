@@ -80,19 +80,9 @@ instance ToSchema ToolCall where
                            ]
                     & required .~ ["toolCallId", "toolName", "toolArgs"]
 
-data ToolResponse
-    = ToolResponse
-    { modelResponse :: Text
-    -- ^ The value returned to the LLM
-    , localResponse :: [UIComponent]
-    -- ^ Components to render in the chat
+newtype ToolResponse = ToolResponse
+    { response :: Text
     }
     deriving stock (Show, Eq, Generic)
-    deriving anyclass (FromJSON, ToJSON, ToSchema)
+    deriving newtype (FromJSON, ToJSON, ToSchema, IsString)
 
-newtype UIComponent = UIComponent Value
-    deriving stock (Show, Eq, Generic)
-    deriving newtype (FromJSON, ToJSON)
-
-instance ToSchema UIComponent where
-    declareNamedSchema _ = declareNamedSchema $ Proxy @Text

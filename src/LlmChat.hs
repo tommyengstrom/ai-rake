@@ -164,22 +164,14 @@ executeToolCalls tools toolCalls = do
     forM toolCalls $ \tc -> do
         response <- case find (\t -> t ^. #name == tc ^. #toolName) tools of
             Nothing ->
-                pure $
-                    ToolResponse
-                        { modelResponse = "Tool not found: " <> tc ^. #toolName
-                        , localResponse = []
-                        }
+                pure . ToolResponse $ "Tool not found: " <> tc ^. #toolName
             Just tool -> do
                 let args = Object (KM.fromMap (Map.mapKeys fromText (tc ^. #toolArgs)))
                 result <- tool ^. #executeFunction $ args
                 case result of
                     Right resp -> pure resp
                     Left err ->
-                        pure $
-                            ToolResponse
-                                { modelResponse = "Tool error: " <> Text.pack err
-                                , localResponse = []
-                                }
+                        pure . ToolResponse $ "Tool error: " <> Text.pack err
         pure $
             ToolCallResponseMsg
                 { toolCallId = tc ^. #toolCallId

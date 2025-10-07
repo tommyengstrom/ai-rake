@@ -2,7 +2,6 @@ packages: .
 
 with-compiler: ghc-9.10.3
 
-documentation: True
 
 test-show-details: direct
 multi-repl: True

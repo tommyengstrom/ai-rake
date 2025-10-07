@@ -62,7 +62,7 @@ toGeminiContent msg = case msg of
                         $ GeminiFunctionResponsePart
                         $ GeminiFunctionResponse
                             { name = toolCallId ^. typed @Text
-                            , response = object ["result" .= (toolResponse ^. #modelResponse)]
+                            , response = object ["result" .= (toolResponse ^. #response)]
                             }
                 , role = "user"
                 }

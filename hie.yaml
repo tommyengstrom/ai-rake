@@ -1,0 +1,10 @@
+cradle:
+  cabal:
+    - path: "./src"
+      component: "lib:llmchat-effectful"
+
+    - path: "./test"
+      component: "llmchat-effectful:test:llmchat-effectful-test"
+
+    - path: "./app/MinimalExample.hs"
+      component: "llmchat-effectful:exe:minimal-example"

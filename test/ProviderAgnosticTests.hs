@@ -150,12 +150,7 @@ listContacts =
     defineToolNoArgument
         "list_contact"
         "List all the contacts of the user."
-        ( pure $
-            Right $
-                ToolResponse
-                    { modelResponse = "Contacts:\n" <> T.intercalate "\n- " contacts
-                    , localResponse = [UIComponent $ toJSON contacts]
-                    }
+        ( pure . Right . ToolResponse $ "Contacts:\n" <> T.intercalate "\n- " contacts
         )
   where
     contacts :: [Text]
@@ -174,11 +169,6 @@ showPhoneNumber =
         "Show the phone number of a contact. Must use full name for lookup, as given by `list_contact`."
         ( \case
             FullName "John Snow" ->
-                pure $
-                    Right $
-                        ToolResponse
-                            { modelResponse = "Phone number: 123-456-7890"
-                            , localResponse = [UIComponent $ toJSON ("123-456-7890" :: Text)]
-                            }
+                pure . Right . ToolResponse $ "Phone number: 123-456-7890"
             FullName n -> pure $ Left $ "No phone number for contact: " <> T.unpack n
         )
