@@ -79,6 +79,7 @@ common shared_opts
     , http-types
     , lens
     , monad-time-effectful
+    , mmorph  
     , openai
     , openapi3
     , servant-client

@@ -4,6 +4,7 @@ module LlmChat
     ) where
 
 import Control.Lens ((^.))
+import Control.Monad.Morph
 import Data.Aeson
 import Data.Aeson.Key (fromText)
 import Data.Aeson.KeyMap qualified as KM
@@ -18,8 +19,8 @@ import LlmChat.Storage.Effect as X
 import LlmChat.Tool as X
 import LlmChat.Types as X
 import Relude
+import Servant.API (SourceIO)
 import Servant.Types.SourceT
-import Servant.API.Stream
 
 -- | Send a user message and handle any tool calls automatically
 respondWithTools
@@ -128,16 +129,18 @@ respondWithToolsSourceIO
     :: forall es
      . ( Error LlmChatError :> es
        , LlmChat :> es
-       , SourceToSourceIO (Eff es)
+       , IOE :> es
        )
     => ResponseFormat
     -> [ToolDef es]
     -> [ChatMsg]
-    -> SourceIO ChatMsg
-respondWithToolsSourceIO responseFormat tools =
-    sourceToSourceIO .
-    fromStepT
-        . respondWithToolsStepT responseFormat tools
+    -> Eff es (SourceIO ChatMsg)
+respondWithToolsSourceIO responseFormat tools conversation =
+    withRunInIO $ \runInIO ->
+        pure
+            . hoist runInIO
+            . fromStepT
+            $ respondWithToolsStepT responseFormat tools conversation
 
 -- | Tool loop implemented as a Servant stream of ChatMsgs
 respondWithToolsStepT
