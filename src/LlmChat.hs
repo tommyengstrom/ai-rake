@@ -19,6 +19,7 @@ import LlmChat.Tool as X
 import LlmChat.Types as X
 import Relude
 import Servant.Types.SourceT
+import Servant.API.Stream
 
 -- | Send a user message and handle any tool calls automatically
 respondWithTools
@@ -123,16 +124,18 @@ executeToolCalls tools toolCalls = do
                 , toolResponse = response
                 }
 
-respondWithToolsSourceT
+respondWithToolsSourceIO
     :: forall es
      . ( Error LlmChatError :> es
        , LlmChat :> es
+       , SourceToSourceIO (Eff es)
        )
     => ResponseFormat
     -> [ToolDef es]
     -> [ChatMsg]
-    -> SourceT (Eff es) ChatMsg
-respondWithToolsSourceT responseFormat tools =
+    -> SourceIO ChatMsg
+respondWithToolsSourceIO responseFormat tools =
+    sourceToSourceIO .
     fromStepT
         . respondWithToolsStepT responseFormat tools
 
