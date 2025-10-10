@@ -136,11 +136,12 @@ respondWithToolsSourceIO
     -> [ChatMsg]
     -> Eff es (SourceIO ChatMsg)
 respondWithToolsSourceIO responseFormat tools conversation =
-    withRunInIO $ \runInIO ->
-        pure
-            . hoist runInIO
-            . fromStepT
-            $ respondWithToolsStepT responseFormat tools conversation
+    withUnliftStrategy SeqForkUnlift $
+        withRunInIO $ \runInIO ->
+            pure
+                . hoist runInIO
+                . fromStepT
+                $ respondWithToolsStepT responseFormat tools conversation
 
 -- | Tool loop implemented as a Servant stream of ChatMsgs
 respondWithToolsStepT
