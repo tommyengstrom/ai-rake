@@ -34,7 +34,7 @@ data ChatMsg
         { content :: Text
         , toolCalls :: [ToolCall]
         }
-    | ToolCallResponseMsg -- FIXME: rename to ToolResponseMsg
+    | ToolResponseMsg
         { toolCallId :: ToolCallId
         , toolResponse :: ToolResponse
         }

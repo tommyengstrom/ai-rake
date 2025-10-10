@@ -111,7 +111,7 @@ toOpenAIMessage msg = case msg of
             , assistant_audio = Nothing
             , tool_calls = Just . V.fromList $ fmap translateToolCalls toolCalls
             }
-    ToolCallResponseMsg{toolCallId, toolResponse} ->
+    ToolResponseMsg{toolCallId, toolResponse} ->
         Tool
             { content = toContentVector . TL.toStrict $ encodeToLazyText toolResponse
             , tool_call_id = getTyped toolCallId

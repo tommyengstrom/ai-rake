@@ -87,7 +87,7 @@ specWithProvider runEffectStack = do
         let assistantToolCalls =
                 [calls | AssistantMsg{toolCalls = calls} <- msgs, not (null calls)]
         assistantToolCalls `shouldSatisfy` (>= 1) . length
-        (msgs ^.. folded . _Ctor @"ToolCallResponseMsg") `shouldSatisfy` (>= 1) . length
+        (msgs ^.. folded . _Ctor @"ToolResponseMsg") `shouldSatisfy` (>= 1) . length
         (msgs ^.. folded . _Ctor @"AssistantMsg") `shouldSatisfy` (>= 1) . length
 
     it "Resolves multiple tool calls with structured response" $ do
@@ -122,7 +122,7 @@ specWithProvider runEffectStack = do
         let assistantToolCalls =
                 [calls | AssistantMsg{toolCalls = calls} <- msgs, not (null calls)]
         assistantToolCalls `shouldSatisfy` (>= 1) . length
-        (msgs ^.. folded . _Ctor @"ToolCallResponseMsg") `shouldSatisfy` (>= 1) . length
+        (msgs ^.. folded . _Ctor @"ToolResponseMsg") `shouldSatisfy` (>= 1) . length
         (msgs ^.. folded . _Ctor @"AssistantMsg") `shouldSatisfy` (>= 1) . length
 
     describe "Structured Output" $ do

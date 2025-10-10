@@ -54,7 +54,7 @@ toGeminiContent msg = case msg of
                     { parts = V.fromList $ textParts <> toolCallParts
                     , role = "model"
                     }
-    ToolCallResponseMsg{toolCallId, toolResponse} ->
+    ToolResponseMsg{toolCallId, toolResponse} ->
         Just
             $ GeminiContent
                 { parts =

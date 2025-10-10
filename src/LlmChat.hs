@@ -120,7 +120,7 @@ executeToolCalls tools toolCalls = do
                     Left err ->
                         pure . ToolResponse $ "Tool error: " <> Text.pack err
         pure $
-            ToolCallResponseMsg
+            ToolResponseMsg
                 { toolCallId = tc ^. #toolCallId
                 , toolResponse = response
                 }
@@ -136,12 +136,11 @@ respondWithToolsSourceIO
     -> [ChatMsg]
     -> Eff es (SourceIO ChatMsg)
 respondWithToolsSourceIO responseFormat tools conversation =
-    withUnliftStrategy SeqForkUnlift $
-        withRunInIO $ \runInIO ->
-            pure
-                . hoist runInIO
-                . fromStepT
-                $ respondWithToolsStepT responseFormat tools conversation
+    withEffToIO SeqForkUnlift $ \runInIO ->
+        pure
+            . hoist runInIO
+            . fromStepT
+            $ respondWithToolsStepT responseFormat tools conversation
 
 -- | Tool loop implemented as a Servant stream of ChatMsgs
 respondWithToolsStepT
