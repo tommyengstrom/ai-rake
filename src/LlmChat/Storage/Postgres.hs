@@ -151,6 +151,7 @@ selectMessagesQuery tableName =
         $ "SELECT message_id, conversation_id, message, created_at FROM "
         <> tableName
             <> " WHERE conversation_id = ? ORDER BY created_at ASC"
+            <> " ORDER BY created_at desc"
 
 listConversationsQuery :: ConversationsTable -> Query
 listConversationsQuery tableName =
