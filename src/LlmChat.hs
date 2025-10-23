@@ -18,7 +18,8 @@ import LlmChat.Effect as X
 import LlmChat.Storage.Effect as X
 import LlmChat.Tool as X
 import LlmChat.Types as X
-import Relude
+import Relude hiding (traceM, traceShowM)
+import Debug.Trace (traceM, traceShowM)
 import Servant.API (SourceIO)
 import Servant.Types.SourceT
 
@@ -174,7 +175,7 @@ respondWithToolsStepT' writeResponse responseFormat tools conversation = Effect 
             -- Tool calls - execute them and continue
             AssistantMsg{toolCalls} | not (null toolCalls) -> do
                 toolCallResponseMsgs <- executeToolCalls tools toolCalls
-                rs <- traverse writeResponse toolCallResponseMsgs
+                toolResponses <- traverse writeResponse toolCallResponseMsgs
                 let nextLlmCall :: StepT (Eff es) a
                     nextLlmCall =
                         respondWithToolsStepT'
@@ -182,8 +183,11 @@ respondWithToolsStepT' writeResponse responseFormat tools conversation = Effect 
                             responseFormat
                             tools
                             (conversation <> [response] <> toolCallResponseMsgs)
-                pure $ L.foldr Yield nextLlmCall rs
-            _ -> pure Stop
+                pure $ L.foldr Yield nextLlmCall toolResponses
+            a -> do
+                traceM "Oh fuck, I thought this would always be 'AssisantMsg' but we got:"
+                traceShowM a
+                pure Stop
   where
     toToolDeclaration tool =
         ToolDeclaration

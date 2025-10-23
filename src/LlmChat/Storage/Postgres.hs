@@ -133,7 +133,7 @@ insertMessageQuery tableName =
         $ toString
         $ "INSERT INTO "
         <> tableName
-            <> " (conversation_id, message) VALUES (?, ?)"
+            <> " (conversation_id, message) VALUES (?, ?) "
         <> "RETURNING message, message_id, created_at"
 
 deleteConversationQuery :: ConversationsTable -> Query

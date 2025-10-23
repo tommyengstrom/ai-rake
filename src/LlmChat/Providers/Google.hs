@@ -28,7 +28,7 @@ defaultGoogleSettings :: GoogleApiKey -> GoogleSettings es
 defaultGoogleSettings apiKey =
     GoogleSettings
         { apiKey = apiKey
-        , model = "gemini-2.5"
+        , model = "gemini-2.5-flash"
         , baseUrl = "https://generativelanguage.googleapis.com"
         , requestLogger = \_ -> pure ()
         }
