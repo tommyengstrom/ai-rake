@@ -109,7 +109,9 @@ toOpenAIMessage msg = case msg of
             , name = Nothing
             , refusal = Nothing
             , assistant_audio = Nothing
-            , tool_calls = Just . V.fromList $ fmap translateToolCalls toolCalls
+            , tool_calls = case toolCalls of
+                [] -> Nothing
+                tcs -> Just . V.fromList $ fmap translateToolCalls tcs
             }
     ToolResponseMsg{toolCallId, toolResponse} ->
         Tool

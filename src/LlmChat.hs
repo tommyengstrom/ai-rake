@@ -103,13 +103,12 @@ respondWithTools' responseFormat tools conversation = do
                     <> show msg
         [] -> throwError $ LlmExpectationError "Assistant returned no messages"
 
--- | Execute tool calls and return the responses
-executeToolCalls
+
+executeToolCall
     :: [ToolDef es]
-    -> [ToolCall] -- FIXME: Just do a single tool call and traverse outside!
-    -> Eff es [ChatMsg]
-executeToolCalls tools toolCalls = do
-    forM toolCalls $ \tc -> do
+    -> ToolCall
+    -> Eff es ChatMsg
+executeToolCall tools tc = do
         response <- case find (\t -> t ^. #name == tc ^. #toolName) tools of
             Nothing ->
                 pure . ToolResponse $ "Tool not found: " <> tc ^. #toolName
@@ -173,8 +172,8 @@ respondWithToolsStepT' writeResponse responseFormat tools conversation = Effect 
     pure $ Yield r $ Effect do
         case response of
             -- Tool calls - execute them and continue
-            AssistantMsg{toolCalls} | not (null toolCalls) -> do
-                toolCallResponseMsgs <- executeToolCalls tools toolCalls
+            AssistantMsg{toolCalls} | null toolCalls -> do
+                toolCallResponseMsgs <- traverse (executeToolCall tools) toolCalls
                 toolResponses <- traverse writeResponse toolCallResponseMsgs
                 let nextLlmCall :: StepT (Eff es) a
                     nextLlmCall =

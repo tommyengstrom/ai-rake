@@ -132,6 +132,7 @@ test-suite llmchat-effectful-test
       LlmChat.Provider.GoogleSpec
       LlmChat.Provider.OpenAISpec
       LlmChat.Storage.InMemorySpec
+      LlmChat.WithStorageSpec
       ProviderAgnosticTests
   hs-source-dirs: test
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
@@ -145,6 +146,7 @@ test-suite llmchat-effectful-test
     , hspec
     , mtl
     , pretty-simple
+    , servant
     , unordered-containers
     , unliftio-pool
     , yaml

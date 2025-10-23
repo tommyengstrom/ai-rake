@@ -55,7 +55,7 @@ respondWithToolsSourceIOStorage
     => ResponseFormat
     -> [ToolDef es]
     -> ConversationId
-    -> Eff es (SourceIO StoredMsg)
+    -> Eff es (SourceIO (Either ChatStorageError StoredMsg))
 respondWithToolsSourceIOStorage responseFormat tools convId = do
     conversation <- toListOf (folded . #msg) <$> getStoredConversation convId
     withEffToIO SeqForkUnlift $ \runInIO ->
@@ -63,7 +63,7 @@ respondWithToolsSourceIOStorage responseFormat tools convId = do
             . hoist runInIO
             . fromStepT
             $ respondWithToolsStepT'
-                (appendMessage convId)
+                (\msg -> runErrorNoCallStack $ appendMessage convId msg)
                 responseFormat
                 tools
                 conversation

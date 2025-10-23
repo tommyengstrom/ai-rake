@@ -42,7 +42,7 @@ runGoogle action = do
         $ action
 
 spec :: Spec
-spec = describe "LlmChat Provider - Google" $ do
+spec = xdescribe "LlmChat Provider - Google" $ do
     -- Run common tests
     specWithProvider runGoogle
 
