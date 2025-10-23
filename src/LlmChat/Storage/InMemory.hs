@@ -45,6 +45,7 @@ runLlmChatStorageInMemory eff = do
         AppendMessage conversationId msg -> do
             storedMsg <- mkStoredMsg msg
             atomically $ modifyTVar' tvar $ Map.adjust (<> [storedMsg]) conversationId
+            pure storedMsg
         ListConversations -> do
             conversations <- readTVarIO tvar
             pure $ Map.keys conversations

@@ -79,8 +79,11 @@ runLlmChatStoragePostgres tableName = interpret $ \_ -> \case
                 , createdAt = rowCreatedAt
                 }
     AppendMessage conversationId msgIn -> do
-        _ <- insertMessageIfConversationExists tableName conversationId msgIn
-        pure ()
+        insertMessage tableName conversationId msgIn >>= \case
+            [s] -> pure s
+            [] -> throwError $ InsertFailure "insert operation returned no rows"
+            _ss -> throwError $ InsertFailure "insert operation returned multiple rows"
+
     ListConversations -> do
         rows <- PG.query_ (listConversationsQuery tableName)
         pure $ map (\(Only cid) -> cid) rows
@@ -92,30 +95,14 @@ insertMessage
     => ConversationsTable
     -> ConversationId
     -> ChatMsg
-    -> Eff es UUID
+    -> Eff es [StoredMsg]
 insertMessage tableName conversationId msg = do
-    messageId <- liftIO nextRandom
-    void $
-        PG.execute
+    r <-
+        PG.returning
             (insertMessageQuery tableName)
-            (messageId, conversationId, msg)
-    pure messageId
+            [(conversationId, msg)]
+    pure $ (\(a,b,c) -> StoredMsg a b c) <$> r
 
-insertMessageIfConversationExists
-    :: ( WithConnection :> es
-       , IOE :> es
-       )
-    => ConversationsTable
-    -> ConversationId
-    -> ChatMsg
-    -> Eff es (Maybe UUID)
-insertMessageIfConversationExists tableName conversationId msg = do
-    messageId <- liftIO nextRandom
-    inserted <-
-        PG.execute
-            (insertMessageIfExistsQuery tableName)
-            (messageId, conversationId, msg, conversationId)
-    pure $ if inserted > 0 then Just messageId else Nothing
 
 setupTable
     :: ( IOE :> es
@@ -134,8 +121,7 @@ createTableQuery tableName =
         $ "CREATE TABLE IF NOT EXISTS "
         <> tableName
             <> " ("
-            <> "id SERIAL PRIMARY KEY, "
-            <> "message_id UUID NOT NULL UNIQUE, "
+            <> "message_id UUID PRIMARY KEY DEFAULT gen_random_uuid(), "
             <> "conversation_id UUID NOT NULL, "
             <> "message JSONB NOT NULL, "
             <> "created_at timestamp with time zone NOT NULL DEFAULT now()"
@@ -147,20 +133,8 @@ insertMessageQuery tableName =
         $ toString
         $ "INSERT INTO "
         <> tableName
-            <> " (message_id, conversation_id, message) VALUES (?, ?, ?)"
-
-insertMessageIfExistsQuery :: ConversationsTable -> Query
-insertMessageIfExistsQuery tableName =
-    fromString
-        $ toString
-        $ "INSERT INTO "
-        <> tableName
-            <> " (message_id, conversation_id, message) "
-            <> "SELECT ?, ?, ? WHERE EXISTS ("
-            <> "SELECT 1 FROM "
-            <> tableName
-            <> " WHERE conversation_id = ? LIMIT 1"
-            <> ")"
+            <> " (conversation_id, message) VALUES (?, ?)"
+        <> "RETURNING message, message_id, created_at"
 
 deleteConversationQuery :: ConversationsTable -> Query
 deleteConversationQuery tableName =
@@ -176,7 +150,7 @@ selectMessagesQuery tableName =
         $ toString
         $ "SELECT message_id, conversation_id, message, created_at FROM "
         <> tableName
-            <> " WHERE conversation_id = ? ORDER BY created_at ASC, id ASC"
+            <> " WHERE conversation_id = ? ORDER BY created_at ASC"
 
 listConversationsQuery :: ConversationsTable -> Query
 listConversationsQuery tableName =

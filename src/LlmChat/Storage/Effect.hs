@@ -15,7 +15,7 @@ data LlmChatStorage :: Effect where
     CreateConversation :: SystemPrompt -> LlmChatStorage m ConversationId
     DeleteConversation :: ConversationId -> LlmChatStorage m ()
     GetStoredConversation :: ConversationId -> LlmChatStorage m [StoredMsg]
-    AppendMessage :: ConversationId -> ChatMsg -> LlmChatStorage m ()
+    AppendMessage :: ConversationId -> ChatMsg -> LlmChatStorage m StoredMsg
     ListConversations :: LlmChatStorage m [ConversationId]
 
 data StoredMsg = StoredMsg
@@ -38,11 +38,12 @@ appendUserMessage
     :: LlmChatStorage :> es
     => ConversationId
     -> Text
-    -> Eff es ()
+    -> Eff es StoredMsg
 appendUserMessage convId content = do
     let userMsgIn = UserMsg{content}
     appendMessage convId userMsgIn
 
 data ChatStorageError
     = NoSuchConversation ConversationId
+    | InsertFailure String
     deriving stock (Show, Eq)

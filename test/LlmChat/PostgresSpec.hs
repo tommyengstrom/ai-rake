@@ -100,8 +100,8 @@ postgresStorageBehaviourSpec pool conversationsTable =
                         $ do
                             convId <- createConversation systemPrompt
                             conv <- getConversation convId
-                            appendUserMessage convId userPrompt1
-                            appendUserMessage convId userPrompt2
+                            _ <- appendUserMessage convId userPrompt1
+                            _ <- appendUserMessage convId userPrompt2
                             (conv,) <$> getConversation convId
                 liftIO $ length beforeAppend + 2 `shouldBe` length afterAppend
                 liftIO $

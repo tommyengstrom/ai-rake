@@ -108,6 +108,7 @@ library
       LlmChat.Providers.OpenAI.ChatCompletion
       LlmChat.Storage.Effect
       LlmChat.Storage.InMemory
+      LlmChat.WithStorage
       LlmChat.Storage.Postgres
       LlmChat.Tool
       LlmChat.Types
@@ -127,7 +128,6 @@ test-suite llmchat-effectful-test
   main-is: Main.hs
   other-modules:
       LlmChat.PostgresLoggerSpec
-      LlmChat.PostgresPoolSpec
       LlmChat.PostgresSpec
       LlmChat.Provider.GoogleSpec
       LlmChat.Provider.OpenAISpec

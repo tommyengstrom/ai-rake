@@ -125,6 +125,7 @@ executeToolCalls tools toolCalls = do
                 , toolResponse = response
                 }
 
+
 respondWithToolsSourceIO
     :: forall es
      . ( Error LlmChatError :> es
@@ -152,20 +153,36 @@ respondWithToolsStepT
     -> [ToolDef es]
     -> [ChatMsg]
     -> StepT (Eff es) ChatMsg
-respondWithToolsStepT responseFormat tools conversation = Effect do
+respondWithToolsStepT = respondWithToolsStepT' pure
+
+-- | Tool loop implemented as a Servant stream of ChatMsgs
+respondWithToolsStepT'
+    :: forall es a
+     . ( Error LlmChatError :> es
+       , LlmChat :> es
+       )
+    => (ChatMsg -> Eff es a)
+    -> ResponseFormat
+    -> [ToolDef es]
+    -> [ChatMsg]
+    -> StepT (Eff es) a
+respondWithToolsStepT' writeResponse responseFormat tools conversation = Effect do
     response <- getLlmResponse (toToolDeclaration <$> tools) responseFormat conversation
-    pure $ Yield response $ Effect do
+    r <- writeResponse response
+    pure $ Yield r $ Effect do
         case response of
             -- Tool calls - execute them and continue
             AssistantMsg{toolCalls} | not (null toolCalls) -> do
                 toolCallResponseMsgs <- executeToolCalls tools toolCalls
-                let nextLlmCall :: StepT (Eff es) ChatMsg
+                rs <- traverse writeResponse toolCallResponseMsgs
+                let nextLlmCall :: StepT (Eff es) a
                     nextLlmCall =
-                        respondWithToolsStepT
+                        respondWithToolsStepT'
+                            writeResponse
                             responseFormat
                             tools
                             (conversation <> [response] <> toolCallResponseMsgs)
-                pure $ L.foldr Yield nextLlmCall toolCallResponseMsgs
+                pure $ L.foldr Yield nextLlmCall rs
             _ -> pure Stop
   where
     toToolDeclaration tool =
@@ -175,34 +192,3 @@ respondWithToolsStepT responseFormat tools conversation = Effect do
             , parameterSchema = tool ^. #parameterSchema
             }
 
-withStorage
-    :: ( HasCallStack
-       , LlmChatStorage :> es
-       )
-    => ([ChatMsg] -> Eff es [ChatMsg])
-    -> ConversationId
-    -> Eff es [ChatMsg]
-withStorage = withStorageBy id
-
-withStorageStructured
-    :: ( HasCallStack
-       , LlmChatStorage :> es
-       )
-    => ([ChatMsg] -> Eff es ([ChatMsg], a))
-    -> ConversationId
-    -> Eff es ([ChatMsg], a)
-withStorageStructured = withStorageBy fst
-
-withStorageBy
-    :: ( HasCallStack
-       , LlmChatStorage :> es
-       )
-    => (a -> [ChatMsg])
-    -> ([ChatMsg] -> Eff es a)
-    -> ConversationId
-    -> Eff es a
-withStorageBy extract action convId = do
-    conversation <- getConversation convId
-    result <- action conversation
-    traverse_ (appendMessage convId) (extract result)
-    pure result
