@@ -166,23 +166,23 @@ respondWithToolsStepT'
     -> [ToolDef es]
     -> [ChatMsg]
     -> StepT (Eff es) a
-respondWithToolsStepT' writeResponse responseFormat tools conversation = Effect do
+respondWithToolsStepT' persistResponse responseFormat tools conversation = Effect do
     response <- getLlmResponse (toToolDeclaration <$> tools) responseFormat conversation
-    r <- writeResponse response
-    pure $ Yield r $ Effect do
+    storedResponse <- persistResponse response
+    pure $ Yield storedResponse $ Effect do
         case response of
             -- Tool calls - execute them and continue
-            AssistantMsg{toolCalls} | null toolCalls -> do
-                toolCallResponseMsgs <- traverse (executeToolCall tools) toolCalls
-                toolResponses <- traverse writeResponse toolCallResponseMsgs
+            AssistantMsg{toolCalls} | not (null toolCalls) -> do
+                toolResponses <- traverse (executeToolCall tools) toolCalls
+                persistedToolResponses <- traverse persistResponse toolResponses
                 let nextLlmCall :: StepT (Eff es) a
                     nextLlmCall =
                         respondWithToolsStepT'
-                            writeResponse
+                            persistResponse
                             responseFormat
                             tools
-                            (conversation <> [response] <> toolCallResponseMsgs)
-                pure $ L.foldr Yield nextLlmCall toolResponses
+                            (conversation <> [response] <> toolResponses)
+                pure $ L.foldr Yield nextLlmCall persistedToolResponses
             a -> do
                 traceM "Oh fuck, I thought this would always be 'AssisantMsg' but we got:"
                 traceShowM a
