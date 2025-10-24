@@ -18,8 +18,7 @@ import LlmChat.Effect as X
 import LlmChat.Storage.Effect as X
 import LlmChat.Tool as X
 import LlmChat.Types as X
-import Relude hiding (traceM, traceShowM)
-import Debug.Trace (traceM, traceShowM)
+import Relude
 import Servant.API (SourceIO)
 import Servant.Types.SourceT
 
@@ -103,28 +102,26 @@ respondWithTools' responseFormat tools conversation = do
                     <> show msg
         [] -> throwError $ LlmExpectationError "Assistant returned no messages"
 
-
 executeToolCall
     :: [ToolDef es]
     -> ToolCall
     -> Eff es ChatMsg
 executeToolCall tools tc = do
-        response <- case find (\t -> t ^. #name == tc ^. #toolName) tools of
-            Nothing ->
-                pure . ToolResponse $ "Tool not found: " <> tc ^. #toolName
-            Just tool -> do
-                let args = Object (KM.fromMap (Map.mapKeys fromText (tc ^. #toolArgs)))
-                result <- tool ^. #executeFunction $ args
-                case result of
-                    Right resp -> pure resp
-                    Left err ->
-                        pure . ToolResponse $ "Tool error: " <> Text.pack err
-        pure $
-            ToolResponseMsg
-                { toolCallId = tc ^. #toolCallId
-                , toolResponse = response
-                }
-
+    response <- case find (\t -> t ^. #name == tc ^. #toolName) tools of
+        Nothing ->
+            pure . ToolResponse $ "Tool not found: " <> tc ^. #toolName
+        Just tool -> do
+            let args = Object (KM.fromMap (Map.mapKeys fromText (tc ^. #toolArgs)))
+            result <- tool ^. #executeFunction $ args
+            case result of
+                Right resp -> pure resp
+                Left err ->
+                    pure . ToolResponse $ "Tool error: " <> Text.pack err
+    pure $
+        ToolResponseMsg
+            { toolCallId = tc ^. #toolCallId
+            , toolResponse = response
+            }
 
 respondWithToolsSourceIO
     :: forall es
@@ -169,24 +166,23 @@ respondWithToolsStepT'
 respondWithToolsStepT' persistResponse responseFormat tools conversation = Effect do
     response <- getLlmResponse (toToolDeclaration <$> tools) responseFormat conversation
     storedResponse <- persistResponse response
-    pure $ Yield storedResponse $ Effect do
-        case response of
-            -- Tool calls - execute them and continue
-            AssistantMsg{toolCalls} | not (null toolCalls) -> do
-                toolResponses <- traverse (executeToolCall tools) toolCalls
-                persistedToolResponses <- traverse persistResponse toolResponses
-                let nextLlmCall :: StepT (Eff es) a
-                    nextLlmCall =
-                        respondWithToolsStepT'
-                            persistResponse
-                            responseFormat
-                            tools
-                            (conversation <> [response] <> toolResponses)
-                pure $ L.foldr Yield nextLlmCall persistedToolResponses
-            a -> do
-                traceM "Oh fuck, I thought this would always be 'AssisantMsg' but we got:"
-                traceShowM a
-                pure Stop
+    pure
+        . Yield storedResponse -- Always yield the llm response
+        $ Effect do
+            case response of
+                -- Tool calls - execute them and continue
+                AssistantMsg{toolCalls} | not (null toolCalls) -> do
+                    toolResponses <- traverse (executeToolCall tools) toolCalls
+                    persistedToolResponses <- traverse persistResponse toolResponses
+                    let nextLlmCall :: StepT (Eff es) a
+                        nextLlmCall =
+                            respondWithToolsStepT'
+                                persistResponse
+                                responseFormat
+                                tools
+                                (conversation <> [response] <> toolResponses)
+                    pure $ L.foldr Yield nextLlmCall persistedToolResponses
+                _ -> pure Stop -- If there were no tool calls we're done
   where
     toToolDeclaration tool =
         ToolDeclaration
@@ -194,4 +190,3 @@ respondWithToolsStepT' persistResponse responseFormat tools conversation = Effec
             , description = tool ^. #description
             , parameterSchema = tool ^. #parameterSchema
             }
-
