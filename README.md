@@ -1,54 +1,40 @@
 # llmchat-effectful
 
-A Haskell library for building chat completion systems with OpenAI integration, persistent storage, and tool calling support.
+A Haskell library for provider-agnostic LLM chat with local tool execution, Effectful integration, and storage backends.
 
-## Design Goals
-
-- **Easy to use**: Simple, intuitive API that makes chat completion straightforward
-- **Leverage Effectful**: Built on modern Haskell effect system for composable, testable code
-- **Practical**: Focused on real-world use cases with essential features
-
-## Features
-
-- **Chat Completion API**: High-level interface for conversational AI applications
-- **Tool Calling**: Define and execute tools with JSON schema validation
-- **Persistent Storage**: PostgreSQL and in-memory storage backends
-- **OpenAI Integration**: Direct integration with OpenAI's chat completion API
-- **Effect System**: Built on Effectful for composable, testable code
-- **Response Logging**: Optional logging of OpenAI responses for debugging
-
-
-### Basic Usage
+## Basic Usage
 
 ```haskell
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE OverloadedStrings #-}
 
-import LlmChat
-import LlmChat.OpenAI
-import LlmChat.Storage.InMemory
 import Effectful
+import Effectful.Concurrent
 import Effectful.Error.Static
+import LlmChat
+import LlmChat.Providers.OpenAI.Responses
 
 main :: IO ()
-main = runEff $ do
-  runErrorNoCallStackWith (error . show) $ do
-    runLlmChatStorageInMemory $ do
-      runErrorNoCallStackWith (error . show) $ do
-        runLlmChatOpenAi settings [] $ do
-          -- Create a conversation with system prompt
-          convId <- createConversation "You are a helpful assistant"
-          
-          -- Add user message and get response
-          appendUserMessage convId "Hello! What's 2+2?"
-          response <- respondToConversation convId
-          
-          liftIO $ print response
+main = do
+  apiKey <- getEnvText "OPENAI_API_KEY"
+  runEff
+    . runConcurrent
+    . runErrorNoCallStackWith @LlmChatError (error . show)
+    $ runLlmChatOpenAIResponses (defaultOpenAIResponsesSettings apiKey) do
+        newItems <-
+          chat
+            defaultChatConfig
+            [ system "You are a helpful assistant."
+            , user "What is 2 + 2?"
+            ]
+
+        print (lastAssistantText newItems)
 ```
 
-See [examples/Main.hs](examples/Main.hs) for complete working examples including simple conversation, calculator, and tool calling.
+## Current Scope
 
+- Canonical conversations are `[HistoryItem]`
+- Generic chat entrypoint is `chat`
+- Supported providers are OpenAI Responses and xAI Responses
+- Local storage backends support in-memory and PostgreSQL persistence
 
-## Contributing
-
-I've implemented the subset of features that I need. PRs for adding more features are welcome.
+The old `ChatMsg` API, Gemini integration, and the `openai` package dependency have been removed.

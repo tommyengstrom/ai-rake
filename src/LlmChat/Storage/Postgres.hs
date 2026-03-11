@@ -2,8 +2,6 @@
 
 module LlmChat.Storage.Postgres where
 
-import LlmChat.Storage.Effect
-import LlmChat.Types
 import Data.Aeson (Value, decode, encode, toJSON)
 import Data.Time (UTCTime)
 import Data.UUID (UUID)
@@ -18,9 +16,10 @@ import Effectful.Dispatch.Dynamic (interpret)
 import Effectful.Error.Static (Error, throwError)
 import Effectful.PostgreSQL (WithConnection)
 import Effectful.PostgreSQL qualified as PG
+import LlmChat.Storage.Effect
+import LlmChat.Types
 import Relude
 
--- | Convenience alias for the table storing conversations.
 type ConversationsTable = Text
 
 instance ToField ConversationId where
@@ -29,26 +28,26 @@ instance ToField ConversationId where
 instance FromField ConversationId where
     fromField f mdata = ConversationId <$> fromField f mdata
 
-instance ToField ChatMsg where
-    toField msg = toField (toJSON msg)
+instance ToField HistoryItem where
+    toField historyItem = toField (toJSON historyItem)
 
-instance FromField ChatMsg where
+instance FromField HistoryItem where
     fromField f mdata = do
         (value :: Value) <- fromField f mdata
         case decode (encode value) of
-            Just msg -> pure msg
-            Nothing -> returnError ConversionFailed f "Could not decode ChatMsg from JSON"
+            Just historyItem -> pure historyItem
+            Nothing -> returnError ConversionFailed f "Could not decode HistoryItem from JSON"
 
-data MessageRow = MessageRow
-    { messageId :: UUID
+data ItemRow = ItemRow
+    { storedItemId :: UUID
     , conversationId :: ConversationId
-    , message :: ChatMsg
+    , historyItem :: HistoryItem
     , createdAt :: UTCTime
     }
     deriving stock (Show, Eq, Generic)
 
-instance FromRow MessageRow where
-    fromRow = MessageRow <$> PG.field <*> PG.field <*> PG.field <*> PG.field
+instance FromRow ItemRow where
+    fromRow = ItemRow <$> PG.field <*> PG.field <*> PG.field <*> PG.field
 
 runLlmChatStoragePostgres
     :: forall es a
@@ -60,62 +59,65 @@ runLlmChatStoragePostgres
     -> Eff (LlmChatStorage ': es) a
     -> Eff es a
 runLlmChatStoragePostgres tableName = interpret $ \_ -> \case
-    CreateConversation systemPrompt -> do
+    CreateConversation -> do
         conversationId <- ConversationId <$> liftIO nextRandom
-        void $ insertMessage tableName conversationId (SystemMsg systemPrompt)
+        void $
+            PG.execute
+                (insertConversationQuery tableName)
+                (Only conversationId)
         pure conversationId
-    DeleteConversation conversationId -> do
-        void $ PG.execute (deleteConversationQuery tableName) (Only conversationId)
+    DeleteConversation conversationId ->
+        void $
+            PG.execute
+                (deleteConversationQuery tableName)
+                (Only conversationId)
     GetStoredConversation conversationId -> do
-        rows <- PG.query (selectMessagesQuery tableName) (Only conversationId)
-        case (rows :: [MessageRow]) of
-            [] -> throwError $ NoSuchConversation conversationId
-            _ -> pure $ map messageRowToStored rows
+        exists <- conversationExists tableName conversationId
+        unless exists $
+            throwError $ NoSuchConversation conversationId
+
+        rows <- PG.query (selectItemsQuery tableName) (Only conversationId)
+        pure (map itemRowToStoredItem (rows :: [ItemRow]))
       where
-        messageRowToStored MessageRow{message = rowMessage, messageId = rowMessageId, createdAt = rowCreatedAt} =
-            StoredMsg
-                { msg = rowMessage
-                , msgId = rowMessageId
-                , createdAt = rowCreatedAt
-                }
-    AppendMessage conversationId msgIn -> do
-        _ <- insertMessageIfConversationExists tableName conversationId msgIn
-        pure ()
+        itemRowToStoredItem ItemRow{storedItemId = itemId, historyItem = item, createdAt} =
+            StoredItem{itemId, item, createdAt}
+    AppendItem conversationId historyItem -> do
+        inserted <- insertItemIfConversationExists tableName conversationId historyItem
+        unless inserted $
+            throwError $ NoSuchConversation conversationId
     ListConversations -> do
         rows <- PG.query_ (listConversationsQuery tableName)
         pure $ map (\(Only cid) -> cid) rows
 
-insertMessage
+conversationExists
     :: ( WithConnection :> es
        , IOE :> es
        )
     => ConversationsTable
     -> ConversationId
-    -> ChatMsg
-    -> Eff es UUID
-insertMessage tableName conversationId msg = do
-    messageId <- liftIO nextRandom
-    void $
-        PG.execute
-            (insertMessageQuery tableName)
-            (messageId, conversationId, msg)
-    pure messageId
+    -> Eff es Bool
+conversationExists tableName conversationId = do
+    rows <-
+        PG.query
+            (selectConversationExistsQuery tableName)
+            (Only conversationId)
+    pure $ not (null (rows :: [Only ConversationId]))
 
-insertMessageIfConversationExists
+insertItemIfConversationExists
     :: ( WithConnection :> es
        , IOE :> es
        )
     => ConversationsTable
     -> ConversationId
-    -> ChatMsg
-    -> Eff es (Maybe UUID)
-insertMessageIfConversationExists tableName conversationId msg = do
-    messageId <- liftIO nextRandom
+    -> HistoryItem
+    -> Eff es Bool
+insertItemIfConversationExists tableName conversationId item = do
+    itemId <- liftIO nextRandom
     inserted <-
         PG.execute
-            (insertMessageIfExistsQuery tableName)
-            (messageId, conversationId, msg, conversationId)
-    pure $ if inserted > 0 then Just messageId else Nothing
+            (insertItemIfExistsQuery tableName)
+            (itemId, conversationId, item, conversationId)
+    pure (inserted > 0)
 
 setupTable
     :: ( IOE :> es
@@ -124,73 +126,102 @@ setupTable
     => ConversationsTable
     -> Eff es ()
 setupTable tableName = PG.withTransaction do
-    void $ PG.execute_ (createTableQuery tableName)
-    void $ PG.execute_ (createIndexQuery tableName)
+    void $ PG.execute_ (createConversationsTableQuery tableName)
+    void $ PG.execute_ (createItemsTableQuery tableName)
+    void $ PG.execute_ (createItemsIndexQuery tableName)
 
-createTableQuery :: ConversationsTable -> Query
-createTableQuery tableName =
+conversationTableName :: ConversationsTable -> Text
+conversationTableName tableName = tableName <> "_conversations"
+
+itemsTableName :: ConversationsTable -> Text
+itemsTableName tableName = tableName <> "_items"
+
+createConversationsTableQuery :: ConversationsTable -> Query
+createConversationsTableQuery tableName =
     fromString
         $ toString
         $ "CREATE TABLE IF NOT EXISTS "
-        <> tableName
-            <> " ("
-            <> "id SERIAL PRIMARY KEY, "
-            <> "message_id UUID NOT NULL UNIQUE, "
-            <> "conversation_id UUID NOT NULL, "
-            <> "message JSONB NOT NULL, "
-            <> "created_at timestamp with time zone NOT NULL DEFAULT now()"
-            <> ")"
+        <> conversationTableName tableName
+        <> " ("
+        <> "conversation_id UUID PRIMARY KEY, "
+        <> "created_at timestamp with time zone NOT NULL DEFAULT now()"
+        <> ")"
 
-insertMessageQuery :: ConversationsTable -> Query
-insertMessageQuery tableName =
+createItemsTableQuery :: ConversationsTable -> Query
+createItemsTableQuery tableName =
+    fromString
+        $ toString
+        $ "CREATE TABLE IF NOT EXISTS "
+        <> itemsTableName tableName
+        <> " ("
+        <> "id SERIAL PRIMARY KEY, "
+        <> "item_id UUID NOT NULL UNIQUE, "
+        <> "conversation_id UUID NOT NULL REFERENCES "
+        <> conversationTableName tableName
+        <> " (conversation_id) ON DELETE CASCADE, "
+        <> "item JSONB NOT NULL, "
+        <> "created_at timestamp with time zone NOT NULL DEFAULT now()"
+        <> ")"
+
+insertConversationQuery :: ConversationsTable -> Query
+insertConversationQuery tableName =
     fromString
         $ toString
         $ "INSERT INTO "
-        <> tableName
-            <> " (message_id, conversation_id, message) VALUES (?, ?, ?)"
+        <> conversationTableName tableName
+        <> " (conversation_id) VALUES (?)"
 
-insertMessageIfExistsQuery :: ConversationsTable -> Query
-insertMessageIfExistsQuery tableName =
+insertItemIfExistsQuery :: ConversationsTable -> Query
+insertItemIfExistsQuery tableName =
     fromString
         $ toString
         $ "INSERT INTO "
-        <> tableName
-            <> " (message_id, conversation_id, message) "
-            <> "SELECT ?, ?, ? WHERE EXISTS ("
-            <> "SELECT 1 FROM "
-            <> tableName
-            <> " WHERE conversation_id = ? LIMIT 1"
-            <> ")"
+        <> itemsTableName tableName
+        <> " (item_id, conversation_id, item) "
+        <> "SELECT ?, ?, ? WHERE EXISTS ("
+        <> "SELECT 1 FROM "
+        <> conversationTableName tableName
+        <> " WHERE conversation_id = ?"
+        <> ")"
 
 deleteConversationQuery :: ConversationsTable -> Query
 deleteConversationQuery tableName =
     fromString
         $ toString
         $ "DELETE FROM "
-        <> tableName
-            <> " WHERE conversation_id = ?"
+        <> conversationTableName tableName
+        <> " WHERE conversation_id = ?"
 
-selectMessagesQuery :: ConversationsTable -> Query
-selectMessagesQuery tableName =
+selectConversationExistsQuery :: ConversationsTable -> Query
+selectConversationExistsQuery tableName =
     fromString
         $ toString
-        $ "SELECT message_id, conversation_id, message, created_at FROM "
-        <> tableName
-            <> " WHERE conversation_id = ? ORDER BY created_at ASC, id ASC"
+        $ "SELECT conversation_id FROM "
+        <> conversationTableName tableName
+        <> " WHERE conversation_id = ?"
+
+selectItemsQuery :: ConversationsTable -> Query
+selectItemsQuery tableName =
+    fromString
+        $ toString
+        $ "SELECT item_id, conversation_id, item, created_at FROM "
+        <> itemsTableName tableName
+        <> " WHERE conversation_id = ? ORDER BY created_at ASC, id ASC"
 
 listConversationsQuery :: ConversationsTable -> Query
 listConversationsQuery tableName =
     fromString
         $ toString
-        $ "SELECT DISTINCT conversation_id FROM "
-        <> tableName
+        $ "SELECT conversation_id FROM "
+        <> conversationTableName tableName
+        <> " ORDER BY created_at ASC"
 
-createIndexQuery :: ConversationsTable -> Query
-createIndexQuery tableName =
+createItemsIndexQuery :: ConversationsTable -> Query
+createItemsIndexQuery tableName =
     fromString
         $ toString
         $ "CREATE INDEX IF NOT EXISTS idx_"
-        <> tableName
-            <> "_conversation_id ON "
-            <> tableName
-            <> " (conversation_id)"
+        <> itemsTableName tableName
+        <> "_conversation_id ON "
+        <> itemsTableName tableName
+        <> " (conversation_id)"

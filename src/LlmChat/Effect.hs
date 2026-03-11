@@ -3,24 +3,21 @@ module LlmChat.Effect
     , module LlmChat.Error
     ) where
 
-import LlmChat.Error
-import LlmChat.Types
+import Data.Aeson (Value)
+import Data.Text (Text)
 import Effectful
 import Effectful.TH
-import Data.Aeson (Value)
 import GHC.Generics (Generic)
+import LlmChat.Error
+import LlmChat.Types
 import Servant.Client (ClientError)
 
 data LlmChat :: Effect where
-    -- Send messages to the LLM and get a single response
-    -- The response could be an assistant message or tool calls
     GetLlmResponse
         :: [ToolDeclaration]
-        -- ^ Available tools for this request
         -> ResponseFormat
-        -> [ChatMsg]
-        -> LlmChat m ChatMsg
-        -- ^ Single response message, can be tool call that requires resolving.
+        -> [HistoryItem]
+        -> LlmChat m [HistoryItem]
 
 makeEffect ''LlmChat
 
@@ -28,4 +25,5 @@ data NativeMsgFormat
     = NativeMsgOut Value
     | NativeMsgIn Value
     | NativeRequestFailure ClientError
+    | NativeConversionNote Text
     deriving stock (Generic)

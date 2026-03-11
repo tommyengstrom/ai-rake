@@ -59,13 +59,13 @@ common shared_opts
     -Wno-missing-local-signatures
     -Wno-missing-safe-haskell-mode
     -Wno-prepositive-qualified-module
-    -Wno-safe 
-    -Wno-unsafe 
-    -Wno-missing-kind-signatures 
-    -Wno-missing-poly-kind-signatures 
-    -Wno-monomorphism-restriction 
-    -Wno-missing-role-annotations 
-    -Wno-partial-fields 
+    -Wno-safe
+    -Wno-unsafe
+    -Wno-missing-kind-signatures
+    -Wno-missing-poly-kind-signatures
+    -Wno-monomorphism-restriction
+    -Wno-missing-role-annotations
+    -Wno-partial-fields
     -Wno-unused-packages
 
   build-depends:
@@ -79,7 +79,6 @@ common shared_opts
     , http-types
     , lens
     , monad-time-effectful
-    , openai
     , openapi3
     , servant-client
     , postgresql-simple
@@ -96,21 +95,19 @@ library
     , effectful-core (Effectful.Internal.Monad)
   exposed-modules:
       LlmChat
-      LlmChat.ChatMsg
       LlmChat.Effect
       LlmChat.Error
       LlmChat.PostgresLogger
-      LlmChat.Providers.Google
-      LlmChat.Providers.Google.API
-      LlmChat.Providers.Google.Convert
-      LlmChat.Providers.Google.Types
-      LlmChat.Providers.OpenAI.ChatCompletion
+      LlmChat.Providers.OpenAI.Responses
+      LlmChat.Providers.XAI.Responses
       LlmChat.Storage.Effect
       LlmChat.Storage.InMemory
       LlmChat.Storage.Postgres
       LlmChat.Tool
       LlmChat.Types
-      Effectful.OpenAI
+  other-modules:
+      LlmChat.Providers.Responses.Internal
+      LlmChat.Internal.Schema
   hs-source-dirs: src
   build-depends:
     , http-api-data
@@ -128,9 +125,11 @@ test-suite llmchat-effectful-test
       LlmChat.PostgresLoggerSpec
       LlmChat.PostgresPoolSpec
       LlmChat.PostgresSpec
-      LlmChat.Provider.GoogleSpec
       LlmChat.Provider.OpenAISpec
+      LlmChat.Provider.ResponsesRenderSpec
+      LlmChat.Provider.XAISpec
       LlmChat.Storage.InMemorySpec
+      LlmChat.TypesSpec
       ProviderAgnosticTests
   hs-source-dirs: test
   ghc-options: -threaded -rtsopts -with-rtsopts=-N

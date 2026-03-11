@@ -2,19 +2,17 @@
 
 module LlmChat.Storage.InMemory where
 
-import Data.Map (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe
 import Data.UUID.V4 (nextRandom)
 import Effectful
 import Effectful.Concurrent
-import Effectful.Concurrent.STM
+import Effectful.Concurrent.STM qualified as STM
 import Effectful.Dispatch.Dynamic
 import Effectful.Error.Static
 import Effectful.Time
 import LlmChat.Storage.Effect
 import LlmChat.Types
-import Prelude
+import Relude
 
 runLlmChatStorageInMemory
     :: forall es a
@@ -26,30 +24,38 @@ runLlmChatStorageInMemory
     => Eff (LlmChatStorage ': es) a
     -> Eff es a
 runLlmChatStorageInMemory eff = do
-    tvar <- newTVarIO (mempty :: Map ConversationId [StoredMsg])
+    tvar <- STM.newTVarIO (mempty :: Map.Map ConversationId [StoredItem])
     interpretWith eff \_ -> \case
-        CreateConversation systemPrompt -> do
+        CreateConversation -> do
             conversationId <- ConversationId <$> liftIO nextRandom
-            storedMsg <- mkStoredMsg $ SystemMsg systemPrompt
-            atomically $
-                modifyTVar' tvar (Map.insert conversationId [storedMsg])
+            STM.atomically $
+                STM.modifyTVar' tvar (Map.insert conversationId [])
             pure conversationId
-        DeleteConversation conversationId -> do
-            atomically $ modifyTVar' tvar (Map.delete conversationId)
+        DeleteConversation conversationId ->
+            STM.atomically $
+                STM.modifyTVar' tvar (Map.delete conversationId)
         GetStoredConversation conversationId -> do
-            conversations <- readTVarIO tvar
-            let conv = Map.lookup conversationId conversations
-            case conv of
+            conversations <- STM.readTVarIO tvar
+            case Map.lookup conversationId conversations of
                 Nothing -> throwError $ NoSuchConversation conversationId
-                Just c -> pure c
-        AppendMessage conversationId msg -> do
-            storedMsg <- mkStoredMsg msg
-            atomically $ modifyTVar' tvar $ Map.adjust (<> [storedMsg]) conversationId
-        ListConversations -> do
-            conversations <- readTVarIO tvar
-            pure $ Map.keys conversations
+                Just conversation -> pure conversation
+        AppendItem conversationId historyItem -> do
+            storedItem <- mkStoredItem historyItem
+            inserted <- STM.atomically do
+                conversations <- STM.readTVar tvar
+                case Map.lookup conversationId conversations of
+                    Nothing -> pure False
+                    Just conversation -> do
+                        STM.writeTVar tvar $
+                            Map.insert conversationId (conversation <> [storedItem]) conversations
+                        pure True
+
+            unless inserted $
+                throwError $ NoSuchConversation conversationId
+        ListConversations ->
+            Map.keys <$> STM.readTVarIO tvar
   where
-    mkStoredMsg msg = do
+    mkStoredItem item = do
         createdAt <- currentTime
-        msgId <- liftIO nextRandom
-        pure StoredMsg{..}
+        itemId <- liftIO nextRandom
+        pure StoredItem{..}

@@ -1,4 +1,4 @@
-module LlmChat.Provider.OpenAISpec where
+module LlmChat.Provider.XAISpec where
 
 import Data.Text qualified as T
 import Effectful
@@ -6,7 +6,7 @@ import Effectful.Concurrent
 import Effectful.Error.Static
 import Effectful.Time
 import LlmChat
-import LlmChat.Providers.OpenAI.Responses
+import LlmChat.Providers.XAI.Responses
 import LlmChat.Storage.InMemory
 import ProviderAgnosticTests
 import Relude
@@ -26,23 +26,23 @@ runEffectStack
         a
     -> IO a
 runEffectStack apiKey action = do
-    let settings = defaultOpenAIResponsesSettings apiKey
+    let settings = defaultXAIResponsesSettings apiKey
     runEff
         . runConcurrent
         . runTime
         . runErrorNoCallStackWith (error . show)
         . runErrorNoCallStackWith (error . show)
         . runLlmChatStorageInMemory
-        $ runLlmChatOpenAIResponses settings action
+        $ runLlmChatXAIResponses settings action
 
 spec :: Spec
 spec = do
-    maybeApiKey <- runIO (lookupEnv "OPENAI_API_KEY")
+    maybeApiKey <- runIO (lookupEnv "XAI_API_KEY")
     case maybeApiKey of
         Nothing ->
-            describe "LlmChat Provider - OpenAI" $
-                it "requires OPENAI_API_KEY" $
-                    pendingWith "Set OPENAI_API_KEY to run OpenAI integration tests."
+            describe "LlmChat Provider - xAI" $
+                it "requires XAI_API_KEY" $
+                    pendingWith "Set XAI_API_KEY to run xAI integration tests."
         Just apiKey ->
-            describe "LlmChat Provider - OpenAI" $
+            describe "LlmChat Provider - xAI" $
                 specWithProvider (runEffectStack (T.pack apiKey))

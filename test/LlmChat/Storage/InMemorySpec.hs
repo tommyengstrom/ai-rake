@@ -2,9 +2,6 @@
 
 module LlmChat.Storage.InMemorySpec where
 
-import LlmChat.Storage.Effect
-import LlmChat.Storage.InMemory
-import LlmChat.Types
 import Control.Lens (folded, reversed, taking, (^..))
 import Data.Generics.Product
 import Data.Generics.Sum
@@ -12,13 +9,16 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.UUID
 import Effectful
+import Effectful.Concurrent (Concurrent, runConcurrent)
 import Effectful.Error.Static
 import Effectful.Time
+import LlmChat.Storage.Effect
+import LlmChat.Storage.InMemory
+import LlmChat.Types
 import Relude
 import Test.Hspec
 import Test.QuickCheck
 import Test.QuickCheck.Monadic
-import Effectful.Concurrent (Concurrent, runConcurrent)
 
 instance Arbitrary ConversationId where
     arbitrary =
@@ -46,11 +46,13 @@ runEffStack =
 
 data SomeText = SomeText Text
     deriving stock (Show, Generic)
+
 instance Arbitrary SomeText where
     arbitrary = SomeText . T.pack <$> listOf (choose ('a', 'z'))
+
 spec :: Spec
 spec =
-    describe "runLlmChatStorageInMemory" $ do
+    describe "runLlmChatStorageInMemory" $
         specGeneralized runLlmChatStorageInMemory
 
 specGeneralized
@@ -74,44 +76,62 @@ specGeneralized runStorage = do
                         . runStorage
                         $ getConversation convId
                 liftIO $ result `shouldBe` Left (NoSuchConversation convId)
-        it "Can retreive conversation after creating it" $ do
-            property $ \(SomeText systemPrompt) -> monadicIO $ do
+
+        it "Creates an empty conversation" $ do
+            monadicIO $ do
                 Right conv <- run . runEffStack $ runStorage do
-                    convId <- createConversation systemPrompt
+                    convId <- createConversation
                     getConversation convId
-                liftIO do
-                    length conv `shouldBe` 1
-                    conv ^.. folded . _Ctor @"SystemMsg" . typed @Text
-                        `shouldBe` [systemPrompt]
+                liftIO $ conv `shouldBe` []
+
         it "Lists more conversation after creating one" $ do
-            property $ \(SomeText systemPrompt) -> monadicIO $ do
+            property $ monadicIO $ do
                 Right (listBefore, convId, listAfter) <- run
                     . runEffStack
                     $ runStorage do
                         listBefore <- listConversations
-                        convId <- createConversation systemPrompt
-                        (listBefore,convId,) <$> listConversations
+                        convId <- createConversation
+                        (listBefore, convId,) <$> listConversations
                 liftIO $
                     Set.difference (Set.fromList listAfter) (Set.fromList listBefore)
                         `shouldBe` [convId]
-        it "AppendMessage adds messages to the end of the conversation" $
+
+        it "AppendItem adds items to the end of the conversation" $
             property \(SomeText systemPrompt) (SomeText userPrompt1) (SomeText userPrompt2) -> monadicIO do
                 Right (beforeAppend, afterAppend) <- run $ runEffStack $ runStorage $ do
-                    convId <- createConversation systemPrompt
+                    convId <- createConversation
                     conv <- getConversation convId
-                    appendUserMessage convId userPrompt1
-                    appendUserMessage convId userPrompt2
+                    appendItems convId [system systemPrompt, user userPrompt1, user userPrompt2]
                     (conv,) <$> getConversation convId
-                liftIO $ length beforeAppend + 2 `shouldBe` length afterAppend
+                liftIO $ length beforeAppend + 3 `shouldBe` length afterAppend
                 liftIO $
                     afterAppend
-                        ^.. reversed . taking 2 folded . _Ctor @"UserMsg" . typed @Text
+                        ^.. reversed . taking 2 folded . _Ctor @"HLocal" . _Ctor @"LocalUser" . typed @Text
                         `shouldBe` [userPrompt2, userPrompt1]
-        it "GetConversation errors if conversation does not exist" $ do
-            property $ \(convId :: ConversationId) -> monadicIO $ do
+
+        it "AppendItem errors if the conversation does not exist" $ do
+            property $ \(convId :: ConversationId) (SomeText prompt) -> monadicIO $ do
                 result <-
                     run
                         . runEffStack
                         . runStorage
-                        $ getConversation convId
+                        $ appendItem convId (user prompt)
                 liftIO $ result `shouldBe` Left (NoSuchConversation convId)
+
+        it "DeleteConversation removes the conversation" $ do
+            property $ monadicIO $ do
+                Right (convId, listAfterDelete, fetchResult) <- run
+                    . runEffStack
+                    $ runStorage do
+                        convId <- createConversation
+                        appendItem convId (user "hello")
+                        deleteConversation convId
+                        listAfterDelete <- listConversations
+                        fetchResult <-
+                            ( getConversation convId >>= \conversation -> pure (Right conversation)
+                            )
+                                `catchError` (\_ err -> pure (Left err :: Either ChatStorageError [HistoryItem]))
+                        pure (convId, listAfterDelete, fetchResult)
+
+                liftIO $ convId `shouldNotSatisfy` (`elem` listAfterDelete)
+                liftIO $ fetchResult `shouldBe` Left (NoSuchConversation convId)

@@ -1,5 +1,16 @@
 module LlmChat.PostgresLoggerSpec where
 
+import Control.Lens
+import Control.Exception (bracket, try)
+import Data.Aeson (Value, object, toJSON)
+import Data.Aeson qualified as Aeson
+import Data.Generics.Labels ()
+import Data.Time
+import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
+import Data.Text qualified as T
+import Data.UUID (UUID)
+import Data.UUID.V4 (nextRandom)
+import Database.PostgreSQL.Simple
 import LlmChat.PostgresLogger
     ( JsonField (..)
     , createTableQuery
@@ -7,120 +18,101 @@ import LlmChat.PostgresLogger
     , postgresResponseLogger
     )
 import LlmChat.Types (ConversationId (..))
-import Control.Lens
-import Data.Aeson (Result (..), Value, fromJSON, object, toJSON)
-import Data.Aeson qualified as Aeson
-import Data.Generics.Labels ()
-import Data.Time
-import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
-import Data.UUID.V4 (nextRandom)
-import Database.PostgreSQL.Simple
-import OpenAI.V1.Chat.Completions (ChatCompletionObject)
 import Relude
 import Test.Hspec
 
--- Create a simple test value that can be converted to ChatCompletionObject
-testChatCompletion :: ChatCompletionObject
-testChatCompletion =
-    case fromJSON testJson of
-        Success obj -> obj
-        Error err -> error $ toText $ "Failed to create test ChatCompletionObject: " <> err
-  where
-    testJson =
-        object
-            [ "id" Aeson..= ("test-id" :: Text)
-            , "object" Aeson..= ("chat.completion" :: Text)
-            , "created" Aeson..= (1234567890 :: Int)
-            , "model" Aeson..= ("gpt-4" :: Text)
-            , "choices" Aeson..= ([] :: [Value])
-            , "usage"
-                Aeson..= object
-                    [ "prompt_tokens" Aeson..= (10 :: Int)
-                    , "completion_tokens" Aeson..= (20 :: Int)
-                    , "total_tokens" Aeson..= (30 :: Int)
-                    ]
-            ]
+testResponse :: Value
+testResponse =
+    object
+        [ "id" Aeson..= ("test-id" :: Text)
+        , "object" Aeson..= ("response" :: Text)
+        , "model" Aeson..= ("gpt-4.1-mini" :: Text)
+        , "output" Aeson..= ([] :: [Value])
+        ]
 
 spec :: Spec
-spec = describe "PostgresLogger" $ do
+spec = do
     let connectionString = "host=localhost port=5432 user=postgres password=postgres dbname=chatcompletion-test"
-    let getConnection = connectPostgreSQL connectionString
+    postgresAvailable <- runIO (isRight <$> try @SomeException (withConnection connectionString (\_ -> pure ())))
 
-    describe "logs ChatCompletionObject to PostgreSQL as JSONB" $ do
-        -- Create a unique table name for this test
-        tableName <- runIO $ do
-            now <- getCurrentTime
-            let unixTime :: String = show $ (floor $ utcTimeToPOSIXSeconds now :: Integer)
-            pure $ "openai_logs_" <> toText unixTime <> "_test1"
+    if not postgresAvailable
+        then
+            describe "PostgresLogger" $
+                it "requires a local PostgreSQL test database" $
+                    pendingWith "PostgreSQL test database is unavailable."
+        else
+            describe "PostgresLogger" $ do
+                let getConnection = connectPostgreSQL connectionString
 
-        -- Setup and cleanup functions
-        let setupTable = do
-                conn <- getConnection
-                _ <- execute_ conn $ createTableQuery tableName
-                close conn
+                describe "logs JSON responses to PostgreSQL as JSONB" $ do
+                    tableName <- runIO uniqueTableName
 
-        let cleanup = do
-                conn <- getConnection
-                _ <- execute_ conn $ fromString $ toString $ "DROP TABLE IF EXISTS " <> tableName
-                close conn
+                    let setupTable = do
+                            conn <- getConnection
+                            _ <- execute_ conn $ createTableQuery tableName
+                            close conn
 
-        -- Clean up before tests, setup table, then run tests with cleanup after
-        runIO do
-            cleanup
-            setupTable
-        afterAll_ cleanup $ do
-            it "works correctly" $ do
-                -- Create a test conversation ID
-                testConvId <- ConversationId <$> nextRandom
-                -- Log the response
-                postgresResponseLogger tableName getConnection testConvId testChatCompletion
+                    let cleanup = do
+                            conn <- getConnection
+                            _ <- execute_ conn $ fromString $ toString $ "DROP TABLE IF EXISTS " <> tableName
+                            close conn
 
-                -- Verify it was logged
-                logs <- getAllLogs @ChatCompletionObject tableName getConnection
-                length logs `shouldBe` 1
+                    runIO do
+                        cleanup
+                        setupTable
+                    afterAll_ cleanup $ do
+                        it "works correctly" $ do
+                            testConvId <- ConversationId <$> nextRandom
+                            postgresResponseLogger tableName getConnection testConvId testResponse
 
-                case viaNonEmpty head logs of
-                    Nothing -> expectationFailure "Expected at least one log entry"
-                    Just logEntry -> do
-                        -- Verify the JSON was stored correctly
-                        case logEntry ^. #response of
-                            JsonField actualResponse -> toJSON actualResponse `shouldBe` toJSON testChatCompletion
-                        -- Verify the conversation ID was stored correctly
-                        (logEntry ^. #conversationId) `shouldBe` testConvId
-                        -- Verify timestamp is recent
-                        now <- getCurrentTime
-                        let logTime = logEntry ^. #createdAt
-                        diffUTCTime now logTime `shouldSatisfy` (< 10) -- Within 10 seconds
-    describe "can log multiple entries" $ do
-        -- Create a unique table name for this test
-        tableName <- runIO $ do
-            now <- getCurrentTime
-            let unixTime :: String = show $ (floor $ utcTimeToPOSIXSeconds now :: Integer)
-            pure $ "openai_logs_" <> toText unixTime <> "_test2"
+                            logs <- getAllLogs @Value tableName getConnection
+                            length logs `shouldBe` 1
 
-        -- Setup and cleanup functions
-        let setupTable = do
-                conn <- getConnection
-                _ <- execute_ conn $ createTableQuery tableName
-                close conn
+                            case viaNonEmpty head logs of
+                                Nothing ->
+                                    expectationFailure "Expected at least one log entry"
+                                Just logEntry -> do
+                                    case logEntry ^. #response of
+                                        JsonField actualResponse ->
+                                            toJSON actualResponse `shouldBe` testResponse
+                                    (logEntry ^. #conversationId) `shouldBe` testConvId
+                                    now <- getCurrentTime
+                                    let logTime = logEntry ^. #createdAt
+                                    diffUTCTime now logTime `shouldSatisfy` (< 10)
 
-        let cleanup = do
-                conn <- getConnection
-                _ <- execute_ conn $ fromString $ toString $ "DROP TABLE IF EXISTS " <> tableName
-                close conn
+                describe "can log multiple entries" $ do
+                    tableName <- runIO uniqueTableName
 
-        -- Clean up before tests, setup table, then run tests with cleanup after
-        runIO do
-            cleanup
-            setupTable
-        afterAll_ cleanup $ do
-            it "works correctly" $ do
-                -- Create test conversation IDs
-                testConvId1 <- ConversationId <$> nextRandom
-                testConvId2 <- ConversationId <$> nextRandom
-                -- Log twice
-                postgresResponseLogger tableName getConnection testConvId1 testChatCompletion
-                postgresResponseLogger tableName getConnection testConvId2 testChatCompletion
+                    let setupTable = do
+                            conn <- getConnection
+                            _ <- execute_ conn $ createTableQuery tableName
+                            close conn
 
-                logs <- getAllLogs @ChatCompletionObject tableName getConnection
-                length logs `shouldBe` 2
+                    let cleanup = do
+                            conn <- getConnection
+                            _ <- execute_ conn $ fromString $ toString $ "DROP TABLE IF EXISTS " <> tableName
+                            close conn
+
+                    runIO do
+                        cleanup
+                        setupTable
+                    afterAll_ cleanup $ do
+                        it "works correctly" $ do
+                            testConvId1 <- ConversationId <$> nextRandom
+                            testConvId2 <- ConversationId <$> nextRandom
+                            postgresResponseLogger tableName getConnection testConvId1 testResponse
+                            postgresResponseLogger tableName getConnection testConvId2 testResponse
+
+                            logs <- getAllLogs @Value tableName getConnection
+                            length logs `shouldBe` 2
+
+uniqueTableName :: IO Text
+uniqueTableName = do
+    now <- getCurrentTime
+    uuid <- nextRandom
+    let randomId = toText (show (uuid :: UUID) :: String)
+    let unixTime :: String = show $ (floor $ utcTimeToPOSIXSeconds now :: Integer)
+    pure $ "response_logs_" <> toText unixTime <> "_" <> T.replace "-" "_" randomId
+
+withConnection :: ByteString -> (Connection -> IO a) -> IO a
+withConnection connStr action = bracket (connectPostgreSQL connStr) close action

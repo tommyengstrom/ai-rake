@@ -1,36 +1,32 @@
 module LlmChat.Tool where
 
-import LlmChat.Types
-import Control.Lens
 import Data.Aeson
 import Data.Aeson.Key (fromText)
 import Data.Aeson.KeyMap qualified as KM
-import Data.Generics.Labels ()
 import Data.Map qualified as Map
-import Data.OpenApi
+import Data.OpenApi (ToSchema, toInlinedSchema)
 import Effectful
+import LlmChat.Internal.Schema (closeOpenObjectSchemas)
+import LlmChat.Types
 import Relude
 
 runTool
     :: ToolDef es
     -> Map Text Value
     -> Eff es (Either String ToolResponse)
-runTool tool args = do
-    -- Convert Map to JSON object
+runTool ToolDef{executeFunction} args = do
     let argsValue = Object (KM.fromMap (Map.mapKeys fromText args))
-    tool ^. #executeFunction $ argsValue
+    executeFunction argsValue
 
 defineToolNoArgument
-    :: forall es
-     . ToolName
+    :: ToolName
     -> ToolDescription
-    -> (Eff es (Either String ToolResponse))
-    -- ^ Function to execute the tool
+    -> Eff es (Either String ToolResponse)
     -> ToolDef es
-defineToolNoArgument name' description' executeFunction =
+defineToolNoArgument toolName toolDescription executeFunction =
     ToolDef
-        { name = name'
-        , description = description'
+        { name = toolName
+        , description = toolDescription
         , parameterSchema = Nothing
         , executeFunction = \_ -> executeFunction
         }
@@ -41,17 +37,17 @@ defineToolWithArgument
     => ToolName
     -> ToolDescription
     -> (a -> Eff es (Either String ToolResponse))
-    -- ^ Function to execute the tool
     -> ToolDef es
-defineToolWithArgument name' description' executeFunction =
+defineToolWithArgument toolName toolDescription executeFunction =
     ToolDef
-        { name = name'
-        , description = description'
+        { name = toolName
+        , description = toolDescription
         , parameterSchema =
-            Just . toJSON $ toInlinedSchema (Proxy @a)
-                & additionalProperties ?~ AdditionalPropertiesAllowed False
-        , executeFunction = \args -> do
+            Just . closeOpenObjectSchemas . toJSON $ toInlinedSchema (Proxy @a)
+        , executeFunction = \args ->
             case fromJSON args of
-                Error err -> pure $ Left $ "Failed to parse tool arguments: " <> err
-                Success val -> executeFunction val
+                Error err ->
+                    pure $ Left $ "Failed to parse tool arguments: " <> err
+                Success val ->
+                    executeFunction val
         }
