@@ -9,8 +9,15 @@
   outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = import nixpkgs { inherit system; };
-        haskellPackages = pkgs.haskell.packages.ghc9103;
+        pkgs = import nixpkgs {
+          inherit system;
+          config.allowBroken = true;  # needed because openai is marked broken
+        };
+        haskellPackages = pkgs.haskell.packages.ghc9103.override {
+          overrides = self: super: {
+            openai = pkgs.haskell.lib.dontCheck super.openai;
+          };
+        };
         llmchat-effectful = haskellPackages.callCabal2nix "llmchat-effectful" ./. { };
         libraryPath = pkgs.lib.makeLibraryPath [
           pkgs.libpq
