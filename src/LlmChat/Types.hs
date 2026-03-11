@@ -7,9 +7,13 @@ module LlmChat.Types
     , ToolCallId (..)
     , ToolCall (..)
     , ToolResponse (..)
+    , toolResponseText
+    , toolResponseJson
     , ToolResult (..)
     , ToolDef (..)
     , ToolDeclaration (..)
+    , MessagePart (..)
+    , textPart
     , GenericRole (..)
     , GenericItem (..)
     , LocalItem (..)
@@ -20,27 +24,36 @@ module LlmChat.Types
     , ChatConfig (..)
     , defaultChatConfig
     , system
+    , systemText
+    , systemParts
     , developer
+    , developerText
+    , developerParts
     , user
+    , userText
+    , userParts
     , assistantText
+    , assistantParts
     , toolCall
     , toolResult
+    , toolResultText
+    , toolResultJson
     ) where
 
+import Control.Monad (when)
 import Data.Aeson
 import Data.Aeson.Types (Parser)
 import Data.Map (Map)
 import Data.OpenApi (ToParamSchema, ToSchema, toInlinedSchema)
-import Data.String (IsString)
+import Data.Proxy (Proxy (..))
+import Data.String (IsString (..))
 import Data.Text (Text)
 import Data.UUID (UUID)
-import Control.Monad (when)
-import Data.Proxy (Proxy (..))
 import Effectful (Eff)
 import GHC.Generics (Generic)
 import LlmChat.Internal.Schema (closeOpenObjectSchemas)
-import Web.HttpApiData
 import Prelude
+import Web.HttpApiData
 
 data ResponseFormat
     = Unstructured
@@ -77,11 +90,24 @@ data ToolCall = ToolCall
     deriving stock (Show, Eq, Generic)
     deriving anyclass (FromJSON, ToJSON)
 
-newtype ToolResponse = ToolResponse
-    { response :: Text
-    }
+data ToolResponse
+    = ToolResponseText
+        { text :: Text
+        }
+    | ToolResponseJson
+        { json :: Value
+        }
     deriving stock (Show, Eq, Generic)
-    deriving newtype (FromJSON, ToJSON, IsString)
+    deriving anyclass (FromJSON, ToJSON)
+
+instance IsString ToolResponse where
+    fromString = ToolResponseText . fromString
+
+toolResponseText :: Text -> ToolResponse
+toolResponseText = ToolResponseText
+
+toolResponseJson :: Value -> ToolResponse
+toolResponseJson = ToolResponseJson
 
 data ToolResult = ToolResult
     { toolCallId :: ToolCallId
@@ -105,6 +131,16 @@ data ToolDeclaration = ToolDeclaration
     deriving stock (Show, Eq, Generic)
     deriving anyclass (FromJSON, ToJSON)
 
+data MessagePart
+    = PartText
+        { text :: Text
+        }
+    deriving stock (Show, Eq, Generic)
+    deriving anyclass (FromJSON, ToJSON)
+
+textPart :: Text -> MessagePart
+textPart = PartText
+
 data GenericRole
     = GenericSystem
     | GenericDeveloper
@@ -116,7 +152,7 @@ data GenericRole
 data GenericItem
     = GenericMessage
         { role :: GenericRole
-        , content :: Text
+        , parts :: [MessagePart]
         }
     | GenericToolCall
         { toolCall :: ToolCall
@@ -128,17 +164,9 @@ data GenericItem
     deriving anyclass (FromJSON, ToJSON)
 
 data LocalItem
-    = LocalSystem
-        { content :: Text
-        }
-    | LocalDeveloper
-        { content :: Text
-        }
-    | LocalUser
-        { content :: Text
-        }
-    | LocalAssistantText
-        { content :: Text
+    = LocalMessage
+        { role :: GenericRole
+        , parts :: [MessagePart]
         }
     | LocalToolCall
         { toolCall :: ToolCall
@@ -179,6 +207,7 @@ data ChatConfig es = ChatConfig
     { tools :: [ToolDef es]
     , responseFormat :: ResponseFormat
     , onItem :: HistoryItem -> Eff es ()
+    , maxToolRounds :: Int
     }
 
 defaultChatConfig :: ChatConfig es
@@ -187,19 +216,41 @@ defaultChatConfig =
         { tools = []
         , responseFormat = Unstructured
         , onItem = \_ -> pure ()
+        , maxToolRounds = 8
         }
 
 system :: Text -> HistoryItem
-system = HLocal . LocalSystem
+system = systemText
+
+systemText :: Text -> HistoryItem
+systemText content = systemParts [textPart content]
+
+systemParts :: [MessagePart] -> HistoryItem
+systemParts = localMessage GenericSystem
 
 developer :: Text -> HistoryItem
-developer = HLocal . LocalDeveloper
+developer = developerText
+
+developerText :: Text -> HistoryItem
+developerText content = developerParts [textPart content]
+
+developerParts :: [MessagePart] -> HistoryItem
+developerParts = localMessage GenericDeveloper
 
 user :: Text -> HistoryItem
-user = HLocal . LocalUser
+user = userText
+
+userText :: Text -> HistoryItem
+userText content = userParts [textPart content]
+
+userParts :: [MessagePart] -> HistoryItem
+userParts = localMessage GenericUser
 
 assistantText :: Text -> HistoryItem
-assistantText = HLocal . LocalAssistantText
+assistantText content = assistantParts [textPart content]
+
+assistantParts :: [MessagePart] -> HistoryItem
+assistantParts = localMessage GenericAssistant
 
 toolCall :: ToolCallId -> ToolName -> Map Text Value -> HistoryItem
 toolCall toolCallId toolName toolArgs =
@@ -223,6 +274,16 @@ toolResult toolCallId toolResponse =
                     , toolResponse
                     }
             }
+
+toolResultText :: ToolCallId -> Text -> HistoryItem
+toolResultText toolCallId = toolResult toolCallId . ToolResponseText
+
+toolResultJson :: ToolCallId -> Value -> HistoryItem
+toolResultJson toolCallId = toolResult toolCallId . ToolResponseJson
+
+localMessage :: GenericRole -> [MessagePart] -> HistoryItem
+localMessage role parts =
+    HLocal LocalMessage{role, parts}
 
 historyItemSchemaVersion :: Int
 historyItemSchemaVersion = 1

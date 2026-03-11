@@ -23,7 +23,7 @@ defaultXAIResponsesSettings apiKey =
         { apiKey
         , model = "grok-4-fast-non-reasoning"
         , baseUrl = "https://api.x.ai"
-        , requestLogger = \_ -> pure ()
+        , requestLogger = defaultWarningLogger "xai.responses"
         }
 
 runLlmChatXAIResponses

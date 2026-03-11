@@ -122,6 +122,7 @@ test-suite llmchat-effectful-test
   import: shared_opts
   main-is: Main.hs
   other-modules:
+      LlmChat.ChatSpec
       LlmChat.PostgresLoggerSpec
       LlmChat.PostgresPoolSpec
       LlmChat.PostgresSpec
@@ -139,6 +140,7 @@ test-suite llmchat-effectful-test
     , llmchat-effectful
     , effectful-core
     , deepseq
+    , directory
     , hashable
     , hspec
     , mtl

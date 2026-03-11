@@ -31,7 +31,7 @@ specWithProvider runEffectStack = do
             conv <- getConversation convId
             pure (resp, conv)
 
-        lastAssistantText response `shouldSatisfy` maybe False (T.elem '4')
+        lastAssistantTexts response `shouldSatisfy` any (T.elem '4')
         length conv `shouldSatisfy` (>= 3)
 
     it "Executes a single tool call" $ do
@@ -49,7 +49,7 @@ specWithProvider runEffectStack = do
         response
             `shouldSatisfy` any
                 ( \case
-                    HLocal LocalToolResult{toolResult = ToolResult{toolResponse = ToolResponse{response = toolOutput}}} ->
+                    HLocal LocalToolResult{toolResult = ToolResult{toolResponse = ToolResponseText{text = toolOutput}}} ->
                         T.isInfixOf "John Snow" toolOutput
                     _ ->
                         False
@@ -70,12 +70,12 @@ specWithProvider runEffectStack = do
         response
             `shouldSatisfy` any
                 ( \case
-                    HLocal LocalToolResult{toolResult = ToolResult{toolResponse = ToolResponse{response = toolOutput}}} ->
+                    HLocal LocalToolResult{toolResult = ToolResult{toolResponse = ToolResponseText{text = toolOutput}}} ->
                         T.isInfixOf "123-456-7890" toolOutput
                     _ ->
                         False
                 )
-        lastAssistantText response `shouldSatisfy` maybe False (T.isInfixOf "123-456-7890")
+        lastAssistantTexts response `shouldSatisfy` any (T.isInfixOf "123-456-7890")
         response `shouldSatisfy` (>= 3) . length
         length [() | HLocal LocalToolResult{} <- response] `shouldSatisfy` (>= 1)
 
@@ -164,7 +164,7 @@ listContacts =
     defineToolNoArgument
         "list_contact"
         "List all the contacts of the user."
-        (pure . Right . ToolResponse $ "Contacts:\n" <> T.intercalate "\n- " contacts)
+        (pure . Right $ ToolResponseText ("Contacts:\n" <> T.intercalate "\n- " contacts))
   where
     contacts :: [Text]
     contacts = ["John Snow", "Arya Stark", "Tyrion Lannister"]
@@ -182,7 +182,7 @@ showPhoneNumber =
         "Show the phone number of a contact. Must use full name for lookup, as given by `list_contact`."
         ( \case
             FullName "John Snow" ->
-                pure . Right . ToolResponse $ "Phone number: 123-456-7890"
+                pure . Right $ ToolResponseText "Phone number: 123-456-7890"
             FullName n ->
                 pure $ Left $ "No phone number for contact: " <> T.unpack n
         )

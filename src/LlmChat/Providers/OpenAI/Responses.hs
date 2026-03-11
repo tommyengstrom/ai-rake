@@ -27,7 +27,7 @@ defaultOpenAIResponsesSettings apiKey =
         , baseUrl = "https://api.openai.com"
         , organizationId = Nothing
         , projectId = Nothing
-        , requestLogger = \_ -> pure ()
+        , requestLogger = defaultWarningLogger "openai.responses"
         }
 
 runLlmChatOpenAIResponses

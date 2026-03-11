@@ -3,10 +3,12 @@
 module LlmChat.Providers.Responses.Internal
     ( ProviderTag (..)
     , ResponsesProviderConfig (..)
+    , defaultWarningLogger
     , historyItemToGenericItems
     , runResponsesProvider
     ) where
 
+import Debug.Trace qualified as DebugTrace
 import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
@@ -30,6 +32,26 @@ data ProviderTag
     = ProviderOpenAI
     | ProviderXAI
     deriving stock (Show, Eq)
+
+data OpenAIProvider = OpenAIProvider
+
+data XAIProvider = XAIProvider
+
+class ResponsesProvider provider where
+    providerTagValue :: provider -> ProviderTag
+    wrapNativeHistoryItem :: provider -> NativeResponseItem -> HistoryItem
+    genericItemToProviderInput :: provider -> GenericItem -> [Value]
+    genericItemToProviderInput _ = genericItemToProviderInputShared
+    providerPayloadToGenericItems :: provider -> Value -> ([Text], [GenericItem])
+    providerPayloadToGenericItems _ = providerPayloadToGenericItemsShared
+
+instance ResponsesProvider OpenAIProvider where
+    providerTagValue _ = ProviderOpenAI
+    wrapNativeHistoryItem _ = HOpenAIResponses . OpenAIResponsesItem
+
+instance ResponsesProvider XAIProvider where
+    providerTagValue _ = ProviderXAI
+    wrapNativeHistoryItem _ = HXAIResponses . XAIResponsesItem
 
 data ResponsesProviderConfig es = ResponsesProviderConfig
     { providerTag :: ProviderTag
@@ -65,8 +87,7 @@ runResponsesProvider config@ResponsesProviderConfig{..} eff = do
     manager <- liftIO newTlsManager
     parsedBaseUrl <- either (throwError . invalidBaseUrl) pure $ parseBaseUrl (toString baseUrl)
     let clientEnv = mkClientEnv manager parsedBaseUrl
-        postResponse =
-            client responsesApi
+        postResponse = client responsesApi
 
     interpretWith eff \_ -> \case
         GetLlmResponse tools responseFormat history -> do
@@ -101,7 +122,11 @@ buildRequestBody
     -> [HistoryItem]
     -> Eff es Value
 buildRequestBody ResponsesProviderConfig{..} tools responseFormat history = do
-    input <- fmap concat $ traverse (renderHistoryItem providerTag requestLogger) history
+    input <- case providerTag of
+        ProviderOpenAI ->
+            fmap concat $ traverse (renderHistoryItemWithProvider OpenAIProvider requestLogger) history
+        ProviderXAI ->
+            fmap concat $ traverse (renderHistoryItemWithProvider XAIProvider requestLogger) history
     pure $
         object $
             [ "model" .= model
@@ -131,8 +156,22 @@ responseFormatToValue = \case
                 [ "type" .= ("json_schema" :: Text)
                 , "name" .= ("response_format" :: Text)
                 , "schema" .= schema
-                , "strict" .= True
                 ]
+
+defaultWarningLogger :: Applicative f => Text -> NativeMsgFormat -> f ()
+defaultWarningLogger providerName = \case
+    NativeConversionNote note ->
+        logWarning (warningPrefix <> toString note)
+    NativeRequestFailure err ->
+        logWarning (warningPrefix <> "Provider request failed: " <> show err)
+    NativeMsgOut{} ->
+        pure ()
+    NativeMsgIn{} ->
+        pure ()
+  where
+    warningPrefix = "[llmchat-effectful:" <> toString providerName <> "] "
+    logWarning warningMessage =
+        DebugTrace.trace warningMessage () `seq` pure ()
 
 toolDeclarationToValue :: ToolDeclaration -> Value
 toolDeclarationToValue ToolDeclaration{name, description, parameterSchema} =
@@ -151,46 +190,66 @@ emptyToolParametersSchema =
             , "properties" .= object []
             ]
 
-renderHistoryItem
-    :: ProviderTag
+renderHistoryItemWithProvider
+    :: ResponsesProvider provider
+    => provider
     -> (NativeMsgFormat -> Eff es ())
     -> HistoryItem
     -> Eff es [Value]
-renderHistoryItem providerTag requestLogger = \case
+renderHistoryItemWithProvider provider requestLogger = \case
     HLocal localItem ->
-        pure (renderLocalItem localItem)
+        pure (genericItemToProviderInput provider (localItemToGenericItem localItem))
     HOpenAIResponses (OpenAIResponsesItem NativeResponseItem{payload})
-        | providerTag == ProviderOpenAI ->
+        | providerTagValue provider == ProviderOpenAI ->
             pure [payload]
-        | otherwise ->
-            projectForeignItem payload
+        | otherwise -> do
+            let (notes, genericItems) = providerPayloadToGenericItems OpenAIProvider payload
+            traverse_ (requestLogger . NativeConversionNote) notes
+            pure (concatMap (genericItemToProviderInput provider) genericItems)
     HXAIResponses (XAIResponsesItem NativeResponseItem{payload})
-        | providerTag == ProviderXAI ->
+        | providerTagValue provider == ProviderXAI ->
             pure [payload]
-        | otherwise ->
-            projectForeignItem payload
-  where
-    projectForeignItem payload = do
-        let (notes, genericItems) = nativePayloadToGenericItems payload
-        traverse_ (requestLogger . NativeConversionNote) notes
-        pure (genericItemToValue <$> genericItems)
+        | otherwise -> do
+            let (notes, genericItems) = providerPayloadToGenericItems XAIProvider payload
+            traverse_ (requestLogger . NativeConversionNote) notes
+            pure (concatMap (genericItemToProviderInput provider) genericItems)
 
-renderLocalItem :: LocalItem -> [Value]
-renderLocalItem = \case
-    LocalSystem{content} ->
-        [messageValue "system" content]
-    LocalDeveloper{content} ->
-        [messageValue "developer" content]
-    LocalUser{content} ->
-        [messageValue "user" content]
-    LocalAssistantText{content} ->
-        [messageValue "assistant" content]
-    LocalToolCall{toolCall = localToolCall} ->
-        [toolCallValue localToolCall]
-    LocalToolResult{toolResult = localToolResult} ->
-        [toolResultValue localToolResult]
+genericItemToProviderInputShared :: GenericItem -> [Value]
+genericItemToProviderInputShared = \case
+    GenericMessage{role, parts} ->
+        [messageValue (genericRoleToText role) (messagePartsValue role parts)]
+    GenericToolCall{toolCall = genericToolCall'} ->
+        [toolCallValue genericToolCall']
+    GenericToolResult{toolResult = genericToolResult'} ->
+        [toolResultValue genericToolResult']
 
-messageValue :: Text -> Text -> Value
+messagePartsValue :: GenericRole -> [MessagePart] -> Value
+messagePartsValue role = \case
+    [] ->
+        String ""
+    [PartText{text}] ->
+        String text
+    parts ->
+        Array . Vector.fromList $
+            [ object
+                [ "type" .= messageTextPartType role
+                , "text" .= text
+                ]
+            | PartText{text} <- parts
+            ]
+
+messageTextPartType :: GenericRole -> Text
+messageTextPartType = \case
+    GenericAssistant ->
+        "output_text"
+    GenericSystem ->
+        "input_text"
+    GenericDeveloper ->
+        "input_text"
+    GenericUser ->
+        "input_text"
+
+messageValue :: Text -> Value -> Value
 messageValue role content =
     object
         [ "role" .= role
@@ -207,21 +266,19 @@ toolCallValue ToolCall{toolCallId = ToolCallId toolCallId, toolName, toolArgs} =
         ]
 
 toolResultValue :: ToolResult -> Value
-toolResultValue ToolResult{toolCallId = ToolCallId toolCallId, toolResponse = ToolResponse{response}} =
+toolResultValue ToolResult{toolCallId = ToolCallId toolCallId, toolResponse} =
     object
         [ "type" .= ("function_call_output" :: Text)
         , "call_id" .= toolCallId
-        , "output" .= response
+        , "output" .= toolResponseWireOutput toolResponse
         ]
 
-genericItemToValue :: GenericItem -> Value
-genericItemToValue = \case
-    GenericMessage{role, content} ->
-        messageValue (genericRoleToText role) content
-    GenericToolCall{toolCall = genericToolCall'} ->
-        toolCallValue genericToolCall'
-    GenericToolResult{toolResult = genericToolResult'} ->
-        toolResultValue genericToolResult'
+toolResponseWireOutput :: ToolResponse -> Text
+toolResponseWireOutput = \case
+    ToolResponseText{text} ->
+        text
+    ToolResponseJson{json} ->
+        valueToCompactText json
 
 genericRoleToText :: GenericRole -> Text
 genericRoleToText = \case
@@ -251,36 +308,30 @@ decodeResponse providerTag responseValue = do
                     }
         pure $ case providerTag of
             ProviderOpenAI ->
-                HOpenAIResponses (OpenAIResponsesItem nativeItem)
+                wrapNativeHistoryItem OpenAIProvider nativeItem
             ProviderXAI ->
-                HXAIResponses (XAIResponsesItem nativeItem)
+                wrapNativeHistoryItem XAIProvider nativeItem
 
 historyItemToGenericItems :: HistoryItem -> ([Text], [GenericItem])
 historyItemToGenericItems = \case
     HLocal localItem ->
         ([], [localItemToGenericItem localItem])
     HOpenAIResponses (OpenAIResponsesItem NativeResponseItem{payload}) ->
-        nativePayloadToGenericItems payload
+        providerPayloadToGenericItems OpenAIProvider payload
     HXAIResponses (XAIResponsesItem NativeResponseItem{payload}) ->
-        nativePayloadToGenericItems payload
+        providerPayloadToGenericItems XAIProvider payload
 
 localItemToGenericItem :: LocalItem -> GenericItem
 localItemToGenericItem = \case
-    LocalSystem{content} ->
-        GenericMessage GenericSystem content
-    LocalDeveloper{content} ->
-        GenericMessage GenericDeveloper content
-    LocalUser{content} ->
-        GenericMessage GenericUser content
-    LocalAssistantText{content} ->
-        GenericMessage GenericAssistant content
+    LocalMessage{role, parts} ->
+        GenericMessage{role, parts}
     LocalToolCall{toolCall = localToolCall} ->
         GenericToolCall localToolCall
     LocalToolResult{toolResult = localToolResult} ->
         GenericToolResult localToolResult
 
-nativePayloadToGenericItems :: Value -> ([Text], [GenericItem])
-nativePayloadToGenericItems payload =
+providerPayloadToGenericItemsShared :: Value -> ([Text], [GenericItem])
+providerPayloadToGenericItemsShared payload =
     case payload of
         Object itemObject ->
             case (lookupText "type" itemObject, lookupText "role" itemObject) of
@@ -316,38 +367,56 @@ messageObjectToGeneric itemObject =
         Nothing ->
             (["Dropped message item with unsupported role"], [])
         Just role ->
-            case extractContentText (KM.lookup "content" itemObject) of
-                (notes, Nothing) ->
-                    (notes <> ["Dropped message item without text content"], [])
-                (notes, Just content) ->
-                    (notes, [GenericMessage role content])
+            case extractContentParts (KM.lookup "content" itemObject) of
+                (notes, []) ->
+                    (notes <> ["Dropped message item without supported content parts"], [])
+                (notes, parts) ->
+                    (notes, [GenericMessage{role, parts}])
 
-extractContentText :: Maybe Value -> ([Text], Maybe Text)
-extractContentText = \case
+extractContentParts :: Maybe Value -> ([Text], [MessagePart])
+extractContentParts = \case
     Nothing ->
-        (["Missing content field"], Nothing)
+        (["Missing content field"], [])
     Just (String content) ->
-        ([], Just content)
-    Just (Array parts) ->
-        let (notes, texts) = unzip (map partToText (Vector.toList parts))
-            combinedText = mconcat (catMaybes texts)
-         in (mconcat notes, if combinedText == "" then Nothing else Just combinedText)
+        ([], [PartText content])
+    Just (Array contentParts) ->
+        foldMap partToGeneric (Vector.toList contentParts)
     Just _ ->
-        (["Unsupported message content format"], Nothing)
+        (["Unsupported message content format"], [])
   where
-    partToText :: Value -> ([Text], Maybe Text)
-    partToText = \case
+    partToGeneric :: Value -> ([Text], [MessagePart])
+    partToGeneric = \case
         String content ->
-            ([], Just content)
+            ([], [PartText content])
         Object partObject ->
+            messagePartObjectToGeneric partObject
+        _ ->
+            (["Dropped unsupported message part"], [])
+
+messagePartObjectToGeneric :: Object -> ([Text], [MessagePart])
+messagePartObjectToGeneric partObject =
+    case lookupText "type" partObject of
+        Just "input_text" ->
+            parseTextPart
+        Just "output_text" ->
+            parseTextPart
+        Just "text" ->
+            parseTextPart
+        Just unsupportedType ->
+            (["Dropped unsupported message part type: " <> unsupportedType], [])
+        Nothing ->
             case lookupText "text" partObject of
                 Just text ->
-                    ([], Just text)
+                    ([], [PartText text])
                 Nothing ->
-                    let partType = fromMaybe "unknown" (lookupText "type" partObject)
-                     in (["Dropped unsupported message part type: " <> partType], Nothing)
-        _ ->
-            (["Dropped unsupported message part"], Nothing)
+                    (["Dropped unsupported message part"], [])
+  where
+    parseTextPart =
+        case lookupText "text" partObject of
+            Just text ->
+                ([], [PartText text])
+            Nothing ->
+                (["Dropped malformed text message part"], [])
 
 parseToolCall :: Object -> Maybe ToolCall
 parseToolCall itemObject = do
@@ -360,11 +429,18 @@ parseToolResult :: Object -> Maybe ToolResult
 parseToolResult itemObject = do
     toolCallId <- ToolCallId <$> lookupText "call_id" itemObject
     outputValue <- KM.lookup "output" itemObject
-    pure $
-        ToolResult
-            { toolCallId
-            , toolResponse = ToolResponse (valueToCompactText outputValue)
-            }
+    pure ToolResult{toolCallId, toolResponse = parseToolResponse outputValue}
+
+parseToolResponse :: Value -> ToolResponse
+parseToolResponse = \case
+    String outputText ->
+        case eitherDecodeStrictText outputText of
+            Right parsedJson ->
+                ToolResponseJson parsedJson
+            Left{} ->
+                ToolResponseText outputText
+    other ->
+        ToolResponseJson other
 
 parseToolArgs :: Value -> Maybe (Map Text Value)
 parseToolArgs = \case
@@ -380,11 +456,8 @@ parseToolArgs = \case
         Nothing
 
 valueToCompactText :: Value -> Text
-valueToCompactText = \case
-    String text ->
-        text
-    other ->
-        TL.toStrict (encodeToLazyText other)
+valueToCompactText =
+    TL.toStrict . encodeToLazyText
 
 encodeObjectText :: Map Text Value -> Text
 encodeObjectText args =

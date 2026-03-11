@@ -1,9 +1,6 @@
 module LlmChat.PostgresSpec where
 
-import Control.Lens (folded, reversed, taking, (^..))
 import Control.Exception (bracket, try)
-import Data.Generics.Product
-import Data.Generics.Sum
 import Data.Set qualified as Set
 import Data.Time
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
@@ -102,8 +99,7 @@ postgresStorageBehaviourSpec pool conversationsTable =
                             (conv,) <$> getConversation convId
                 liftIO $ length beforeAppend + 3 `shouldBe` length afterAppend
                 liftIO $
-                    afterAppend
-                        ^.. reversed . taking 2 folded . _Ctor @"HLocal" . _Ctor @"LocalUser" . typed @Text
+                    take 2 (reverseUserTexts afterAppend)
                         `shouldBe` [userPrompt2, userPrompt1]
 
         limit $ it "AppendItem errors if conversation does not exist" $ do
@@ -130,6 +126,11 @@ postgresStorageBehaviourSpec pool conversationsTable =
 
                 liftIO $ convId `shouldNotSatisfy` (`elem` listAfterDelete)
                 liftIO $ fetchResult `shouldBe` Left (NoSuchConversation convId)
+  where
+    reverseUserTexts history =
+        [ text
+        | HLocal LocalMessage{role = GenericUser, parts = [PartText{text}]} <- reverse history
+        ]
 
 newConversationsTable :: IO ConversationsTable
 newConversationsTable = do

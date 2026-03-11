@@ -1,9 +1,11 @@
 module LlmChat
     ( module X
     , chat
-    , itemText
-    , lastAssistantText
+    , itemTexts
+    , lastAssistantTexts
+    , lastAssistantTextsStrict
     , decodeLastAssistant
+    , decodeLastAssistantStrict
     , withStorage
     , withStorageBy
     ) where
@@ -29,65 +31,75 @@ chat
     => ChatConfig es
     -> [HistoryItem]
     -> Eff es [HistoryItem]
-chat ChatConfig{tools, responseFormat, onItem} conversation =
-    handleToolLoop tools responseFormat onItem conversation []
+chat ChatConfig{tools, responseFormat, onItem, maxToolRounds} conversation =
+    handleToolLoop tools responseFormat onItem maxToolRounds conversation [] 0
 
-itemText :: HistoryItem -> Maybe Text
-itemText = \case
-    HLocal LocalSystem{content} -> Just content
-    HLocal LocalDeveloper{content} -> Just content
-    HLocal LocalUser{content} -> Just content
-    HLocal LocalAssistantText{content} -> Just content
-    HLocal LocalToolResult{toolResult = ToolResult{toolResponse = ToolResponse{response}}} ->
-        Just response
-    HLocal LocalToolCall{} ->
-        Nothing
-    historyItem ->
+itemTexts :: HistoryItem -> [Text]
+itemTexts historyItem =
+    concatMap genericItemTexts (snd (historyItemToGenericItems historyItem))
+
+lastAssistantTexts :: [HistoryItem] -> [Text]
+lastAssistantTexts history =
+    fromMaybe [] $
         viaNonEmpty head
-            [ text
-            | GenericMessage{content = text} <- projected historyItem
+            [ messagePartsText parts
+            | GenericMessage{role = GenericAssistant, parts} <- List.reverse (flattenGenericHistory history)
             ]
-      where
-        projected item = snd (historyItemToGenericItems item)
 
-lastAssistantText :: [HistoryItem] -> Maybe Text
-lastAssistantText history =
-    listToMaybe
-        [ text
-        | historyItem <- List.reverse history
-        , GenericMessage{role = GenericAssistant, content = text} <- snd (historyItemToGenericItems historyItem)
-        ]
+lastAssistantTextsStrict :: [HistoryItem] -> [Text]
+lastAssistantTextsStrict history =
+    concatMap genericItemTexts (assistantMessageTail history)
 
 decodeLastAssistant
     :: forall a
      . FromJSON a
     => [HistoryItem]
     -> Either LlmChatError a
-decodeLastAssistant history = do
-    assistantReply <-
-        maybe
-            (Left (LlmExpectationError "Assistant returned no text"))
-            Right
-            (lastAssistantText history)
-    first LlmExpectationError (eitherDecodeStrictText assistantReply)
+decodeLastAssistant history =
+    case viaNonEmpty head assistantMessages of
+        Nothing ->
+            Left (LlmExpectationError "Assistant returned no message")
+        Just GenericMessage{parts} ->
+            decodeAssistantMessageParts "Assistant last message" parts
+        Just _ ->
+            Left (LlmExpectationError "Assistant last message is not a message item")
+  where
+    assistantMessages =
+        [ genericItem
+        | genericItem@GenericMessage{role = GenericAssistant} <- List.reverse (flattenGenericHistory history)
+        ]
+
+decodeLastAssistantStrict
+    :: forall a
+     . FromJSON a
+    => [HistoryItem]
+    -> Either LlmChatError a
+decodeLastAssistantStrict history =
+    case assistantMessageTail history of
+        [] ->
+            Left (LlmExpectationError "Assistant returned no message in latest turn")
+        [GenericMessage{parts}] ->
+            decodeAssistantMessageParts "Assistant latest turn" parts
+        _ ->
+            Left (LlmExpectationError "Assistant latest turn is not a single message")
 
 executeToolCalls :: [ToolDef es] -> [ToolCall] -> Eff es [HistoryItem]
 executeToolCalls tools toolCalls =
     forM toolCalls $ \ToolCall{toolCallId, toolName = requestedToolName, toolArgs} -> do
         toolResponse <- case find (matchesTool requestedToolName) tools of
             Nothing ->
-                pure . ToolResponse $ "Tool not found: " <> requestedToolName
+                pure . ToolResponseText $ "Tool not found: " <> requestedToolName
             Just ToolDef{executeFunction} -> do
                 let args = Object (KM.fromMap (Map.mapKeys fromText toolArgs))
                 result <- executeFunction args
                 pure $
                     either
-                        (ToolResponse . ("Tool error: " <>) . toText)
+                        (ToolResponseText . ("Tool error: " <>) . toText)
                         identity
                         result
         pure (toolResult toolCallId toolResponse)
-      where
-        matchesTool requestedToolName ToolDef{name} = name == requestedToolName
+  where
+    matchesTool requestedToolName ToolDef{name} = name == requestedToolName
 
 collectToolCalls :: [HistoryItem] -> [ToolCall]
 collectToolCalls historyItems =
@@ -103,28 +115,82 @@ handleToolLoop
     => [ToolDef es]
     -> ResponseFormat
     -> (HistoryItem -> Eff es ())
+    -> Int
     -> [HistoryItem]
     -> [HistoryItem]
+    -> Int
     -> Eff es [HistoryItem]
-handleToolLoop tools responseFormat onItem conversation accumulated = do
+handleToolLoop tools responseFormat onItem maxRounds conversation accumulated completedRounds = do
     response <- getLlmResponse (toToolDeclaration <$> tools) responseFormat (conversation <> accumulated)
     traverse_ onItem response
 
     let toolCalls = collectToolCalls response
     if null toolCalls
         then pure (accumulated <> response)
-        else do
-            toolCallResults <- executeToolCalls tools toolCalls
-            traverse_ onItem toolCallResults
-            handleToolLoop
-                tools
-                responseFormat
-                onItem
-                conversation
-                (accumulated <> response <> toolCallResults)
+        else
+            if completedRounds >= maxRounds
+                then throwError (ToolLoopLimitExceeded maxRounds)
+                else do
+                    toolCallResults <- executeToolCalls tools toolCalls
+                    traverse_ onItem toolCallResults
+                    handleToolLoop
+                        tools
+                        responseFormat
+                        onItem
+                        maxRounds
+                        conversation
+                        (accumulated <> response <> toolCallResults)
+                        (completedRounds + 1)
   where
     toToolDeclaration ToolDef{name, description, parameterSchema} =
         ToolDeclaration{name, description, parameterSchema}
+
+flattenGenericHistory :: [HistoryItem] -> [GenericItem]
+flattenGenericHistory =
+    concatMap (snd . historyItemToGenericItems)
+
+assistantMessageTail :: [HistoryItem] -> [GenericItem]
+assistantMessageTail =
+    reverse . takeWhile isAssistantMessage . List.reverse . flattenGenericHistory
+  where
+    isAssistantMessage = \case
+        GenericMessage{role = GenericAssistant} ->
+            True
+        _ ->
+            False
+
+genericItemTexts :: GenericItem -> [Text]
+genericItemTexts = \case
+    GenericMessage{parts} ->
+        messagePartsText parts
+    GenericToolCall{} ->
+        []
+    GenericToolResult{toolResult = ToolResult{toolResponse}} ->
+        case toolResponse of
+            ToolResponseText{text} ->
+                [text]
+            ToolResponseJson{} ->
+                []
+
+messagePartsText :: [MessagePart] -> [Text]
+messagePartsText =
+    mapMaybe partText
+  where
+    partText = \case
+        PartText{text} ->
+            Just text
+
+decodeAssistantMessageParts
+    :: forall a
+     . FromJSON a
+    => String
+    -> [MessagePart]
+    -> Either LlmChatError a
+decodeAssistantMessageParts label = \case
+    parts@(PartText{} : _) ->
+        first LlmExpectationError (eitherDecodeStrictText (mconcat (messagePartsText parts)))
+    [] ->
+        Left (LlmExpectationError (label <> " contains no text content"))
 
 withStorage
     :: ( LlmChatStorage :> es
@@ -144,5 +210,8 @@ withStorageBy
 withStorageBy extract action convId = do
     conversation <- getConversation convId
     result <- action conversation
-    appendItems convId (extract result)
+    appendItems convId (stripConversationPrefix conversation (extract result))
     pure result
+  where
+    stripConversationPrefix conversationToStrip extractedHistory =
+        fromMaybe extractedHistory (List.stripPrefix conversationToStrip extractedHistory)

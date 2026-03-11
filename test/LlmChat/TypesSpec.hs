@@ -60,7 +60,7 @@ spec = describe "LlmChat.Types" $ do
             let encoded =
                     object
                         [ "apiFamily" .= ("local" :: Text)
-                        , "payload" .= LocalUser "hello"
+                        , "payload" .= LocalMessage{role = GenericUser, parts = [PartText "hello"]}
                         ]
             fromJSON encoded `shouldBe` Success (user "hello")
 
@@ -69,7 +69,7 @@ spec = describe "LlmChat.Types" $ do
                     object
                         [ "apiFamily" .= ("local" :: Text)
                         , "schemaVersion" .= (1 :: Int)
-                        , "payload" .= LocalUser "hello"
+                        , "payload" .= LocalMessage{role = GenericUser, parts = [PartText "hello"]}
                         ]
             fromJSON encoded `shouldBe` Success (user "hello")
 
@@ -78,13 +78,32 @@ spec = describe "LlmChat.Types" $ do
                     object
                         [ "apiFamily" .= ("local" :: Text)
                         , "schemaVersion" .= (2 :: Int)
-                        , "payload" .= LocalUser "hello"
+                        , "payload" .= LocalMessage{role = GenericUser, parts = [PartText "hello"]}
                         ]
             case fromJSON encoded :: Result HistoryItem of
                 Error{} ->
                     pure ()
                 Success decoded ->
                     expectationFailure ("Unexpectedly decoded: " <> show decoded)
+
+        it "round-trips multipart text messages" $ do
+            let item = userParts [textPart "hello", textPart " world"]
+            fromJSON (toJSON item) `shouldBe` Success item
+
+        it "round-trips JSON tool responses" $ do
+            forM_
+                ( [ String "ok"
+                  , Number 123
+                  , Bool True
+                  , Null
+                  , toJSON ([1 :: Int, 2 :: Int] :: [Int])
+                  , object ["answer" .= (4 :: Int)]
+                  ]
+                    :: [Value]
+                )
+                $ \jsonValue -> do
+                    let item = toolResultJson "tool-call-1" jsonValue
+                    fromJSON (toJSON item) `shouldBe` Success item
   where
     lookupField :: Text -> Value -> Maybe Value
     lookupField fieldName = \case

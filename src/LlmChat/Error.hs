@@ -11,4 +11,5 @@ import Relude
 data LlmChatError
     = LlmClientError ClientError
     | LlmExpectationError String
+    | ToolLoopLimitExceeded Int
     deriving stock (Show, Eq, Generic)
