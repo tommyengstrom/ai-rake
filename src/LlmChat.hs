@@ -18,6 +18,7 @@ import Data.Map qualified as Map
 import Effectful
 import Effectful.Error.Static
 import LlmChat.Effect as X
+import LlmChat.Media as X
 import LlmChat.Providers.Responses.Internal (historyItemToGenericItems)
 import LlmChat.Storage.Effect as X
 import LlmChat.Tool as X

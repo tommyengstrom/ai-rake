@@ -8,4 +8,7 @@ and this project adheres to the
 
 ## Unreleased
 
+- Added provider-specific media generation helpers for OpenAI Images (`gpt-image-1.5` by default) and xAI Grok Imagine image/video generation.
+- Added a `gen-image` CLI for OpenAI and Grok image generation, plus a separate `gen-video` CLI for Grok video generation from an image, video edits, and local append-style `--extend` continuations.
+
 ## 0.1.0.0 - YYYY-MM-DD
