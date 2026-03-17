@@ -21,6 +21,8 @@ module LlmChat.Types
     , OpenAIResponsesItem (..)
     , XAIResponsesItem (..)
     , HistoryItem (..)
+    , SamplingOptions (..)
+    , defaultSamplingOptions
     , ChatConfig (..)
     , defaultChatConfig
     , system
@@ -203,9 +205,23 @@ data HistoryItem
     | HXAIResponses XAIResponsesItem
     deriving stock (Show, Eq, Generic)
 
+data SamplingOptions = SamplingOptions
+    { temperature :: Maybe Double
+    , topP :: Maybe Double
+    }
+    deriving stock (Show, Eq, Generic)
+
+defaultSamplingOptions :: SamplingOptions
+defaultSamplingOptions =
+    SamplingOptions
+        { temperature = Nothing
+        , topP = Nothing
+        }
+
 data ChatConfig es = ChatConfig
     { tools :: [ToolDef es]
     , responseFormat :: ResponseFormat
+    , sampling :: SamplingOptions
     , onItem :: HistoryItem -> Eff es ()
     , maxToolRounds :: Int
     }
@@ -215,6 +231,7 @@ defaultChatConfig =
     ChatConfig
         { tools = []
         , responseFormat = Unstructured
+        , sampling = defaultSamplingOptions
         , onItem = \_ -> pure ()
         , maxToolRounds = 8
         }

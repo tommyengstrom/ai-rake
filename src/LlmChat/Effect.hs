@@ -16,6 +16,7 @@ data LlmChat :: Effect where
     GetLlmResponse
         :: [ToolDeclaration]
         -> ResponseFormat
+        -> SamplingOptions
         -> [HistoryItem]
         -> LlmChat m [HistoryItem]
 

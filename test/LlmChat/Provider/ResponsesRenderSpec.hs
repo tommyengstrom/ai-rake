@@ -58,6 +58,49 @@ spec = describe "Responses request rendering" $ do
 
             firstToolParameters requestBody `shouldBe` Just rawSchema
 
+    describe "sampling options" $ do
+        it "renders temperature when explicitly configured" $ do
+            requestBody <-
+                captureOpenAIRequestBody
+                    defaultChatConfig
+                        { sampling =
+                            defaultSamplingOptions
+                                { temperature = Just 0
+                                }
+                        }
+                    [user "hello"]
+
+            lookupPath ["temperature"] requestBody `shouldBe` Just (Number 0)
+
+        it "omits temperature when not configured" $ do
+            requestBody <-
+                captureOpenAIRequestBody
+                    defaultChatConfig
+                    [user "hello"]
+
+            lookupPath ["temperature"] requestBody `shouldBe` Nothing
+
+        it "renders top_p when explicitly configured" $ do
+            requestBody <-
+                captureOpenAIRequestBody
+                    defaultChatConfig
+                        { sampling =
+                            defaultSamplingOptions
+                                { topP = Just 0.1
+                                }
+                        }
+                    [user "hello"]
+
+            lookupPath ["top_p"] requestBody `shouldBe` Just (Number 0.1)
+
+        it "omits top_p when not configured" $ do
+            requestBody <-
+                captureOpenAIRequestBody
+                    defaultChatConfig
+                    [user "hello"]
+
+            lookupPath ["top_p"] requestBody `shouldBe` Nothing
+
     describe "native history rendering" $ do
         it "reuses native OpenAI items unchanged for OpenAI requests" $ do
             requestBody <-

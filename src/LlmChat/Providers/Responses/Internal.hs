@@ -90,8 +90,8 @@ runResponsesProvider config@ResponsesProviderConfig{..} eff = do
         postResponse = client responsesApi
 
     interpretWith eff \_ -> \case
-        GetLlmResponse tools responseFormat history -> do
-            requestBody <- buildRequestBody config tools responseFormat history
+        GetLlmResponse tools responseFormat samplingOptions history -> do
+            requestBody <- buildRequestBody config tools responseFormat samplingOptions history
             requestLogger (NativeMsgOut requestBody)
             responseValue <-
                 liftIO
@@ -119,9 +119,10 @@ buildRequestBody
     :: ResponsesProviderConfig es
     -> [ToolDeclaration]
     -> ResponseFormat
+    -> SamplingOptions
     -> [HistoryItem]
     -> Eff es Value
-buildRequestBody ResponsesProviderConfig{..} tools responseFormat history = do
+buildRequestBody ResponsesProviderConfig{..} tools responseFormat samplingOptions history = do
     input <- case providerTag of
         ProviderOpenAI ->
             fmap concat $ traverse (renderHistoryItemWithProvider OpenAIProvider requestLogger) history
@@ -133,9 +134,18 @@ buildRequestBody ResponsesProviderConfig{..} tools responseFormat history = do
             , "input" .= input
             , "store" .= False
             ]
+                <> samplingFields
                 <> toolFields
                 <> responseFormatFields
   where
+    samplingFields =
+        catMaybes
+            [ ("temperature" .=) <$> temperature
+            , ("top_p" .=) <$> topP
+            ]
+
+    SamplingOptions{temperature, topP} = samplingOptions
+
     toolFields
         | null tools = []
         | otherwise = ["tools" .= fmap toolDeclarationToValue tools]

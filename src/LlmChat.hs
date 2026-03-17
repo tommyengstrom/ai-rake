@@ -32,8 +32,8 @@ chat
     => ChatConfig es
     -> [HistoryItem]
     -> Eff es [HistoryItem]
-chat ChatConfig{tools, responseFormat, onItem, maxToolRounds} conversation =
-    handleToolLoop tools responseFormat onItem maxToolRounds conversation [] 0
+chat ChatConfig{tools, responseFormat, sampling = samplingOptions, onItem, maxToolRounds} conversation =
+    handleToolLoop tools responseFormat samplingOptions onItem maxToolRounds conversation [] 0
 
 itemTexts :: HistoryItem -> [Text]
 itemTexts historyItem =
@@ -115,14 +115,15 @@ handleToolLoop
        )
     => [ToolDef es]
     -> ResponseFormat
+    -> SamplingOptions
     -> (HistoryItem -> Eff es ())
     -> Int
     -> [HistoryItem]
     -> [HistoryItem]
     -> Int
     -> Eff es [HistoryItem]
-handleToolLoop tools responseFormat onItem maxRounds conversation accumulated completedRounds = do
-    response <- getLlmResponse (toToolDeclaration <$> tools) responseFormat (conversation <> accumulated)
+handleToolLoop tools responseFormat samplingOptions onItem maxRounds conversation accumulated completedRounds = do
+    response <- getLlmResponse (toToolDeclaration <$> tools) responseFormat samplingOptions (conversation <> accumulated)
     traverse_ onItem response
 
     let toolCalls = collectToolCalls response
@@ -137,6 +138,7 @@ handleToolLoop tools responseFormat onItem maxRounds conversation accumulated co
                     handleToolLoop
                         tools
                         responseFormat
+                        samplingOptions
                         onItem
                         maxRounds
                         conversation

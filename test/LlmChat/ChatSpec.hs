@@ -48,6 +48,31 @@ spec = describe "LlmChat" $ do
 
             result `shouldBe` Left (ToolLoopLimitExceeded 2)
 
+        it "threads sampling options through every request round" $ do
+            samplingRef <- IORef.newIORef []
+            let samplingOptions =
+                    defaultSamplingOptions
+                        { temperature = Just 0
+                        , topP = Just 0.2
+                        }
+            result <-
+                runRecordedMockChat samplingRef
+                    [ [toolCall "loop-1" "loop_tool" mempty]
+                    , [assistantText "{\"answer\":4}"]
+                    ]
+                    ( chat
+                        defaultChatConfig
+                            { maxToolRounds = 1
+                            , tools = [loopTool]
+                            , sampling = samplingOptions
+                            }
+                        [user "start"]
+                    )
+
+            result `shouldBe` Right [toolCall "loop-1" "loop_tool" mempty, toolResult "loop-1" "looped", assistantText "{\"answer\":4}"]
+            recordedSampling <- IORef.readIORef samplingRef
+            recordedSampling `shouldBe` [samplingOptions, samplingOptions]
+
     describe "assistant helpers" $ do
         it "keeps lastAssistantTexts as a best-effort helper" $ do
             let history :: [HistoryItem]
@@ -120,6 +145,16 @@ runMockChat plannedResponses =
         . runErrorNoCallStack
         . runMockLlmChat plannedResponses
 
+runRecordedMockChat
+    :: IORef.IORef [SamplingOptions]
+    -> [[HistoryItem]]
+    -> Eff '[LlmChat, Error LlmChatError, IOE] a
+    -> IO (Either LlmChatError a)
+runRecordedMockChat samplingRef plannedResponses =
+    runEff
+        . runErrorNoCallStack
+        . runRecordedMockLlmChat samplingRef plannedResponses
+
 runMockLlmChat
     :: IOE :> es
     => [[HistoryItem]]
@@ -129,6 +164,25 @@ runMockLlmChat plannedResponses eff = do
     responsesRef <- liftIO (IORef.newIORef plannedResponses)
     interpretWith eff \_ -> \case
         GetLlmResponse{} -> do
+            remainingResponses <- liftIO (IORef.readIORef responsesRef)
+            case remainingResponses of
+                response : rest -> do
+                    liftIO (IORef.writeIORef responsesRef rest)
+                    pure response
+                [] ->
+                    pure []
+
+runRecordedMockLlmChat
+    :: IOE :> es
+    => IORef.IORef [SamplingOptions]
+    -> [[HistoryItem]]
+    -> Eff (LlmChat ': es) a
+    -> Eff es a
+runRecordedMockLlmChat samplingRef plannedResponses eff = do
+    responsesRef <- liftIO (IORef.newIORef plannedResponses)
+    interpretWith eff \_ -> \case
+        GetLlmResponse _ _ samplingOptions _history -> do
+            liftIO $ IORef.modifyIORef' samplingRef (<> [samplingOptions])
             remainingResponses <- liftIO (IORef.readIORef responsesRef)
             case remainingResponses of
                 response : rest -> do
