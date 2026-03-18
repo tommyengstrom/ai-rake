@@ -6,7 +6,7 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.Map qualified as Map
 import Data.OpenApi (ToSchema, toInlinedSchema)
 import Effectful
-import LlmChat.Internal.Schema (closeOpenObjectSchemas)
+import LlmChat.Internal.Schema (normalizeStructuredOutputSchema)
 import LlmChat.Types
 import Relude
 
@@ -43,7 +43,7 @@ defineToolWithArgument toolName toolDescription executeFunction =
         { name = toolName
         , description = toolDescription
         , parameterSchema =
-            Just . closeOpenObjectSchemas . toJSON $ toInlinedSchema (Proxy @a)
+            Just . normalizeStructuredOutputSchema . toJSON $ toInlinedSchema (Proxy @a)
         , executeFunction = \args ->
             case fromJSON args of
                 Error err ->

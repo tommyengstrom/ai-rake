@@ -20,7 +20,7 @@ import Effectful
 import Effectful.Dispatch.Dynamic
 import Effectful.Error.Static
 import LlmChat.Effect
-import LlmChat.Internal.Schema (closeOpenObjectSchemas)
+import LlmChat.Internal.Schema (normalizeStructuredOutputSchema)
 import LlmChat.Types
 import Network.HTTP.Client.TLS (newTlsManager)
 import Relude
@@ -194,7 +194,7 @@ toolDeclarationToValue ToolDeclaration{name, description, parameterSchema} =
 
 emptyToolParametersSchema :: Value
 emptyToolParametersSchema =
-    closeOpenObjectSchemas $
+    normalizeStructuredOutputSchema $
         object
             [ "type" .= ("object" :: Text)
             , "properties" .= object []

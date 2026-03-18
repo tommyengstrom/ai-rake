@@ -19,6 +19,33 @@ data OpenMapPayload = OpenMapPayload
     deriving stock (Show, Eq, Generic)
     deriving anyclass (FromJSON, ToJSON)
 
+data ExampleToolCall = ExampleToolCall
+    { tool :: Text
+    }
+    deriving stock (Show, Eq, Generic)
+    deriving anyclass (FromJSON, ToJSON, ToSchema)
+
+data RecordWithMaybe = RecordWithMaybe
+    { response :: Text
+    , translated_response :: Text
+    , toolCall :: Maybe ExampleToolCall
+    }
+    deriving stock (Show, Eq, Generic)
+    deriving anyclass (FromJSON, ToJSON, ToSchema)
+
+data NestedChild = NestedChild
+    { maybeText :: Maybe Text
+    }
+    deriving stock (Show, Eq, Generic)
+    deriving anyclass (FromJSON, ToJSON, ToSchema)
+
+data NestedRecord = NestedRecord
+    { label :: Text
+    , child :: Maybe NestedChild
+    }
+    deriving stock (Show, Eq, Generic)
+    deriving anyclass (FromJSON, ToJSON, ToSchema)
+
 instance ToSchema OpenMapPayload where
     declareNamedSchema _ =
         pure $
@@ -44,11 +71,39 @@ spec = describe "LlmChat.Types" $ do
                 _ ->
                     expectationFailure "Expected JsonSchema from jsonSchemaFormat"
 
+        it "makes optional typed fields required and nullable" $ do
+            case jsonSchemaFormat @RecordWithMaybe of
+                JsonSchema schemaValue -> do
+                    sort (fromMaybe [] (requiredFieldNames schemaValue))
+                        `shouldBe` sort ["response", "translated_response", "toolCall"]
+                    lookupPath ["properties", "toolCall"] schemaValue
+                        `shouldBe` Just (nullableSchema exampleToolCallSchema)
+                _ ->
+                    expectationFailure "Expected JsonSchema from jsonSchemaFormat"
+
+        it "normalizes nested optional object fields" $ do
+            case jsonSchemaFormat @NestedRecord of
+                JsonSchema schemaValue -> do
+                    sort (fromMaybe [] (requiredFieldNames schemaValue))
+                        `shouldBe` sort ["label", "child"]
+                    lookupPath ["properties", "child"] schemaValue
+                        `shouldBe` Just (nullableSchema nestedChildSchema)
+                _ ->
+                    expectationFailure "Expected JsonSchema from jsonSchemaFormat"
+
     describe "defineToolWithArgument" $ do
         it "preserves explicit additionalProperties from typed tool schemas" $ do
             let tool = defineToolWithArgument @OpenMapPayload "open_map" "open map tool" (\_ -> pure (Right "ok"))
                 ToolDef{parameterSchema = parameterSchemaValue} = tool
             (parameterSchemaValue >>= lookupField "additionalProperties") `shouldBe` Just (Bool True)
+
+        it "applies the same normalization to typed tool argument schemas" $ do
+            let tool = defineToolWithArgument @RecordWithMaybe "lookup" "lookup tool" (\_ -> pure (Right "ok"))
+                ToolDef{parameterSchema = parameterSchemaValue} = tool
+            sort (maybe [] id (parameterSchemaValue >>= requiredFieldNames))
+                `shouldBe` sort ["response", "translated_response", "toolCall"]
+            (parameterSchemaValue >>= lookupPath ["properties", "toolCall"])
+                `shouldBe` Just (nullableSchema exampleToolCallSchema)
 
     describe "HistoryItem JSON envelope" $ do
         it "encodes without schemaVersion" $ do
@@ -111,3 +166,59 @@ spec = describe "LlmChat.Types" $ do
             KM.lookup (Key.fromText fieldName) objectValue
         _ ->
             Nothing
+
+    lookupPath :: [Text] -> Value -> Maybe Value
+    lookupPath [] currentValue = Just currentValue
+    lookupPath (fieldName : rest) currentValue = case currentValue of
+        Object currentObject ->
+            KM.lookup (Key.fromText fieldName) currentObject >>= lookupPath rest
+        _ ->
+            Nothing
+
+    requiredFieldNames :: Value -> Maybe [Text]
+    requiredFieldNames schemaValue = do
+        Array requiredFields <- lookupField "required" schemaValue
+        traverse requiredFieldName (toList requiredFields)
+
+    requiredFieldName :: Value -> Maybe Text
+    requiredFieldName = \case
+        String fieldName ->
+            Just fieldName
+        _ ->
+            Nothing
+
+    nullableSchema :: Value -> Value
+    nullableSchema schemaValue =
+        object
+            [ "anyOf" .= ([schemaValue, nullSchema] :: [Value])
+            ]
+
+    nullSchema :: Value
+    nullSchema =
+        object
+            [ "type" .= ("null" :: Text)
+            ]
+
+    exampleToolCallSchema :: Value
+    exampleToolCallSchema =
+        object
+            [ "type" .= ("object" :: Text)
+            , "properties"
+                .= object
+                    [ "tool" .= object ["type" .= ("string" :: Text)]
+                    ]
+            , "required" .= (["tool" :: Text] :: [Text])
+            , "additionalProperties" .= False
+            ]
+
+    nestedChildSchema :: Value
+    nestedChildSchema =
+        object
+            [ "type" .= ("object" :: Text)
+            , "properties"
+                .= object
+                    [ "maybeText" .= nullableSchema (object ["type" .= ("string" :: Text)])
+                    ]
+            , "required" .= (["maybeText" :: Text] :: [Text])
+            , "additionalProperties" .= False
+            ]

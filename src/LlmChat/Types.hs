@@ -53,7 +53,7 @@ import Data.Text (Text)
 import Data.UUID (UUID)
 import Effectful (Eff)
 import GHC.Generics (Generic)
-import LlmChat.Internal.Schema (closeOpenObjectSchemas)
+import LlmChat.Internal.Schema (normalizeStructuredOutputSchema)
 import Prelude
 import Web.HttpApiData
 
@@ -65,7 +65,7 @@ data ResponseFormat
     deriving anyclass (FromJSON, ToJSON)
 
 jsonSchemaFormat :: forall a. ToSchema a => ResponseFormat
-jsonSchemaFormat = JsonSchema . closeOpenObjectSchemas . toJSON $ toInlinedSchema (Proxy @a)
+jsonSchemaFormat = JsonSchema . normalizeStructuredOutputSchema . toJSON $ toInlinedSchema (Proxy @a)
 
 newtype ConversationId = ConversationId UUID
     deriving stock (Show, Eq, Ord, Generic)

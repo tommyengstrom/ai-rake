@@ -58,6 +58,25 @@ spec = describe "Responses request rendering" $ do
 
             firstToolParameters requestBody `shouldBe` Just rawSchema
 
+        it "renders the no-argument tool fallback as a closed object with required []" $ do
+            let tool =
+                    defineToolNoArgument "noop" "No-op tool" (pure (Right "ok"))
+
+            requestBody <-
+                captureOpenAIRequestBody
+                    defaultChatConfig{tools = [tool]}
+                    [user "hello"]
+
+            firstToolParameters requestBody
+                `shouldBe` Just
+                    ( object
+                        [ "type" .= ("object" :: Text)
+                        , "properties" .= object []
+                        , "required" .= ([] :: [Text])
+                        , "additionalProperties" .= False
+                        ]
+                    )
+
     describe "sampling options" $ do
         it "renders temperature when explicitly configured" $ do
             requestBody <-
