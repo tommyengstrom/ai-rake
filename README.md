@@ -47,9 +47,40 @@ Notes:
 
 - `lastAssistantTexts` and `decodeLastAssistant` are best-effort helpers.
 - `lastAssistantTextsStrict` and `decodeLastAssistantStrict` only look at the latest contiguous assistant tail.
+- `withStorage` and `withStorageBy` are snapshot-based convenience wrappers around `chat`; they load the current history, run the action, and append only the returned suffix.
+- `modifyConversationAtomic` is the short-lived mutation helper to use when concurrent writers matter.
 - Shared/local multipart content is text-only for now; richer media remains provider-native until both adapters support the same generic representation.
 - Provider-switch conversion warnings are logged to stderr by default when native items lose information during projection.
 - OpenAI image generation and xAI Grok Imagine image/video generation are available through provider-specific helper modules instead of the shared `chat` API.
+
+## Persistence
+
+PostgreSQL storage now uses validated identifiers instead of raw table-name `Text`:
+
+```haskell
+{-# LANGUAGE DataKinds #-}
+
+import Database.PostgreSQL.Simple (close, connectPostgreSQL)
+import Effectful
+import Effectful.PostgreSQL.Connection.Pool
+import LlmChat
+import LlmChat.Storage.Postgres
+import Relude
+import UnliftIO.Pool (mkDefaultPoolConfig, newPool)
+
+main :: IO ()
+main = do
+  prefix <- either (error . toString) pure (mkPgIdentifier "llmchat")
+  tables <- either (error . toString) pure (conversationTablesFromPrefix prefix)
+  config <- mkDefaultPoolConfig (connectPostgreSQL "dbname=chatcompletion-test") close 60 5
+  pool <- newPool config
+
+  runEff
+    . runWithConnectionPool pool
+    $ setupConversationTables tables
+```
+
+Use `withStorage (chat config) conversationId` for load-run-append chat flows, and `modifyConversationAtomic` for short-lived read-modify-write mutations that must serialize correctly under concurrent access.
 
 ## Media Generation
 
@@ -86,6 +117,12 @@ main = do
         print openAiImage
         print xaiVideo
 ```
+
+Validation notes:
+
+- OpenAI `mask` and `inputFidelity` require at least one input image.
+- xAI `videoUrl` requests are edit operations and cannot be combined with `duration`, `aspectRatio`, or `resolution`.
+- xAI video requests may set `imageUrl` or `videoUrl`, but not both.
 
 ## CLIs
 

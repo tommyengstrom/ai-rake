@@ -6,7 +6,8 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.UUID
 import Effectful
-import Effectful.Concurrent (Concurrent, runConcurrent)
+import Effectful.Concurrent (Concurrent, forkFinally, runConcurrent)
+import Effectful.Concurrent.MVar qualified as MVar
 import Effectful.Error.Static
 import Effectful.Time
 import LlmChat.Storage.Effect
@@ -113,6 +114,70 @@ specGeneralized runStorage = do
                         . runStorage
                         $ appendItem convId (user prompt)
                 liftIO $ result `shouldBe` Left (NoSuchConversation convId)
+
+        it "ModifyConversationAtomic appends based on the current history" $ do
+            property $ \(SomeText firstPrompt) (SomeText secondPrompt) -> monadicIO $ do
+                result <- run . runEffStack $ runStorage do
+                    convId <- createConversation
+                    appendItem convId (user firstPrompt)
+                    observedLength <-
+                        modifyConversationAtomic convId \history ->
+                            (length history, [user secondPrompt])
+                    finalHistory <- getConversation convId
+                    pure (observedLength, finalHistory)
+
+                liftIO $
+                    result `shouldBe`
+                        Right
+                            ( 1
+                            , [user firstPrompt, user secondPrompt]
+                            )
+
+        it "ModifyConversationAtomic errors if the conversation does not exist" $ do
+            property $ \(convId :: ConversationId) -> monadicIO $ do
+                result <-
+                    run
+                        . runEffStack
+                        . runStorage
+                        $ modifyConversationAtomic convId (\history -> (length history, [user "ignored"]))
+                liftIO $ result `shouldBe` Left (NoSuchConversation convId)
+
+        it "ModifyConversationAtomic serializes concurrent writers" $ do
+            let workerCount = 20
+
+            Right (threadResults, finalHistory) <- runEffStack $ runStorage do
+                convId <- createConversation
+                startGate <- MVar.newEmptyMVar
+                done <- MVar.newEmptyMVar
+
+                forM_ ([1 .. workerCount] :: [Int]) $ \workerIndex ->
+                    void $
+                        forkFinally
+                            ( do
+                                MVar.readMVar startGate
+                                catchError @ChatStorageError
+                                    (Right <$> modifyConversationAtomic convId (\history -> (length history, [user ("worker-" <> show workerIndex)])))
+                                    (\_ err -> pure (Left err))
+                            )
+                            (MVar.putMVar done)
+
+                MVar.putMVar startGate ()
+                threadResults <- replicateM workerCount (MVar.takeMVar done)
+                finalHistory <- getConversation convId
+                pure (threadResults, finalHistory)
+
+            observedLengths <- forM threadResults $ \case
+                Left err ->
+                    expectationFailure ("Concurrent in-memory storage worker crashed: " <> show err)
+                        >> pure (-1)
+                Right (Left err) ->
+                    expectationFailure ("Concurrent in-memory storage worker failed: " <> show err)
+                        >> pure (-1)
+                Right (Right observedLength) ->
+                    pure observedLength
+
+            sort observedLengths `shouldBe` [0 .. workerCount - 1]
+            length finalHistory `shouldBe` workerCount
 
         it "DeleteConversation removes the conversation" $ do
             property $ monadicIO $ do

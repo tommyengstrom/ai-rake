@@ -132,15 +132,14 @@ generateOpenAIImage
     => OpenAIImagesSettings es
     -> OpenAIImageRequest
     -> Eff es ImageGenerationResponse
-generateOpenAIImage OpenAIImagesSettings{apiKey, baseUrl, organizationId, projectId, requestLogger} request@OpenAIImageRequest{inputImages, mask} = do
-    when (null inputImages && isJust mask) $
-        throwError (LlmExpectationError "OpenAI image masks require at least one input image")
+generateOpenAIImage OpenAIImagesSettings{apiKey, baseUrl, organizationId, projectId, requestLogger} request@OpenAIImageRequest{inputImages} = do
+    either throwError pure (validateOpenAIImageRequest request)
 
     manager <- liftIO newTlsManager
     parsedBaseUrl <- either (throwError . invalidBaseUrl) pure $ parseBaseUrl (toString baseUrl)
     let clientEnv = mkClientEnv manager parsedBaseUrl
         createImage Servant.:<|> editImage = client openAIImagesApi
-        requestBody = toJSON (requestBodyForRoute request)
+        requestBody = toJSON request
         clientCall
             | null inputImages =
                 createImage
@@ -175,9 +174,11 @@ generateOpenAIImage OpenAIImagesSettings{apiKey, baseUrl, organizationId, projec
             Success response ->
                 pure response
 
-requestBodyForRoute :: OpenAIImageRequest -> OpenAIImageRequest
-requestBodyForRoute request@OpenAIImageRequest{inputImages}
-    | null inputImages =
-        request{mask = Nothing, inputFidelity = Nothing}
+validateOpenAIImageRequest :: OpenAIImageRequest -> Either LlmChatError ()
+validateOpenAIImageRequest OpenAIImageRequest{inputImages, mask, inputFidelity}
+    | null inputImages && isJust mask =
+        Left (LlmExpectationError "OpenAI image masks require at least one input image")
+    | null inputImages && isJust inputFidelity =
+        Left (LlmExpectationError "OpenAI inputFidelity requires at least one input image")
     | otherwise =
-        request
+        Right ()

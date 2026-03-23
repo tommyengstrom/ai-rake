@@ -7,3 +7,5 @@ dist-newstyle/
 ghciwatch.log
 ghcid.log
 ai_docs
+generated/
+test-results.txt

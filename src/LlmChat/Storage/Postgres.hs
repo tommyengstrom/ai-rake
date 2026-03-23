@@ -1,42 +1,28 @@
-{-# OPTIONS_GHC -Wno-orphans #-}
+module LlmChat.Storage.Postgres
+    ( PgIdentifier
+    , mkPgIdentifier
+    , pgIdentifierText
+    , ConversationTables (..)
+    , conversationTablesFromPrefix
+    , runLlmChatStoragePostgres
+    , setupConversationTables
+    ) where
 
-module LlmChat.Storage.Postgres where
-
-import Data.Aeson (Value, decode, encode, toJSON)
 import Data.Time (UTCTime)
 import Data.UUID (UUID)
 import Data.UUID.V4 (nextRandom)
 import Database.PostgreSQL.Simple (Only (..), Query)
-import Database.PostgreSQL.Simple.FromField
 import Database.PostgreSQL.Simple.FromRow (FromRow (..))
 import Database.PostgreSQL.Simple.FromRow qualified as PG
-import Database.PostgreSQL.Simple.ToField
 import Effectful
 import Effectful.Dispatch.Dynamic (interpret)
 import Effectful.Error.Static (Error, throwError)
 import Effectful.PostgreSQL (WithConnection)
 import Effectful.PostgreSQL qualified as PG
+import LlmChat.Postgres.Internal
 import LlmChat.Storage.Effect
 import LlmChat.Types
 import Relude
-
-type ConversationsTable = Text
-
-instance ToField ConversationId where
-    toField (ConversationId uuid) = toField uuid
-
-instance FromField ConversationId where
-    fromField f mdata = ConversationId <$> fromField f mdata
-
-instance ToField HistoryItem where
-    toField historyItem = toField (toJSON historyItem)
-
-instance FromField HistoryItem where
-    fromField f mdata = do
-        (value :: Value) <- fromField f mdata
-        case decode (encode value) of
-            Just historyItem -> pure historyItem
-            Nothing -> returnError ConversionFailed f "Could not decode HistoryItem from JSON"
 
 data ItemRow = ItemRow
     { storedItemId :: UUID
@@ -55,173 +41,222 @@ runLlmChatStoragePostgres
        , Error ChatStorageError :> es
        , WithConnection :> es
        )
-    => ConversationsTable
+    => ConversationTables
     -> Eff (LlmChatStorage ': es) a
     -> Eff es a
-runLlmChatStoragePostgres tableName = interpret $ \_ -> \case
+runLlmChatStoragePostgres tables = interpret $ \_ -> \case
     CreateConversation -> do
         conversationId <- ConversationId <$> liftIO nextRandom
         void $
             PG.execute
-                (insertConversationQuery tableName)
+                (insertConversationQuery tables)
                 (Only conversationId)
         pure conversationId
     DeleteConversation conversationId ->
         void $
             PG.execute
-                (deleteConversationQuery tableName)
+                (deleteConversationQuery tables)
                 (Only conversationId)
     GetStoredConversation conversationId -> do
-        exists <- conversationExists tableName conversationId
-        unless exists $
-            throwError $ NoSuchConversation conversationId
-
-        rows <- PG.query (selectItemsQuery tableName) (Only conversationId)
-        pure (map itemRowToStoredItem (rows :: [ItemRow]))
-      where
-        itemRowToStoredItem ItemRow{storedItemId = itemId, historyItem = item, createdAt} =
-            StoredItem{itemId, item, createdAt}
-    AppendItem conversationId historyItem -> do
-        inserted <- insertItemIfConversationExists tableName conversationId historyItem
-        unless inserted $
-            throwError $ NoSuchConversation conversationId
+        rows <- PG.query (selectItemsQuery tables) (Only conversationId)
+        if null (rows :: [ItemRow])
+            then do
+                exists <- conversationExists tables conversationId
+                unless exists $
+                    throwError (NoSuchConversation conversationId)
+                pure []
+            else pure (map itemRowToStoredItem rows)
+    AppendConversationItems conversationId historyItems ->
+        unless (null historyItems) $
+            withPinnedConnection $
+                PG.withTransaction do
+                    lockConversation tables conversationId
+                    insertRows <- mkInsertRows conversationId historyItems
+                    void $
+                        PG.executeMany
+                            (insertItemsQuery tables)
+                            insertRows
     ListConversations -> do
-        rows <- PG.query_ (listConversationsQuery tableName)
-        pure $ map (\(Only cid) -> cid) rows
+        rows <- PG.query_ (listConversationsQuery tables)
+        pure (map (\(Only conversationId) -> conversationId) rows)
+    ModifyConversationAtomic conversationId modifyConversation ->
+        withPinnedConnection $
+            PG.withTransaction do
+                lockConversation tables conversationId
+                rows <- PG.query (selectItemsQuery tables) (Only conversationId)
+                let currentHistory =
+                        [ item
+                        | ItemRow{historyItem = item} <- (rows :: [ItemRow])
+                        ]
+                    (result, newItems) = modifyConversation currentHistory
+                unless (null newItems) do
+                    insertRows <- mkInsertRows conversationId newItems
+                    void $
+                        PG.executeMany
+                            (insertItemsQuery tables)
+                            insertRows
+                pure result
+  where
+    itemRowToStoredItem ItemRow{storedItemId = itemId, historyItem = item, createdAt} =
+        StoredItem{itemId, item, createdAt}
 
 conversationExists
     :: ( WithConnection :> es
        , IOE :> es
        )
-    => ConversationsTable
+    => ConversationTables
     -> ConversationId
     -> Eff es Bool
-conversationExists tableName conversationId = do
+conversationExists tables conversationId = do
     rows <-
         PG.query
-            (selectConversationExistsQuery tableName)
+            (selectConversationExistsQuery tables)
             (Only conversationId)
-    pure $ not (null (rows :: [Only ConversationId]))
+    pure (not (null (rows :: [Only ConversationId])))
 
-insertItemIfConversationExists
+lockConversation
     :: ( WithConnection :> es
        , IOE :> es
+       , Error ChatStorageError :> es
        )
-    => ConversationsTable
+    => ConversationTables
     -> ConversationId
-    -> HistoryItem
-    -> Eff es Bool
-insertItemIfConversationExists tableName conversationId item = do
-    itemId <- liftIO nextRandom
-    inserted <-
-        PG.execute
-            (insertItemIfExistsQuery tableName)
-            (itemId, conversationId, item, conversationId)
-    pure (inserted > 0)
+    -> Eff es ()
+lockConversation tables conversationId = do
+    rows <-
+        PG.query
+            (selectConversationForUpdateQuery tables)
+            (Only conversationId)
+    when (null (rows :: [Only ConversationId])) $
+        throwError (NoSuchConversation conversationId)
 
-setupTable
+mkInsertRows
+    :: IOE :> es
+    => ConversationId
+    -> [HistoryItem]
+    -> Eff es [(UUID, ConversationId, HistoryItem)]
+mkInsertRows conversationId historyItems =
+    forM historyItems $ \historyItem -> do
+        itemId <- liftIO nextRandom
+        pure (itemId, conversationId, historyItem)
+
+setupConversationTables
     :: ( IOE :> es
        , WithConnection :> es
        )
-    => ConversationsTable
+    => ConversationTables
     -> Eff es ()
-setupTable tableName = PG.withTransaction do
-    void $ PG.execute_ (createConversationsTableQuery tableName)
-    void $ PG.execute_ (createItemsTableQuery tableName)
-    void $ PG.execute_ (createItemsIndexQuery tableName)
+setupConversationTables tables =
+    withPinnedConnection $
+        PG.withTransaction do
+            void $ PG.execute_ (createConversationsTableQuery tables)
+            void $ PG.execute_ (createItemsTableQuery tables)
+            void $ PG.execute_ (createItemsIndexQuery tables)
 
-conversationTableName :: ConversationsTable -> Text
-conversationTableName tableName = tableName <> "_conversations"
+withPinnedConnection
+    :: forall es a
+     . ( WithConnection :> es
+       )
+    => Eff (WithConnection ': es) a
+    -> Eff es a
+withPinnedConnection action =
+    PG.withConnection $ \connection ->
+        PG.runWithConnection connection action
 
-itemsTableName :: ConversationsTable -> Text
-itemsTableName tableName = tableName <> "_items"
+createConversationsTableQuery :: ConversationTables -> Query
+createConversationsTableQuery tables =
+    toQueryText $
+        "CREATE TABLE IF NOT EXISTS "
+            <> renderIdentifier (conversationTableName tables)
+            <> " ("
+            <> "conversation_id UUID PRIMARY KEY, "
+            <> "created_at timestamp with time zone NOT NULL DEFAULT now()"
+            <> ")"
 
-createConversationsTableQuery :: ConversationsTable -> Query
-createConversationsTableQuery tableName =
-    fromString
-        $ toString
-        $ "CREATE TABLE IF NOT EXISTS "
-        <> conversationTableName tableName
-        <> " ("
-        <> "conversation_id UUID PRIMARY KEY, "
-        <> "created_at timestamp with time zone NOT NULL DEFAULT now()"
-        <> ")"
+createItemsTableQuery :: ConversationTables -> Query
+createItemsTableQuery tables =
+    toQueryText $
+        "CREATE TABLE IF NOT EXISTS "
+            <> renderIdentifier (itemsTableName tables)
+            <> " ("
+            <> "id BIGSERIAL PRIMARY KEY, "
+            <> "item_id UUID NOT NULL UNIQUE, "
+            <> "conversation_id UUID NOT NULL REFERENCES "
+            <> renderIdentifier (conversationTableName tables)
+            <> " (conversation_id) ON DELETE CASCADE, "
+            <> "item JSONB NOT NULL, "
+            <> "created_at timestamp with time zone NOT NULL DEFAULT now()"
+            <> ")"
 
-createItemsTableQuery :: ConversationsTable -> Query
-createItemsTableQuery tableName =
-    fromString
-        $ toString
-        $ "CREATE TABLE IF NOT EXISTS "
-        <> itemsTableName tableName
-        <> " ("
-        <> "id SERIAL PRIMARY KEY, "
-        <> "item_id UUID NOT NULL UNIQUE, "
-        <> "conversation_id UUID NOT NULL REFERENCES "
-        <> conversationTableName tableName
-        <> " (conversation_id) ON DELETE CASCADE, "
-        <> "item JSONB NOT NULL, "
-        <> "created_at timestamp with time zone NOT NULL DEFAULT now()"
-        <> ")"
+insertConversationQuery :: ConversationTables -> Query
+insertConversationQuery tables =
+    toQueryText $
+        "INSERT INTO "
+            <> renderIdentifier (conversationTableName tables)
+            <> " (conversation_id) VALUES (?)"
 
-insertConversationQuery :: ConversationsTable -> Query
-insertConversationQuery tableName =
-    fromString
-        $ toString
-        $ "INSERT INTO "
-        <> conversationTableName tableName
-        <> " (conversation_id) VALUES (?)"
+insertItemsQuery :: ConversationTables -> Query
+insertItemsQuery tables =
+    toQueryText $
+        "INSERT INTO "
+            <> renderIdentifier (itemsTableName tables)
+            <> " (item_id, conversation_id, item) VALUES (?, ?, ?)"
 
-insertItemIfExistsQuery :: ConversationsTable -> Query
-insertItemIfExistsQuery tableName =
-    fromString
-        $ toString
-        $ "INSERT INTO "
-        <> itemsTableName tableName
-        <> " (item_id, conversation_id, item) "
-        <> "SELECT ?, ?, ? WHERE EXISTS ("
-        <> "SELECT 1 FROM "
-        <> conversationTableName tableName
-        <> " WHERE conversation_id = ?"
-        <> ")"
+deleteConversationQuery :: ConversationTables -> Query
+deleteConversationQuery tables =
+    toQueryText $
+        "DELETE FROM "
+            <> renderIdentifier (conversationTableName tables)
+            <> " WHERE conversation_id = ?"
 
-deleteConversationQuery :: ConversationsTable -> Query
-deleteConversationQuery tableName =
-    fromString
-        $ toString
-        $ "DELETE FROM "
-        <> conversationTableName tableName
-        <> " WHERE conversation_id = ?"
+selectConversationExistsQuery :: ConversationTables -> Query
+selectConversationExistsQuery tables =
+    toQueryText $
+        "SELECT conversation_id FROM "
+            <> renderIdentifier (conversationTableName tables)
+            <> " WHERE conversation_id = ?"
 
-selectConversationExistsQuery :: ConversationsTable -> Query
-selectConversationExistsQuery tableName =
-    fromString
-        $ toString
-        $ "SELECT conversation_id FROM "
-        <> conversationTableName tableName
-        <> " WHERE conversation_id = ?"
+selectConversationForUpdateQuery :: ConversationTables -> Query
+selectConversationForUpdateQuery tables =
+    toQueryText $
+        "SELECT conversation_id FROM "
+            <> renderIdentifier (conversationTableName tables)
+            <> " WHERE conversation_id = ? FOR UPDATE"
 
-selectItemsQuery :: ConversationsTable -> Query
-selectItemsQuery tableName =
-    fromString
-        $ toString
-        $ "SELECT item_id, conversation_id, item, created_at FROM "
-        <> itemsTableName tableName
-        <> " WHERE conversation_id = ? ORDER BY created_at ASC, id ASC"
+selectItemsQuery :: ConversationTables -> Query
+selectItemsQuery tables =
+    toQueryText $
+        "SELECT item_id, conversation_id, item, created_at FROM "
+            <> renderIdentifier (itemsTableName tables)
+            <> " WHERE conversation_id = ? ORDER BY created_at ASC, id ASC"
 
-listConversationsQuery :: ConversationsTable -> Query
-listConversationsQuery tableName =
-    fromString
-        $ toString
-        $ "SELECT conversation_id FROM "
-        <> conversationTableName tableName
-        <> " ORDER BY created_at ASC"
+listConversationsQuery :: ConversationTables -> Query
+listConversationsQuery tables =
+    toQueryText $
+        "SELECT conversation_id FROM "
+            <> renderIdentifier (conversationTableName tables)
+            <> " ORDER BY created_at ASC"
 
-createItemsIndexQuery :: ConversationsTable -> Query
-createItemsIndexQuery tableName =
-    fromString
-        $ toString
-        $ "CREATE INDEX IF NOT EXISTS idx_"
-        <> itemsTableName tableName
-        <> "_conversation_id ON "
-        <> itemsTableName tableName
-        <> " (conversation_id)"
+createItemsIndexQuery :: ConversationTables -> Query
+createItemsIndexQuery tables =
+    toQueryText $
+        "CREATE INDEX IF NOT EXISTS "
+            <> renderIdentifier (itemsConversationIndexName tables)
+            <> " ON "
+            <> renderIdentifier (itemsTableName tables)
+            <> " (conversation_id)"
+
+conversationTableName :: ConversationTables -> PgIdentifier
+conversationTableName ConversationTables{conversationTable} = conversationTable
+
+itemsTableName :: ConversationTables -> PgIdentifier
+itemsTableName ConversationTables{itemsTable} = itemsTable
+
+itemsConversationIndexName :: ConversationTables -> PgIdentifier
+itemsConversationIndexName ConversationTables{itemsConversationIndex} = itemsConversationIndex
+
+renderIdentifier :: PgIdentifier -> Text
+renderIdentifier = quotePgIdentifier
+
+toQueryText :: Text -> Query
+toQueryText = fromString . toString

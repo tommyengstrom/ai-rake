@@ -1,6 +1,9 @@
 module LlmChat.Provider.MediaSpec where
 
 import Data.Aeson
+import Effectful
+import Effectful.Error.Static
+import LlmChat.Error (LlmChatError (..))
 import LlmChat.Media
 import LlmChat.Providers.OpenAI.Images
 import LlmChat.Providers.XAI.Imagine
@@ -263,7 +266,7 @@ spec = describe "media providers" $ do
                     , "duration" .= (12 :: Int)
                     ]
 
-        it "encodes xAI video edit requests without generation-only fields" $ do
+        it "preserves explicit xAI video edit fields in JSON" $ do
             let request :: XAIImagineVideoRequest
                 request =
                     XAIImagineVideoRequest
@@ -281,4 +284,65 @@ spec = describe "media providers" $ do
                     [ "model" .= ("grok-imagine-video" :: Text)
                     , "prompt" .= ("add a silver necklace" :: Text)
                     , "video" .= object ["url" .= ("https://example.com/source.mp4" :: Text)]
+                    , "duration" .= (10 :: Int)
+                    , "aspect_ratio" .= ("1:1" :: Text)
+                    , "resolution" .= ("480p" :: Text)
                     ]
+
+    describe "request validation" $ do
+        it "fails fast on OpenAI masks without input images" $ do
+            let request =
+                    (defaultOpenAIImageRequest "add a moon")
+                        { mask = Just (OpenAIImageUrl "https://example.com/mask.png")
+                        }
+
+            result <-
+                runLlmError $
+                    generateOpenAIImage (defaultOpenAIImagesSettings "test-key") request
+
+            result `shouldBe` Left (LlmExpectationError "OpenAI image masks require at least one input image")
+
+        it "fails fast on OpenAI input fidelity without input images" $ do
+            let request =
+                    (defaultOpenAIImageRequest "sharpen this")
+                        { inputFidelity = Just "high"
+                        }
+
+            result <-
+                runLlmError $
+                    generateOpenAIImage (defaultOpenAIImagesSettings "test-key") request
+
+            result `shouldBe` Left (LlmExpectationError "OpenAI inputFidelity requires at least one input image")
+
+        it "fails fast on xAI video edits with generation-only fields" $ do
+            let request =
+                    (defaultXAIImagineVideoRequest "add a silver necklace")
+                        { videoUrl = Just "https://example.com/source.mp4"
+                        , duration = Just 10
+                        , aspectRatio = Just "1:1"
+                        , resolution = Just "480p"
+                        }
+
+            result <-
+                runLlmError $
+                    startXAIVideo (defaultXAIImagineSettings "test-key") request
+
+            result `shouldBe` Left (LlmExpectationError "xAI video edit requests cannot set duration, aspectRatio, or resolution")
+
+        it "fails fast on xAI requests that set both image and video sources" $ do
+            let request =
+                    (defaultXAIImagineVideoRequest "add a silver necklace")
+                        { imageUrl = Just "https://example.com/base.png"
+                        , videoUrl = Just "https://example.com/source.mp4"
+                        }
+
+            result <-
+                runLlmError $
+                    startXAIVideo (defaultXAIImagineSettings "test-key") request
+
+            result `shouldBe` Left (LlmExpectationError "xAI video requests cannot set both imageUrl and videoUrl")
+
+runLlmError :: Eff '[Error LlmChatError, IOE] a -> IO (Either LlmChatError a)
+runLlmError =
+    runEff
+        . runErrorNoCallStack

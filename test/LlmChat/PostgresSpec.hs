@@ -2,8 +2,11 @@ module LlmChat.PostgresSpec where
 
 import Control.Exception (bracket, try)
 import Data.Set qualified as Set
+import Data.Text qualified as T
 import Data.Time
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
+import Data.UUID (UUID)
+import Data.UUID.V4 (nextRandom)
 import Database.PostgreSQL.Simple
 import Effectful
 import Effectful.Concurrent (Concurrent, runConcurrent)
@@ -20,10 +23,29 @@ import Test.Hspec
 import Test.Hspec.QuickCheck (modifyMaxSuccess)
 import Test.QuickCheck
 import Test.QuickCheck.Monadic
+import UnliftIO (forConcurrently)
 import UnliftIO.Pool (Pool, destroyAllResources, mkDefaultPoolConfig, newPool, setNumStripes)
 
 spec :: Spec
 spec = do
+    describe "PostgreSQL identifiers" $ do
+        it "accepts valid identifiers" $ do
+            fmap pgIdentifierText (mkPgIdentifier "valid_identifier_123")
+                `shouldBe` Right "valid_identifier_123"
+
+        it "rejects empty, malformed, and uppercase identifiers" $ do
+            mkPgIdentifier "" `shouldSatisfy` isLeft
+            mkPgIdentifier "9invalid" `shouldSatisfy` isLeft
+            mkPgIdentifier "invalid-name" `shouldSatisfy` isLeft
+            mkPgIdentifier "Invalid" `shouldSatisfy` isLeft
+
+        it "rejects prefixes whose derived table names exceed PostgreSQL limits" $
+            case mkPgIdentifier (T.replicate 50 "a") of
+                Left err ->
+                    expectationFailure (toString err)
+                Right prefix ->
+                    conversationTablesFromPrefix prefix `shouldSatisfy` isLeft
+
     let connectionString = "host=localhost port=5432 user=postgres password=postgres dbname=chatcompletion-test"
     postgresAvailable <- runIO (isRight <$> try @SomeException (withConnection connectionString (\_ -> pure ())))
 
@@ -35,21 +57,21 @@ spec = do
         else
             describe "runLlmChatStoragePostgres" $ do
                 conversationsTable <- runIO newConversationsTable
-                pool <- runIO $ makePool connectionString 1 5
+                pool <- runIO $ makePool connectionString 2 5
 
-                let cleanup = do
+                let cleanup =
                         dropTablesIfExists connectionString conversationsTable
 
                 runIO do
                     cleanup
                     runEff
                         . runWithConnectionPool pool
-                        $ setupTable conversationsTable
+                        $ setupConversationTables conversationsTable
 
                 afterAll_ (cleanup *> destroyAllResources pool) do
                     postgresStorageBehaviourSpec pool conversationsTable
 
-postgresStorageBehaviourSpec :: Pool Connection -> ConversationsTable -> Spec
+postgresStorageBehaviourSpec :: Pool Connection -> ConversationTables -> Spec
 postgresStorageBehaviourSpec pool conversationsTable =
     describe "LlmChatStorage" do
         let limit = modifyMaxSuccess (const 20)
@@ -110,6 +132,54 @@ postgresStorageBehaviourSpec pool conversationsTable =
                         $ appendItem convId (user prompt)
                 liftIO $ result `shouldBe` Left (NoSuchConversation convId)
 
+        limit $ it "ModifyConversationAtomic appends based on the current history" $ do
+            property $ \(SomeText firstPrompt) (SomeText secondPrompt) -> monadicIO $ do
+                result <- run $ runStack $ do
+                    convId <- createConversation
+                    appendItem convId (user firstPrompt)
+                    observedLength <-
+                        modifyConversationAtomic convId \history ->
+                            (length history, [user secondPrompt])
+                    finalHistory <- getConversation convId
+                    pure (observedLength, finalHistory)
+
+                liftIO $
+                    result `shouldBe`
+                        Right
+                            ( 1
+                            , [user firstPrompt, user secondPrompt]
+                            )
+
+        limit $ it "ModifyConversationAtomic errors if conversation does not exist" $ do
+            property $ \(convId :: ConversationId) -> monadicIO $ do
+                result <-
+                    run
+                        $ runStack
+                        $ modifyConversationAtomic convId (\history -> (length history, [user "ignored"]))
+                liftIO $ result `shouldBe` Left (NoSuchConversation convId)
+
+        it "ModifyConversationAtomic serializes concurrent writers" $ do
+            let workerCount = 4
+
+            Right convId <- runStack createConversation
+            threadResults <-
+                forConcurrently ([1 .. workerCount] :: [Int]) $ \workerIndex ->
+                    runStack $
+                        modifyConversationAtomic convId \history ->
+                            (length history, [user ("worker-" <> show workerIndex)])
+
+            Right finalHistory <- runStack (getConversation convId)
+
+            observedLengths <- forM threadResults $ \case
+                Left err ->
+                    expectationFailure ("Concurrent PostgreSQL storage worker failed: " <> show err)
+                        >> pure (-1)
+                Right observedLength ->
+                    pure observedLength
+
+            sort observedLengths `shouldBe` [0 .. workerCount - 1]
+            length finalHistory `shouldBe` workerCount
+
         limit $ it "DeleteConversation removes the conversation" $ do
             property $ monadicIO $ do
                 Right (convId, listAfterDelete, fetchResult) <- run
@@ -132,11 +202,18 @@ postgresStorageBehaviourSpec pool conversationsTable =
         | HLocal LocalMessage{role = GenericUser, parts = [PartText{text}]} <- reverse history
         ]
 
-newConversationsTable :: IO ConversationsTable
+newConversationsTable :: IO ConversationTables
 newConversationsTable = do
     now <- getCurrentTime
-    let unixTime :: String = show $ (floor $ utcTimeToPOSIXSeconds now :: Integer)
-    pure $ "conversations_" <> toText unixTime
+    uuid <- nextRandom
+    let unixTime :: String = show (floor (utcTimeToPOSIXSeconds now) :: Integer)
+        uuidSuffix =
+            T.take 8 $
+                T.replace "-" "_" $
+                    toText (show (uuid :: UUID) :: String)
+        prefixText = "conv_" <> toText unixTime <> "_" <> uuidSuffix
+    prefix <- either (fail . toString) pure (mkPgIdentifier prefixText)
+    either (fail . toString) pure (conversationTablesFromPrefix prefix)
 
 makePool :: ByteString -> Int -> Int -> IO (Pool Connection)
 makePool connStr stripes maxOpen = do
@@ -146,10 +223,14 @@ makePool connStr stripes maxOpen = do
 withConnection :: ByteString -> (Connection -> IO a) -> IO a
 withConnection connStr action = bracket (connectPostgreSQL connStr) close action
 
-dropTablesIfExists :: ByteString -> ConversationsTable -> IO ()
-dropTablesIfExists connStr tableName =
+dropTablesIfExists :: ByteString -> ConversationTables -> IO ()
+dropTablesIfExists connStr ConversationTables{conversationTable, itemsTable} =
     withConnection connStr $ \conn -> do
         void . execute_ conn . fromString . toString $
-            "DROP TABLE IF EXISTS " <> tableName <> "_items"
+            "DROP TABLE IF EXISTS " <> quoteIdentifier itemsTable
         void . execute_ conn . fromString . toString $
-            "DROP TABLE IF EXISTS " <> tableName <> "_conversations"
+            "DROP TABLE IF EXISTS " <> quoteIdentifier conversationTable
+
+quoteIdentifier :: PgIdentifier -> Text
+quoteIdentifier identifier =
+    "\"" <> pgIdentifierText identifier <> "\""

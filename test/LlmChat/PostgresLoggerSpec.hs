@@ -1,25 +1,34 @@
 module LlmChat.PostgresLoggerSpec where
 
-import Control.Lens
-import Control.Exception (bracket, try)
+import Control.Concurrent (threadDelay)
+import Control.Exception (finally, try)
 import Data.Aeson (Value, object, toJSON)
 import Data.Aeson qualified as Aeson
-import Data.Generics.Labels ()
+import Data.Text qualified as T
 import Data.Time
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
-import Data.Text qualified as T
 import Data.UUID (UUID)
 import Data.UUID.V4 (nextRandom)
-import Database.PostgreSQL.Simple
+import Database.PostgreSQL.Simple (execute_)
+import Effectful
+import Effectful.PostgreSQL (WithConnection)
+import Effectful.PostgreSQL.Connection.Pool (runWithConnectionPool)
 import LlmChat.PostgresLogger
     ( JsonField (..)
-    , createTableQuery
-    , getAllLogs
-    , postgresResponseLogger
+    , LogEntry (..)
+    , PgIdentifier
+    , getResponseLogs
+    , getResponseLogsByTimeRange
+    , insertResponseLog
+    , mkPgIdentifier
+    , pgIdentifierText
+    , setupResponseLogTable
     )
+import LlmChat.PostgresSpec (makePool, withConnection)
 import LlmChat.Types (ConversationId (..))
 import Relude
 import Test.Hspec
+import UnliftIO.Pool (destroyAllResources)
 
 testResponse :: Value
 testResponse =
@@ -42,77 +51,94 @@ spec = do
                     pendingWith "PostgreSQL test database is unavailable."
         else
             describe "PostgresLogger" $ do
-                let getConnection = connectPostgreSQL connectionString
+                pool <- runIO $ makePool connectionString 1 5
 
-                describe "logs JSON responses to PostgreSQL as JSONB" $ do
-                    tableName <- runIO uniqueTableName
+                let runDb :: Eff '[WithConnection, IOE] a -> IO a
+                    runDb =
+                        runEff
+                            . runWithConnectionPool pool
 
-                    let setupTable = do
-                            conn <- getConnection
-                            _ <- execute_ conn $ createTableQuery tableName
-                            close conn
-
-                    let cleanup = do
-                            conn <- getConnection
-                            _ <- execute_ conn $ fromString $ toString $ "DROP TABLE IF EXISTS " <> tableName
-                            close conn
-
-                    runIO do
+                let withLogTable action = do
+                        tableName <- uniqueTableName
+                        let cleanup = dropTableIfExists connectionString tableName
                         cleanup
-                        setupTable
-                    afterAll_ cleanup $ do
-                        it "works correctly" $ do
-                            testConvId <- ConversationId <$> nextRandom
-                            postgresResponseLogger tableName getConnection testConvId testResponse
+                        runDb (setupResponseLogTable tableName)
+                        action tableName `finally` cleanup
 
-                            logs <- getAllLogs @Value tableName getConnection
+                afterAll_ (destroyAllResources pool) do
+                    it "logs JSON responses to PostgreSQL as JSONB" $
+                        withLogTable $ \tableName -> do
+                            testConvId <- ConversationId <$> nextRandom
+                            runDb $ insertResponseLog tableName testConvId testResponse
+
+                            logs <- runDb (getResponseLogs tableName :: Eff '[WithConnection, IOE] [LogEntry Value])
                             length logs `shouldBe` 1
 
-                            case viaNonEmpty head logs of
-                                Nothing ->
-                                    expectationFailure "Expected at least one log entry"
-                                Just logEntry -> do
-                                    case logEntry ^. #response of
-                                        JsonField actualResponse ->
-                                            toJSON actualResponse `shouldBe` testResponse
-                                    (logEntry ^. #conversationId) `shouldBe` testConvId
+                            case logs of
+                                [LogEntry{conversationId = actualConversationId, response = JsonField actualResponse, createdAt = logTime}] -> do
+                                    toJSON actualResponse `shouldBe` testResponse
+                                    actualConversationId `shouldBe` testConvId
                                     now <- getCurrentTime
-                                    let logTime = logEntry ^. #createdAt
                                     diffUTCTime now logTime `shouldSatisfy` (< 10)
+                                _ ->
+                                    expectationFailure "Expected exactly one log entry"
 
-                describe "can log multiple entries" $ do
-                    tableName <- runIO uniqueTableName
+                    it "returns log entries in reverse chronological order" $
+                        withLogTable $ \tableName -> do
+                            firstConversationId <- ConversationId <$> nextRandom
+                            secondConversationId <- ConversationId <$> nextRandom
 
-                    let setupTable = do
-                            conn <- getConnection
-                            _ <- execute_ conn $ createTableQuery tableName
-                            close conn
+                            runDb $ insertResponseLog tableName firstConversationId testResponse
+                            threadDelay 50000
+                            runDb $ insertResponseLog tableName secondConversationId testResponse
 
-                    let cleanup = do
-                            conn <- getConnection
-                            _ <- execute_ conn $ fromString $ toString $ "DROP TABLE IF EXISTS " <> tableName
-                            close conn
+                            logs <- runDb (getResponseLogs tableName :: Eff '[WithConnection, IOE] [LogEntry Value])
+                            let conversationIds =
+                                    [ actualConversationId
+                                    | LogEntry{conversationId = actualConversationId} <- logs
+                                    ]
 
-                    runIO do
-                        cleanup
-                        setupTable
-                    afterAll_ cleanup $ do
-                        it "works correctly" $ do
-                            testConvId1 <- ConversationId <$> nextRandom
-                            testConvId2 <- ConversationId <$> nextRandom
-                            postgresResponseLogger tableName getConnection testConvId1 testResponse
-                            postgresResponseLogger tableName getConnection testConvId2 testResponse
+                            conversationIds `shouldBe` [secondConversationId, firstConversationId]
 
-                            logs <- getAllLogs @Value tableName getConnection
-                            length logs `shouldBe` 2
+                    it "filters log entries by time range" $
+                        withLogTable $ \tableName -> do
+                            firstConversationId <- ConversationId <$> nextRandom
+                            secondConversationId <- ConversationId <$> nextRandom
 
-uniqueTableName :: IO Text
+                            runDb $ insertResponseLog tableName firstConversationId testResponse
+                            threadDelay 50000
+                            startTime <- getCurrentTime
+                            threadDelay 50000
+                            runDb $ insertResponseLog tableName secondConversationId testResponse
+                            endTime <- getCurrentTime
+
+                            logs <-
+                                runDb
+                                    ( getResponseLogsByTimeRange tableName startTime endTime
+                                        :: Eff '[WithConnection, IOE] [LogEntry Value]
+                                    )
+                            let conversationIds =
+                                    [ actualConversationId
+                                    | LogEntry{conversationId = actualConversationId} <- logs
+                                    ]
+
+                            conversationIds `shouldBe` [secondConversationId]
+
+uniqueTableName :: IO PgIdentifier
 uniqueTableName = do
     now <- getCurrentTime
     uuid <- nextRandom
-    let randomId = toText (show (uuid :: UUID) :: String)
-    let unixTime :: String = show $ (floor $ utcTimeToPOSIXSeconds now :: Integer)
-    pure $ "response_logs_" <> toText unixTime <> "_" <> T.replace "-" "_" randomId
+    let randomId = T.replace "-" "_" (toText (show (uuid :: UUID) :: String))
+        unixTime :: String = show (floor (utcTimeToPOSIXSeconds now) :: Integer)
+        tableName = "response_logs_" <> toText unixTime <> "_" <> randomId
+    either (fail . toString) pure (mkPgIdentifier tableName)
 
-withConnection :: ByteString -> (Connection -> IO a) -> IO a
-withConnection connStr action = bracket (connectPostgreSQL connStr) close action
+dropTableIfExists :: ByteString -> PgIdentifier -> IO ()
+dropTableIfExists connStr tableName =
+    withConnection connStr $ \conn ->
+        void . execute_ conn . fromString . toString $
+            "DROP TABLE IF EXISTS " <> quoteIdentifier tableName
+
+quoteIdentifier :: PgIdentifier -> Text
+quoteIdentifier identifier =
+    "\"" <> pgIdentifierText identifier <> "\""

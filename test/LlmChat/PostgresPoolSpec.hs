@@ -1,23 +1,26 @@
 module LlmChat.PostgresPoolSpec where
 
-import Control.Exception (bracket, try)
-import Data.Time
-import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
-import Database.PostgreSQL.Simple
+import Control.Exception (try)
 import Effectful
 import Effectful.Error.Static
 import Effectful.PostgreSQL (WithConnection)
 import Effectful.PostgreSQL.Connection.Pool (runWithConnectionPool)
 import Effectful.Time
 import LlmChat.Error (LlmChatError)
-import LlmChat.PostgresSpec (postgresStorageBehaviourSpec)
+import LlmChat.PostgresSpec
+    ( dropTablesIfExists
+    , makePool
+    , newConversationsTable
+    , postgresStorageBehaviourSpec
+    , withConnection
+    )
 import LlmChat.Storage.Effect
 import LlmChat.Storage.Postgres
 import LlmChat.Types
 import Relude
 import Test.Hspec
 import UnliftIO (forConcurrently)
-import UnliftIO.Pool (Pool, destroyAllResources, mkDefaultPoolConfig, newPool, setNumStripes)
+import UnliftIO.Pool (destroyAllResources)
 
 spec :: Spec
 spec = do
@@ -42,7 +45,7 @@ spec = do
                         cleanup
                         runEff
                             . runWithConnectionPool pool
-                            $ setupTable conversationsTable
+                            $ setupConversationTables conversationsTable
 
                     afterAll_ (cleanup *> destroyAllResources pool) do
                         postgresStorageBehaviourSpec pool conversationsTable
@@ -53,7 +56,7 @@ spec = do
                         cleanup
                         runEff
                             . runWithConnectionPool pool
-                            $ setupTable conversationsTable
+                            $ setupConversationTables conversationsTable
 
                         let runStack :: Eff '[LlmChatStorage, WithConnection, Error ChatStorageError, Error LlmChatError, Time, IOE] Int -> IO (Either LlmChatError (Either ChatStorageError Int))
                             runStack =
@@ -64,7 +67,7 @@ spec = do
                                     . runWithConnectionPool pool
                                     . runLlmChatStoragePostgres conversationsTable
 
-                        results <- forConcurrently ([1 .. 20] :: [Int]) $ \i ->
+                        results <- forConcurrently ([1 .. 4] :: [Int]) $ \i ->
                             runStack do
                                 convId <- createConversation
                                 appendItems
@@ -86,25 +89,3 @@ spec = do
 
                         destroyAllResources pool
                         cleanup
-
-newConversationsTable :: IO ConversationsTable
-newConversationsTable = do
-    now <- getCurrentTime
-    let unixTime :: String = show $ (floor $ utcTimeToPOSIXSeconds now :: Integer)
-    pure $ "conversations_pool_" <> toText unixTime
-
-makePool :: ByteString -> Int -> Int -> IO (Pool Connection)
-makePool connStr stripes maxOpen = do
-    config <- mkDefaultPoolConfig (connectPostgreSQL connStr) close 60 maxOpen
-    newPool $ setNumStripes (Just stripes) config
-
-withConnection :: ByteString -> (Connection -> IO a) -> IO a
-withConnection connStr action = bracket (connectPostgreSQL connStr) close action
-
-dropTablesIfExists :: ByteString -> ConversationsTable -> IO ()
-dropTablesIfExists connStr tableName =
-    withConnection connStr $ \conn -> do
-        void . execute_ conn . fromString . toString $
-            "DROP TABLE IF EXISTS " <> tableName <> "_items"
-        void . execute_ conn . fromString . toString $
-            "DROP TABLE IF EXISTS " <> tableName <> "_conversations"

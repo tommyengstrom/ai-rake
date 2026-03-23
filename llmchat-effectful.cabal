@@ -109,8 +109,14 @@ library
       LlmChat.Tool
       LlmChat.Types
   other-modules:
+      LlmChat.Postgres.Internal
+      LlmChat.Providers.Responses.Projection
+      LlmChat.Providers.Responses.Request
+      LlmChat.Providers.Responses.Runner
       LlmChat.Providers.Responses.Internal
       LlmChat.Internal.Schema
+      LlmChat.Providers.XAI.Imagine.Client
+      LlmChat.Providers.XAI.Imagine.Types
   hs-source-dirs: src
   build-depends:
     , http-api-data

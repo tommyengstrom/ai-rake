@@ -1,34 +1,45 @@
 {-# LANGUAGE UndecidableInstances #-}
-{-# OPTIONS_GHC -Wno-orphans #-}
 
-module LlmChat.PostgresLogger where
+module LlmChat.PostgresLogger
+    ( PgIdentifier
+    , mkPgIdentifier
+    , pgIdentifierText
+    , JsonField (..)
+    , LogEntry (..)
+    , setupResponseLogTable
+    , insertResponseLog
+    , getResponseLogs
+    , getResponseLogsByTimeRange
+    ) where
 
-import LlmChat.Types (ConversationId (..))
-import Data.Aeson (FromJSON, Result (..), ToJSON, Value, fromJSON, toJSON)
+import Data.Aeson (FromJSON, Result (Error, Success), ToJSON, Value, fromJSON, toJSON)
 import Data.Time
-import Database.PostgreSQL.Simple
+import Database.PostgreSQL.Simple (Query)
 import Database.PostgreSQL.Simple.FromField
 import Database.PostgreSQL.Simple.FromRow (FromRow (..))
 import Database.PostgreSQL.Simple.FromRow qualified as PG
 import Database.PostgreSQL.Simple.ToField
-import Database.PostgreSQL.Simple.ToRow
+import Effectful
+import Effectful.PostgreSQL (WithConnection)
+import Effectful.PostgreSQL qualified as PG
+import LlmChat.Postgres.Internal
+import LlmChat.Types (ConversationId)
 import Relude
 
-type TableName = Text
-
--- Newtype wrapper to avoid overlapping instances
 newtype JsonField a = JsonField a
-    deriving stock (Show, Generic)
+    deriving stock (Show, Eq, Generic)
 
 instance ToJSON a => ToField (JsonField a) where
     toField (JsonField obj) = toField (toJSON obj)
 
 instance (FromJSON a, Typeable a) => FromField (JsonField a) where
-    fromField f mdata = do
-        (value :: Value) <- fromField f mdata
+    fromField field maybeData = do
+        (value :: Value) <- fromField field maybeData
         case fromJSON value of
-            Success obj -> pure (JsonField obj)
-            Error err -> returnError ConversionFailed f ("Could not decode from JSON: " <> err)
+            Success obj ->
+                pure (JsonField obj)
+            Error err ->
+                returnError ConversionFailed field ("Could not decode from JSON: " <> err)
 
 data LogEntry a = LogEntry
     { logId :: Int64
@@ -36,85 +47,115 @@ data LogEntry a = LogEntry
     , response :: JsonField a
     , createdAt :: UTCTime
     }
-    deriving stock (Show, Generic)
-
-instance ToField ConversationId where
-    toField (ConversationId uuid) = toField uuid
-
-instance FromField ConversationId where
-    fromField f mdata = ConversationId <$> fromField f mdata
+    deriving stock (Show, Eq, Generic)
 
 instance (FromJSON a, Typeable a) => FromRow (LogEntry a) where
     fromRow = LogEntry <$> PG.field <*> PG.field <*> PG.field <*> PG.field
 
-instance ToJSON a => ToRow (LogEntry a) where
-    toRow (LogEntry logId' conversationId' response' loggedAt') = [toField logId', toField conversationId', toField response', toField loggedAt']
+setupResponseLogTable
+    :: ( IOE :> es
+       , WithConnection :> es
+       )
+    => PgIdentifier
+    -> Eff es ()
+setupResponseLogTable tableName =
+    withPinnedConnection $
+        PG.withTransaction $
+            void $ PG.execute_ (createTableQuery tableName)
 
-postgresResponseLogger
-    :: ToJSON a => TableName -> IO Connection -> ConversationId -> a -> IO ()
-postgresResponseLogger tableName getConnection convId response = do
-    conn <- getConnection
-    now <- getCurrentTime
-    withTransaction conn $ do
-        _ <- execute conn (insertQuery tableName) (convId, JsonField response, now)
-        pure ()
-    close conn
+insertResponseLog
+    :: ( IOE :> es
+       , WithConnection :> es
+       , ToJSON a
+       )
+    => PgIdentifier
+    -> ConversationId
+    -> a
+    -> Eff es ()
+insertResponseLog tableName conversationId responseValue = do
+    createdAt <- liftIO getCurrentTime
+    withPinnedConnection $
+        PG.withTransaction $
+            void $
+                PG.execute
+                    (insertQuery tableName)
+                    (conversationId, JsonField responseValue, createdAt)
 
--- Helper function that creates a PostgreSQL logger function
-makePostgresLogger
-    :: ToJSON a => TableName -> IO Connection -> ConversationId -> a -> IO ()
-makePostgresLogger = postgresResponseLogger
+getResponseLogs
+    :: ( IOE :> es
+       , WithConnection :> es
+       , FromJSON a
+       , Typeable a
+       )
+    => PgIdentifier
+    -> Eff es [LogEntry a]
+getResponseLogs tableName =
+    withPinnedConnection $
+        PG.withTransaction $
+            PG.query_ (selectAllQuery tableName)
 
-createTableQuery :: TableName -> Query
+getResponseLogsByTimeRange
+    :: ( IOE :> es
+       , WithConnection :> es
+       , FromJSON a
+       , Typeable a
+       )
+    => PgIdentifier
+    -> UTCTime
+    -> UTCTime
+    -> Eff es [LogEntry a]
+getResponseLogsByTimeRange tableName startTime endTime =
+    withPinnedConnection $
+        PG.withTransaction $
+            PG.query
+                (selectByTimeRangeQuery tableName)
+                (startTime, endTime)
+
+withPinnedConnection
+    :: forall es a
+     . ( WithConnection :> es
+       )
+    => Eff (WithConnection ': es) a
+    -> Eff es a
+withPinnedConnection action =
+    PG.withConnection $ \connection ->
+        PG.runWithConnection connection action
+
+createTableQuery :: PgIdentifier -> Query
 createTableQuery tableName =
-    fromString
-        $ toString
-        $ "CREATE TABLE IF NOT EXISTS "
-        <> tableName
-        <> " ("
-        <> "id BIGSERIAL PRIMARY KEY, "
-        <> "conversation_id UUID NOT NULL, "
-        <> "response JSONB NOT NULL, "
-        <> "created_at TIMESTAMP WITH TIME ZONE NOT NULL"
-        <> ")"
+    toQueryText $
+        "CREATE TABLE IF NOT EXISTS "
+            <> renderIdentifier tableName
+            <> " ("
+            <> "id BIGSERIAL PRIMARY KEY, "
+            <> "conversation_id UUID NOT NULL, "
+            <> "response JSONB NOT NULL, "
+            <> "created_at TIMESTAMP WITH TIME ZONE NOT NULL"
+            <> ")"
 
-insertQuery :: TableName -> Query
+insertQuery :: PgIdentifier -> Query
 insertQuery tableName =
-    fromString
-        $ toString
-        $ "INSERT INTO "
-        <> tableName
-        <> " (conversation_id, response, created_at) VALUES (?, ?, ?)"
+    toQueryText $
+        "INSERT INTO "
+            <> renderIdentifier tableName
+            <> " (conversation_id, response, created_at) VALUES (?, ?, ?)"
 
-selectAllQuery :: TableName -> Query
+selectAllQuery :: PgIdentifier -> Query
 selectAllQuery tableName =
-    fromString
-        $ toString
-        $ "SELECT id, conversation_id, response, created_at FROM "
-        <> tableName
-        <> " ORDER BY created_at DESC"
+    toQueryText $
+        "SELECT id, conversation_id, response, created_at FROM "
+            <> renderIdentifier tableName
+            <> " ORDER BY created_at DESC, id DESC"
 
-selectByTimeRangeQuery :: TableName -> Query
+selectByTimeRangeQuery :: PgIdentifier -> Query
 selectByTimeRangeQuery tableName =
-    fromString
-        $ toString
-        $ "SELECT id, conversation_id, response, created_at FROM "
-        <> tableName
-        <> " WHERE created_at >= ? AND created_at <= ? ORDER BY created_at DESC"
+    toQueryText $
+        "SELECT id, conversation_id, response, created_at FROM "
+            <> renderIdentifier tableName
+            <> " WHERE created_at >= ? AND created_at <= ? ORDER BY created_at DESC, id DESC"
 
--- Helper functions for querying logs
-getAllLogs :: (FromJSON a, Typeable a) => TableName -> IO Connection -> IO [LogEntry a]
-getAllLogs tableName getConnection = do
-    conn <- getConnection
-    result <- query_ conn (selectAllQuery tableName)
-    close conn
-    pure result
+renderIdentifier :: PgIdentifier -> Text
+renderIdentifier = quotePgIdentifier
 
-getLogsByTimeRange
-    :: (FromJSON a, Typeable a)
-    => TableName -> IO Connection -> UTCTime -> UTCTime -> IO [LogEntry a]
-getLogsByTimeRange tableName getConnection startTime endTime = do
-    conn <- getConnection
-    result <- query conn (selectByTimeRangeQuery tableName) (startTime, endTime)
-    close conn
-    pure result
+toQueryText :: Text -> Query
+toQueryText = fromString . toString
