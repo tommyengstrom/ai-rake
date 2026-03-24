@@ -4,6 +4,7 @@ module GenImageCLI
     , CommonGenImageOptions (..)
     , OpenAIGenImageOptions (..)
     , GrokGenImageOptions (..)
+    , Banana2GenImageOptions (..)
     , GenImageOptions (..)
     , ParseGenImageArgsResult (..)
     , parseGenImageArgs
@@ -19,9 +20,10 @@ import Data.Text.Encoding qualified as TextEncoding
 import Effectful
 import Effectful.Error.Static
 import GenCliSupport
-import LlmChat
-import LlmChat.Providers.OpenAI.Images
-import LlmChat.Providers.XAI.Imagine
+import Rake
+import Rake.Providers.Gemini.Images
+import Rake.Providers.OpenAI.Images
+import Rake.Providers.XAI.Imagine
 import Relude hiding (exitFailure, getArgs, lookupEnv)
 import System.Environment (getArgs, getProgName, lookupEnv)
 import System.Exit (exitFailure)
@@ -30,12 +32,14 @@ import System.IO qualified as IO
 data GenImageProvider
     = GenImageProviderOpenAI
     | GenImageProviderGrok
+    | GenImageProviderBanana2
     deriving stock (Show, Eq)
 
 data GenImageHelpTopic
     = GenImageHelpGeneral
     | GenImageHelpOpenAI
     | GenImageHelpGrok
+    | GenImageHelpBanana2
     deriving stock (Show, Eq)
 
 data CommonGenImageOptions = CommonGenImageOptions
@@ -73,9 +77,19 @@ data GrokGenImageOptions = GrokGenImageOptions
     }
     deriving stock (Show, Eq)
 
+data Banana2GenImageOptions = Banana2GenImageOptions
+    { banana2CommonOptions :: CommonGenImageOptions
+    , banana2Model :: Text
+    , banana2InputImageSources :: [Text]
+    , banana2AspectRatio :: Maybe Text
+    , banana2ImageSize :: Maybe Text
+    }
+    deriving stock (Show, Eq)
+
 data GenImageOptions
     = GenImageOpenAI OpenAIGenImageOptions
     | GenImageGrok GrokGenImageOptions
+    | GenImageBanana2 Banana2GenImageOptions
     deriving stock (Show, Eq)
 
 data ParseGenImageArgsResult
@@ -138,6 +152,21 @@ defaultGrokGenImageOptions =
         , grokResponseFormat = "b64_json"
         }
 
+defaultBanana2GenImageOptions :: Banana2GenImageOptions
+defaultBanana2GenImageOptions =
+    Banana2GenImageOptions
+        { banana2CommonOptions =
+            CommonGenImageOptions
+                { commonPromptText = ""
+                , commonOutputPath = Nothing
+                , commonImageCount = 1
+                }
+        , banana2Model = "gemini-2.5-flash-image"
+        , banana2InputImageSources = []
+        , banana2AspectRatio = Nothing
+        , banana2ImageSize = Nothing
+        }
+
 runGenImageCli :: IO ()
 runGenImageCli = do
     progName <- getProgName
@@ -179,7 +208,7 @@ runGenImage = \case
             maybeApiKey <- lookupEnv "OPENAI_API_KEY"
             case maybeApiKey of
                 Nothing ->
-                    pure (Left "OPENAI_API_KEY is required for OpenAI image generation")
+                    pure (Left "OPENAI_API_KEY is required for gptimage image generation")
                 Just apiKey -> do
                     resolvedInputImages <- traverse resolveMediaSource openAIInputImageSources
                     resolvedMaskSource <- traverse resolveMediaSource openAIMaskSource
@@ -227,7 +256,7 @@ runGenImage = \case
             maybeApiKey <- lookupEnv "XAI_API_KEY"
             case maybeApiKey of
                 Nothing ->
-                    pure (Left "XAI_API_KEY is required for Grok image generation")
+                    pure (Left "XAI_API_KEY is required for imagine image generation")
                 Just apiKey -> do
                     resolvedInputImages <- traverse resolveMediaSource grokInputImageSources
                     case sequence resolvedInputImages of
@@ -248,16 +277,45 @@ runGenImage = \case
                                         }
                             responseResult <- runProvider (generateXAIImage settings request)
                             handleImageResponse commonOutputPath commonPromptText responseResult
+    GenImageBanana2 Banana2GenImageOptions
+        { banana2CommonOptions = CommonGenImageOptions{commonPromptText, commonOutputPath, commonImageCount = _}
+        , banana2Model
+        , banana2InputImageSources
+        , banana2AspectRatio
+        , banana2ImageSize
+        } -> do
+            maybeApiKey <- lookupEnv "GEMINI_API_KEY"
+            case maybeApiKey of
+                Nothing ->
+                    pure (Left "GEMINI_API_KEY is required for Banana2 image generation")
+                Just apiKey -> do
+                        resolvedInputImages <- traverse resolveInlineImageSource banana2InputImageSources
+                        case sequence resolvedInputImages of
+                            Left err ->
+                                pure (Left err)
+                            Right inputImages -> do
+                                let settings = defaultGeminiImagesSettings (toText apiKey)
+                                    request :: GeminiImageRequest
+                                    request =
+                                        GeminiImageRequest
+                                            { model = banana2Model
+                                            , prompt = commonPromptText
+                                            , inputImages
+                                            , aspectRatio = banana2AspectRatio
+                                            , imageSize = banana2ImageSize
+                                            }
+                                responseResult <- runProvider (generateGeminiImage settings request)
+                                handleImageResponse commonOutputPath commonPromptText responseResult
   where
     runProvider
-        :: Eff '[Error LlmChatError, IOE] ImageGenerationResponse
+        :: Eff '[Error RakeError, IOE] ImageGenerationResponse
         -> IO (Either Text ImageGenerationResponse)
     runProvider action = do
         result <-
             runEff
                 . runErrorNoCallStack
                 $ action
-        pure (first renderLlmChatError result)
+        pure (first renderRakeError result)
 
     handleImageResponse maybeOutput promptText responseResult =
         case responseResult of
@@ -272,26 +330,30 @@ runGenImage = \case
 parseGenImageArgs :: [Text] -> ParseGenImageArgsResult
 parseGenImageArgs = \case
     [] ->
-        ParseGenImageArgsError "A provider is required. Use `openai` or `grok`." GenImageHelpGeneral
+        ParseGenImageArgsError "A model is required. Use `gptimage`, `imagine`, or `banana2`." GenImageHelpGeneral
     "--help" : _ ->
         ParseGenImageArgsHelp GenImageHelpGeneral
     providerArg : rest ->
         case parseProvider providerArg of
             Nothing ->
                 ParseGenImageArgsError
-                    ("Unknown provider: " <> providerArg <> ". Use `openai` or `grok`.")
+                    ("Unknown model: " <> providerArg <> ". Use `gptimage`, `imagine`, or `banana2`.")
                     GenImageHelpGeneral
             Just GenImageProviderOpenAI ->
                 parseOpenAIArgs rest
             Just GenImageProviderGrok ->
                 parseGrokArgs rest
+            Just GenImageProviderBanana2 ->
+                parseBanana2Args rest
 
 parseProvider :: Text -> Maybe GenImageProvider
 parseProvider = \case
-    "openai" ->
+    "gptimage" ->
         Just GenImageProviderOpenAI
-    "grok" ->
+    "imagine" ->
         Just GenImageProviderGrok
+    "banana2" ->
+        Just GenImageProviderBanana2
     _ ->
         Nothing
 
@@ -394,7 +456,7 @@ parseOpenAIArgs =
             | Just fidelityValue <- T.stripPrefix "--input-fidelity=" arg ->
                 go commonState openAIOptions{openAIInputFidelity = Just fidelityValue} rest
             | "-" `T.isPrefixOf` arg ->
-                ParseGenImageArgsError ("Unknown OpenAI option: " <> arg) GenImageHelpOpenAI
+                ParseGenImageArgsError ("Unknown gptimage option: " <> arg) GenImageHelpOpenAI
             | otherwise ->
                 go (appendPromptParts commonState [arg]) openAIOptions rest
 
@@ -474,7 +536,7 @@ parseGrokArgs =
             | Just responseFormatValue <- T.stripPrefix "--response-format=" arg ->
                 go commonState grokOptions{grokResponseFormat = responseFormatValue} rest
             | "-" `T.isPrefixOf` arg ->
-                ParseGenImageArgsError ("Unknown Grok option: " <> arg) GenImageHelpGrok
+                ParseGenImageArgsError ("Unknown imagine option: " <> arg) GenImageHelpGrok
             | otherwise ->
                 go (appendPromptParts commonState [arg]) grokOptions rest
 
@@ -486,6 +548,68 @@ parseGrokArgs =
                 GenImageGrok
                     grokOptions
                         { grokCommonOptions =
+                            CommonGenImageOptions
+                                { commonPromptText = T.unwords parsePromptParts
+                                , commonOutputPath = parseOutputPath
+                                , commonImageCount = parseImageCount
+                                }
+                        }
+
+parseBanana2Args :: [Text] -> ParseGenImageArgsResult
+parseBanana2Args =
+    go defaultCommonParseState defaultBanana2GenImageOptions
+  where
+    go commonState banana2Options = \case
+        [] ->
+            finalize commonState banana2Options
+        "--help" : _ ->
+            ParseGenImageArgsHelp GenImageHelpBanana2
+        "--" : rest ->
+            finalize
+                (appendPromptParts commonState rest)
+                banana2Options
+        "--output" : path : rest ->
+            go commonState{parseOutputPath = Just (toString path)} banana2Options rest
+        "-o" : path : rest ->
+            go commonState{parseOutputPath = Just (toString path)} banana2Options rest
+        "--count" : _ : _ ->
+            ParseGenImageArgsError "banana2 does not support --count." GenImageHelpBanana2
+        "-n" : _ : _ ->
+            ParseGenImageArgsError "banana2 does not support --count." GenImageHelpBanana2
+        "--model" : modelName : rest ->
+            go commonState banana2Options{banana2Model = modelName} rest
+        "--image" : imageSource : rest ->
+            go commonState (appendBanana2InputImageSource banana2Options imageSource) rest
+        "--aspect-ratio" : aspectRatioValue : rest ->
+            go commonState banana2Options{banana2AspectRatio = Just aspectRatioValue} rest
+        "--image-size" : imageSizeValue : rest ->
+            go commonState banana2Options{banana2ImageSize = Just imageSizeValue} rest
+        arg : rest
+            | Just path <- T.stripPrefix "--output=" arg ->
+                go commonState{parseOutputPath = Just (toString path)} banana2Options rest
+            | "--count=" `T.isPrefixOf` arg ->
+                ParseGenImageArgsError "banana2 does not support --count." GenImageHelpBanana2
+            | Just modelName <- T.stripPrefix "--model=" arg ->
+                go commonState banana2Options{banana2Model = modelName} rest
+            | Just imageSource <- T.stripPrefix "--image=" arg ->
+                go commonState (appendBanana2InputImageSource banana2Options imageSource) rest
+            | Just aspectRatioValue <- T.stripPrefix "--aspect-ratio=" arg ->
+                go commonState banana2Options{banana2AspectRatio = Just aspectRatioValue} rest
+            | Just imageSizeValue <- T.stripPrefix "--image-size=" arg ->
+                go commonState banana2Options{banana2ImageSize = Just imageSizeValue} rest
+            | "-" `T.isPrefixOf` arg ->
+                ParseGenImageArgsError ("Unknown banana2 option: " <> arg) GenImageHelpBanana2
+            | otherwise ->
+                go (appendPromptParts commonState [arg]) banana2Options rest
+
+    finalize CommonParseState{parseOutputPath, parseImageCount, parsePromptParts} banana2Options
+        | null parsePromptParts =
+            ParseGenImageArgsError "A prompt is required." GenImageHelpBanana2
+        | otherwise =
+            ParseGenImageArgsSuccess $
+                GenImageBanana2
+                    banana2Options
+                        { banana2CommonOptions =
                             CommonGenImageOptions
                                 { commonPromptText = T.unwords parsePromptParts
                                 , commonOutputPath = parseOutputPath
@@ -531,6 +655,10 @@ appendGrokInputImageSource :: GrokGenImageOptions -> Text -> GrokGenImageOptions
 appendGrokInputImageSource options@GrokGenImageOptions{grokInputImageSources} imageSource =
     options{grokInputImageSources = grokInputImageSources <> [imageSource]}
 
+appendBanana2InputImageSource :: Banana2GenImageOptions -> Text -> Banana2GenImageOptions
+appendBanana2InputImageSource options@Banana2GenImageOptions{banana2InputImageSources} imageSource =
+    options{banana2InputImageSources = banana2InputImageSources <> [imageSource]}
+
 hasOpenAIMaskConflict :: OpenAIGenImageOptions -> Bool
 hasOpenAIMaskConflict OpenAIGenImageOptions{openAIMaskSource, openAIMaskFileId} =
     isJust openAIMaskSource && isJust openAIMaskFileId
@@ -540,49 +668,59 @@ renderGenImageHelp progName = \case
     GenImageHelpGeneral ->
         T.unlines $
             [ "Usage:"
-            , "  " <> toText progName <> " openai [OPTIONS] PROMPT"
-            , "  " <> toText progName <> " grok [OPTIONS] PROMPT"
+            , "  " <> toText progName <> " gptimage [OPTIONS] PROMPT"
+            , "  " <> toText progName <> " imagine [OPTIONS] PROMPT"
+            , "  " <> toText progName <> " banana2 [OPTIONS] PROMPT"
             , ""
-            , "Providers:"
-            , "  openai  Generate images with OpenAI. Default model: gpt-image-1.5"
-            , "  grok    Generate images with xAI Grok Imagine. Default model: grok-imagine-image"
+            , "Commands:"
+            , "  gptimage  Generate images with OpenAI. Default model: gpt-image-1.5"
+            , "  imagine   Generate images with xAI Grok Imagine. Default model: grok-imagine-image"
+            , "  banana2   Generate images with Gemini Nano Banana 2. Default model: gemini-2.5-flash-image"
             , ""
             , "Common options:"
             ]
-                <> commonOptionLines
+                <> baseCommonOptionLines
                 <> [ ""
-                   , "OpenAI-specific options:"
+                   , "gptimage options:"
                    ]
+                <> countOptionLines
                 <> openAIOptionLines
                 <> [ ""
-                   , "Grok-specific options:"
+                   , "imagine options:"
                    ]
+                <> countOptionLines
                 <> grokOptionLines
+                <> [ ""
+                   , "banana2 options:"
+                   ]
+                <> banana2OptionLines
                 <> [ ""
                    , "Notes:"
                    , "  SOURCE can be a URL, a data URL, or a local image path."
-                   , "  Use `" <> toText progName <> " openai --help` or `" <> toText progName <> " grok --help` for focused help."
-                   , "  OPENAI_API_KEY is required for `openai`."
-                   , "  XAI_API_KEY is required for `grok`."
+                   , "  Use `" <> toText progName <> " gptimage --help`, `" <> toText progName <> " imagine --help`, or `" <> toText progName <> " banana2 --help` for focused help."
+                   , "  OPENAI_API_KEY is required for `gptimage`."
+                   , "  XAI_API_KEY is required for `imagine`."
+                   , "  GEMINI_API_KEY is required for `banana2`."
                    , ""
                    , "Examples:"
-                   , "  " <> toText progName <> " grok \"a man riding a horse on the moon\""
-                   , "  " <> toText progName <> " openai --size=1536x1024 --quality=high \"a glass terrarium city\""
-                   , "  " <> toText progName <> " grok --image=base.png \"turn this into watercolor\""
+                   , "  " <> toText progName <> " imagine \"a man riding a horse on the moon\""
+                   , "  " <> toText progName <> " gptimage --size=1536x1024 --quality=high \"a glass terrarium city\""
+                   , "  " <> toText progName <> " banana2 --aspect-ratio=1:1 \"a tiny blue square on white background\""
                    ]
     GenImageHelpOpenAI ->
         T.unlines $
             [ "Usage:"
-            , "  " <> toText progName <> " openai [OPTIONS] PROMPT"
+            , "  " <> toText progName <> " gptimage [OPTIONS] PROMPT"
             , ""
             , "Default model: gpt-image-1.5"
             , ""
             , "Common options:"
             ]
-                <> commonOptionLines
+                <> baseCommonOptionLines
                 <> [ ""
-                   , "OpenAI options:"
+                   , "gptimage options:"
                    ]
+                <> countOptionLines
                 <> openAIOptionLines
                 <> [ ""
                    , "Notes:"
@@ -591,23 +729,24 @@ renderGenImageHelp progName = \case
                    , "  OPENAI_API_KEY is required."
                    , ""
                    , "Examples:"
-                   , "  " <> toText progName <> " openai \"a ceramic mug on linen\""
-                   , "  " <> toText progName <> " openai --size=1536x1024 --quality=high \"a brutalist library in fog\""
-                   , "  " <> toText progName <> " openai --image=base.png --mask=mask.png \"add a moon\""
+                   , "  " <> toText progName <> " gptimage \"a ceramic mug on linen\""
+                   , "  " <> toText progName <> " gptimage --size=1536x1024 --quality=high \"a brutalist library in fog\""
+                   , "  " <> toText progName <> " gptimage --image=base.png --mask=mask.png \"add a moon\""
                    ]
     GenImageHelpGrok ->
         T.unlines $
             [ "Usage:"
-            , "  " <> toText progName <> " grok [OPTIONS] PROMPT"
+            , "  " <> toText progName <> " imagine [OPTIONS] PROMPT"
             , ""
             , "Default model: grok-imagine-image"
             , ""
             , "Common options:"
             ]
-                <> commonOptionLines
+                <> baseCommonOptionLines
                 <> [ ""
-                   , "Grok options:"
+                   , "imagine options:"
                    ]
+                <> countOptionLines
                 <> grokOptionLines
                 <> [ ""
                    , "Notes:"
@@ -615,15 +754,42 @@ renderGenImageHelp progName = \case
                    , "  XAI_API_KEY is required."
                    , ""
                    , "Examples:"
-                   , "  " <> toText progName <> " grok \"a man riding a horse on the moon\""
-                   , "  " <> toText progName <> " grok --aspect-ratio=16:9 --resolution=2k \"a floating city at sunrise\""
-                   , "  " <> toText progName <> " grok --image=base.png \"turn this into a watercolor postcard\""
+                   , "  " <> toText progName <> " imagine \"a man riding a horse on the moon\""
+                   , "  " <> toText progName <> " imagine --aspect-ratio=16:9 --resolution=2k \"a floating city at sunrise\""
+                   , "  " <> toText progName <> " imagine --image=base.png \"turn this into a watercolor postcard\""
+                   ]
+    GenImageHelpBanana2 ->
+        T.unlines $
+            [ "Usage:"
+            , "  " <> toText progName <> " banana2 [OPTIONS] PROMPT"
+            , ""
+            , "Default model: gemini-2.5-flash-image"
+            , ""
+            , "Common options:"
+            ]
+                <> baseCommonOptionLines
+                <> [ ""
+                   , "banana2 options:"
+                   ]
+                <> banana2OptionLines
+                <> [ ""
+                   , "Notes:"
+                   , "  SOURCE can be a URL, a data URL, or a local image path."
+                   , "  GEMINI_API_KEY is required."
+                   , ""
+                   , "Examples:"
+                   , "  " <> toText progName <> " banana2 \"a cinematic portrait of a robot gardener\""
+                   , "  " <> toText progName <> " banana2 --aspect-ratio=16:9 --image-size=2K \"a floating city at sunrise\""
+                   , "  " <> toText progName <> " banana2 --image=base.png \"turn this into a watercolor postcard\""
                    ]
   where
-    commonOptionLines =
+    baseCommonOptionLines =
         [ "  -o, --output PATH            Output file path or filename prefix."
-        , "  -n, --count N                Number of images to request. Default: 1"
         , "  --help                       Show help."
+        ]
+
+    countOptionLines =
+        [ "  -n, --count N                Number of images to request. Default: 1"
         ]
 
     openAIOptionLines =
@@ -648,6 +814,13 @@ renderGenImageHelp progName = \case
         , "  --aspect-ratio RATIO         Aspect ratio, for example 16:9."
         , "  --resolution RESOLUTION      Resolution hint, for example 2k."
         , "  --response-format FORMAT     Response format. Default: b64_json"
+        ]
+
+    banana2OptionLines =
+        [ "  --model MODEL                Override the Banana2 image model."
+        , "  --image SOURCE               Repeatable. Add input image URLs or local files."
+        , "  --aspect-ratio RATIO         Aspect ratio hint, for example 1:1 or 16:9."
+        , "  --image-size SIZE            Image size hint, for example 1K or 2K."
         ]
 
 slugifyPrompt :: Text -> FilePath

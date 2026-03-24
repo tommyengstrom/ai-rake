@@ -1,4 +1,4 @@
-llmchat-effectful is a library for supplier agnostic llms calls with automatic tool call handling. 
+ai-rake is a library for supplier agnostic llms calls with automatic tool call handling. 
 
 ## Workflow
 

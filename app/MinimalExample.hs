@@ -5,8 +5,8 @@ module Main where
 import Effectful
 import Effectful.Concurrent
 import Effectful.Error.Static
-import LlmChat
-import LlmChat.Providers.OpenAI.Responses
+import Rake
+import Rake.Providers.OpenAI.Chat
 import Relude hiding (lookupEnv)
 import System.Environment (getEnv)
 
@@ -25,10 +25,10 @@ main = do
 
 runEffectStack
     :: Text
-    -> Eff '[LlmChat, Error LlmChatError, Concurrent, IOE] a
+    -> Eff '[Rake, Error RakeError, Concurrent, IOE] a
     -> IO a
 runEffectStack apiKey =
     runEff
         . runConcurrent
-        . runErrorNoCallStackWith @LlmChatError (error . show)
-        . runLlmChatOpenAIResponses (defaultOpenAIResponsesSettings apiKey)
+        . runErrorNoCallStackWith @RakeError (error . show)
+        . runRakeOpenAIChat (defaultOpenAIChatSettings apiKey)

@@ -1,6 +1,7 @@
 module GenCliSupport
     ( buildOutputPaths
     , downloadBinary
+    , resolveInlineImageSource
     , resolveMediaSource
     , slugifyPromptWithFallback
     , urlExtension
@@ -17,6 +18,7 @@ import Data.Text.Encoding qualified as TextEncoding
 import Data.Time
 import Network.HTTP.Client qualified as HttpClient
 import Network.HTTP.Client.TLS (newTlsManager)
+import Rake.Providers.Gemini.Images (GeminiInlineImage (..))
 import Relude
 import System.Directory
 import System.FilePath
@@ -58,6 +60,35 @@ resolveMediaSource source
                             Left ("Could not determine a MIME type for source file: " <> source)
                         Just mimeType ->
                             Right (renderDataUrl mimeType sourceBytes)
+            else pure (Left ("Source is not a URL, data URL, or existing file: " <> source))
+
+resolveInlineImageSource :: Text -> IO (Either Text GeminiInlineImage)
+resolveInlineImageSource source
+    | "data:" `T.isPrefixOf` source =
+        pure (decodeDataUrl source)
+    | isRemoteUrl source = do
+        downloadResult <- downloadBinary source
+        pure $ do
+            sourceBytes <- downloadResult
+            mimeType <-
+                maybe
+                    (Left ("Could not determine a MIME type for source URL: " <> source))
+                    Right
+                    (detectImageMimeType sourceBytes <|> mimeTypeFromPath (toString source))
+            pure (inlineImageFromBytes mimeType sourceBytes)
+    | otherwise = do
+        let path = toString source
+        exists <- doesFileExist path
+        if exists
+            then do
+                sourceBytes <- BS.readFile path
+                pure $ do
+                    mimeType <-
+                        maybe
+                            (Left ("Could not determine a MIME type for source file: " <> source))
+                            Right
+                            (detectImageMimeType sourceBytes <|> mimeTypeFromPath path)
+                    pure (inlineImageFromBytes mimeType sourceBytes)
             else pure (Left ("Source is not a URL, data URL, or existing file: " <> source))
 
 downloadBinary :: Text -> IO (Either Text BS.ByteString)
@@ -103,8 +134,11 @@ urlExtension sourceUrl =
 
 isRemoteOrDataSource :: Text -> Bool
 isRemoteOrDataSource source =
-    "data:" `T.isPrefixOf` source
-        || "http://" `T.isPrefixOf` source
+    "data:" `T.isPrefixOf` source || isRemoteUrl source
+
+isRemoteUrl :: Text -> Bool
+isRemoteUrl source =
+    "http://" `T.isPrefixOf` source
         || "https://" `T.isPrefixOf` source
 
 renderDataUrl :: Text -> BS.ByteString -> Text
@@ -113,6 +147,40 @@ renderDataUrl mimeType sourceBytes =
         <> mimeType
         <> ";base64,"
         <> TextEncoding.decodeUtf8 (Base64.encode sourceBytes)
+
+decodeDataUrl :: Text -> Either Text GeminiInlineImage
+decodeDataUrl source = do
+    header <- maybe (Left ("Invalid data URL: " <> source)) Right (T.stripPrefix "data:" rawHeader)
+    let (mimeType, parameters) = splitDataUrlHeader header
+    when (T.null mimeType) $
+        Left ("Data URL is missing a MIME type: " <> source)
+    unless ("base64" `elem` parameters) $
+        Left ("Only base64 data URLs are supported: " <> source)
+    when (T.null encodedPayload) $
+        Left ("Data URL is missing payload: " <> source)
+    decodedBytes <-
+        first
+            (("Failed to decode base64 data URL: " <>) . toText)
+            (Base64.decode (TextEncoding.encodeUtf8 encodedPayload))
+    pure (inlineImageFromBytes mimeType decodedBytes)
+  where
+    (rawHeader, payloadWithComma) = T.breakOn "," source
+    encodedPayload = T.drop 1 payloadWithComma
+
+splitDataUrlHeader :: Text -> (Text, [Text])
+splitDataUrlHeader header =
+    case T.splitOn ";" header of
+        [] ->
+            ("", [])
+        mimeType : parameters ->
+            (mimeType, parameters)
+
+inlineImageFromBytes :: Text -> BS.ByteString -> GeminiInlineImage
+inlineImageFromBytes mimeType sourceBytes =
+    GeminiInlineImage
+        { mimeType
+        , base64Data = TextEncoding.decodeUtf8 (Base64.encode sourceBytes)
+        }
 
 requestedPathTemplates :: FilePath -> Int -> [FilePath]
 requestedPathTemplates requestedPath assetTotal

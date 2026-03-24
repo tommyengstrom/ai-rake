@@ -8,8 +8,8 @@ The library now treats `[HistoryItem]` as the canonical conversation representat
 
 ```haskell
 chat
-    :: ( Error LlmChatError :> es
-       , LlmChat :> es
+    :: ( Error RakeError :> es
+       , Rake :> es
        )
     => ChatConfig es
     -> [HistoryItem]
@@ -24,13 +24,13 @@ Storage is opt-in and lives at the boundary:
 
 ```haskell
 withStorage
-    :: LlmChatStorage :> es
+    :: RakeStorage :> es
     => ([HistoryItem] -> Eff es [HistoryItem])
     -> ConversationId
     -> Eff es [HistoryItem]
 
 withStorageBy
-    :: LlmChatStorage :> es
+    :: RakeStorage :> es
     => (a -> [HistoryItem])
     -> ([HistoryItem] -> Eff es a)
     -> ConversationId
@@ -52,7 +52,7 @@ When a caller needs a short-lived read-modify-write mutation that must serialize
 
 ```haskell
 modifyConversationAtomic
-    :: LlmChatStorage :> es
+    :: RakeStorage :> es
     => ConversationId
     -> ([HistoryItem] -> (a, [HistoryItem]))
     -> Eff es a

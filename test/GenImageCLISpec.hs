@@ -8,14 +8,14 @@ import Test.Hspec
 spec :: Spec
 spec = describe "GenImageCLI" $ do
     describe "parseGenImageArgs" $ do
-        it "requires a provider" $ do
+        it "requires a model command" $ do
             parseGenImageArgs []
                 `shouldBe` ParseGenImageArgsError
-                    "A provider is required. Use `openai` or `grok`."
+                    "A model is required. Use `gptimage`, `imagine`, or `banana2`."
                     GenImageHelpGeneral
 
-        it "parses a minimal OpenAI command" $ do
-            parseGenImageArgs ["openai", "a man riding a horse on the moon"]
+        it "parses a minimal gptimage command" $ do
+            parseGenImageArgs ["gptimage", "a man riding a horse on the moon"]
                 `shouldBe` ParseGenImageArgsSuccess
                     ( GenImageOpenAI
                         OpenAIGenImageOptions
@@ -41,8 +41,8 @@ spec = describe "GenImageCLI" $ do
                             }
                     )
 
-        it "parses a minimal Grok command" $ do
-            parseGenImageArgs ["grok", "a man riding a horse on the moon"]
+        it "parses a minimal imagine command" $ do
+            parseGenImageArgs ["imagine", "a man riding a horse on the moon"]
                 `shouldBe` ParseGenImageArgsSuccess
                     ( GenImageGrok
                         GrokGenImageOptions
@@ -60,9 +60,27 @@ spec = describe "GenImageCLI" $ do
                             }
                     )
 
-        it "parses Grok-specific options" $ do
+        it "parses a minimal banana2 command" $ do
+            parseGenImageArgs ["banana2", "a man riding a horse on the moon"]
+                `shouldBe` ParseGenImageArgsSuccess
+                    ( GenImageBanana2
+                        Banana2GenImageOptions
+                            { banana2CommonOptions =
+                                CommonGenImageOptions
+                                    { commonPromptText = "a man riding a horse on the moon"
+                                    , commonOutputPath = Nothing
+                                    , commonImageCount = 1
+                                    }
+                            , banana2Model = "gemini-2.5-flash-image"
+                            , banana2InputImageSources = []
+                            , banana2AspectRatio = Nothing
+                            , banana2ImageSize = Nothing
+                            }
+                    )
+
+        it "parses imagine-specific options" $ do
             parseGenImageArgs
-                [ "grok"
+                [ "imagine"
                 , "--count=2"
                 , "--aspect-ratio=16:9"
                 , "--resolution=2k"
@@ -88,9 +106,9 @@ spec = describe "GenImageCLI" $ do
                             }
                     )
 
-        it "parses OpenAI-specific options" $ do
+        it "parses gptimage-specific options" $ do
             parseGenImageArgs
-                [ "openai"
+                [ "gptimage"
                 , "--size=1536x1024"
                 , "--quality=high"
                 , "--output-format=jpeg"
@@ -132,41 +150,92 @@ spec = describe "GenImageCLI" $ do
                             }
                     )
 
+        it "parses banana2-specific options" $ do
+            parseGenImageArgs
+                [ "banana2"
+                , "--aspect-ratio=16:9"
+                , "--image-size=2K"
+                , "--image=base.png"
+                , "glass"
+                , "city"
+                ]
+                `shouldBe` ParseGenImageArgsSuccess
+                    ( GenImageBanana2
+                        Banana2GenImageOptions
+                            { banana2CommonOptions =
+                                CommonGenImageOptions
+                                    { commonPromptText = "glass city"
+                                    , commonOutputPath = Nothing
+                                    , commonImageCount = 1
+                                    }
+                            , banana2Model = "gemini-2.5-flash-image"
+                            , banana2InputImageSources = ["base.png"]
+                            , banana2AspectRatio = Just "16:9"
+                            , banana2ImageSize = Just "2K"
+                            }
+                    )
+
+        it "rejects banana2 count options" $ do
+            parseGenImageArgs ["banana2", "--count=2", "horse"]
+                `shouldBe` ParseGenImageArgsError
+                    "banana2 does not support --count."
+                    GenImageHelpBanana2
+            parseGenImageArgs ["banana2", "-n", "2", "horse"]
+                `shouldBe` ParseGenImageArgsError
+                    "banana2 does not support --count."
+                    GenImageHelpBanana2
+
         it "shows general help" $ do
             parseGenImageArgs ["--help"]
                 `shouldBe` ParseGenImageArgsHelp GenImageHelpGeneral
 
-        it "shows provider-specific help" $ do
-            parseGenImageArgs ["grok", "--help"]
+        it "shows model-specific help" $ do
+            parseGenImageArgs ["imagine", "--help"]
                 `shouldBe` ParseGenImageArgsHelp GenImageHelpGrok
-            parseGenImageArgs ["openai", "--help"]
+            parseGenImageArgs ["gptimage", "--help"]
                 `shouldBe` ParseGenImageArgsHelp GenImageHelpOpenAI
+            parseGenImageArgs ["banana2", "--help"]
+                `shouldBe` ParseGenImageArgsHelp GenImageHelpBanana2
 
-        it "errors on unknown providers" $ do
-            parseGenImageArgs ["imagine", "horse"]
+        it "errors on removed provider names" $ do
+            parseGenImageArgs ["openai", "horse"]
                 `shouldBe` ParseGenImageArgsError
-                    "Unknown provider: imagine. Use `openai` or `grok`."
+                    "Unknown model: openai. Use `gptimage`, `imagine`, or `banana2`."
+                    GenImageHelpGeneral
+            parseGenImageArgs ["grok", "horse"]
+                `shouldBe` ParseGenImageArgsError
+                    "Unknown model: grok. Use `gptimage`, `imagine`, or `banana2`."
                     GenImageHelpGeneral
 
     describe "renderGenImageHelp" $ do
-        it "general help lists both provider option sets" $ do
+        it "general help lists all command option sets" $ do
             let helpText = renderGenImageHelp "gen-image" GenImageHelpGeneral
             helpText `shouldSatisfy` T.isInfixOf "--image-file-id FILE_ID"
             helpText `shouldSatisfy` T.isInfixOf "--response-format FORMAT"
-            helpText `shouldSatisfy` T.isInfixOf "gen-image openai --help"
-            helpText `shouldSatisfy` T.isInfixOf "gen-image grok --help"
+            helpText `shouldSatisfy` T.isInfixOf "--image-size SIZE"
+            helpText `shouldSatisfy` T.isInfixOf "gen-image gptimage --help"
+            helpText `shouldSatisfy` T.isInfixOf "gen-image imagine --help"
+            helpText `shouldSatisfy` T.isInfixOf "gen-image banana2 --help"
 
-        it "grok help focuses on grok options" $ do
+        it "imagine help focuses on imagine options" $ do
             let helpText = renderGenImageHelp "gen-image" GenImageHelpGrok
             helpText `shouldSatisfy` T.isInfixOf "--aspect-ratio RATIO"
             helpText `shouldSatisfy` T.isInfixOf "--response-format FORMAT"
             helpText `shouldNotSatisfy` T.isInfixOf "--mask-file-id FILE_ID"
+            helpText `shouldNotSatisfy` T.isInfixOf "--image-size SIZE"
 
-        it "openai help focuses on openai options" $ do
+        it "gptimage help focuses on gptimage options" $ do
             let helpText = renderGenImageHelp "gen-image" GenImageHelpOpenAI
             helpText `shouldSatisfy` T.isInfixOf "--mask-file-id FILE_ID"
             helpText `shouldSatisfy` T.isInfixOf "--output-compression N"
             helpText `shouldNotSatisfy` T.isInfixOf "--aspect-ratio RATIO"
+
+        it "banana2 help focuses on banana2 options" $ do
+            let helpText = renderGenImageHelp "gen-image" GenImageHelpBanana2
+            helpText `shouldSatisfy` T.isInfixOf "--image-size SIZE"
+            helpText `shouldSatisfy` T.isInfixOf "GEMINI_API_KEY"
+            helpText `shouldNotSatisfy` T.isInfixOf "--count N"
+            helpText `shouldNotSatisfy` T.isInfixOf "--mask-file-id FILE_ID"
 
     describe "slugifyPrompt" $ do
         it "creates stable ascii-friendly slugs" $ do

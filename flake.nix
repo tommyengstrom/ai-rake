@@ -1,5 +1,5 @@
 {
-  description = "Development shell and package for llmchat-effectful";
+  description = "Development shell and package for ai-rake";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -18,17 +18,17 @@
             openai = pkgs.haskell.lib.dontCheck super.openai;
           };
         };
-        llmchat-effectful = haskellPackages.callCabal2nix "llmchat-effectful" ./. { };
+        ai-rake = haskellPackages.callCabal2nix "ai-rake" ./. { };
         libraryPath = pkgs.lib.makeLibraryPath [
           pkgs.libpq
           pkgs.zlib
         ];
       in
       {
-        packages.default = llmchat-effectful;
+        packages.default = ai-rake;
 
         devShells.default = haskellPackages.shellFor {
-          packages = _: [ llmchat-effectful ];
+          packages = _: [ ai-rake ];
           withHoogle = false;
 
           nativeBuildInputs = [

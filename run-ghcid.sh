@@ -24,6 +24,5 @@ echo cabal v2-repl --enable-multi-repl $components
 ghcid \
   --command "cabal v2-repl --enable-multi-repl $components" \
   --restart "cabal.project" \
-  --restart "llmchat-effectful.cabal" \
-  --restart "chatcompletion-effectful.cabal" \
+  --restart "ai-rake.cabal" \
   -o $LOG_FILE

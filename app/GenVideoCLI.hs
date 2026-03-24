@@ -15,8 +15,8 @@ import Effectful
 import Effectful.Error.Static
 import GenCliSupport
 import Data.Text qualified as T
-import LlmChat
-import LlmChat.Providers.XAI.Imagine
+import Rake
+import Rake.Providers.XAI.Imagine
 import Relude hiding (exitFailure, getArgs, lookupEnv)
 import System.Directory
 import System.Environment (getArgs, getProgName, lookupEnv)
@@ -198,14 +198,14 @@ runGenVideo = \case
             }
 
     runProvider
-        :: Eff '[Error LlmChatError, IOE] XAIVideoResponse
+        :: Eff '[Error RakeError, IOE] XAIVideoResponse
         -> IO (Either Text XAIVideoResponse)
     runProvider action = do
         result <-
             runEff
                 . runErrorNoCallStack
                 $ action
-        pure (first renderLlmChatError result)
+        pure (first renderRakeError result)
 
     handleVideoResponse maybeOutput promptText responseResult =
         case responseResult of

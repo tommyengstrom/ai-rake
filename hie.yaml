@@ -1,10 +1,10 @@
 cradle:
   cabal:
     - path: "./src"
-      component: "lib:llmchat-effectful"
+      component: "lib:ai-rake"
 
     - path: "./test"
-      component: "llmchat-effectful:test:llmchat-effectful-test"
+      component: "ai-rake:test:ai-rake-test"
 
     - path: "./app/MinimalExample.hs"
-      component: "llmchat-effectful:exe:minimal-example"
+      component: "ai-rake:exe:minimal-example"

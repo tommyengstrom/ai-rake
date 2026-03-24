@@ -6,15 +6,15 @@ import Data.OpenApi (ToSchema)
 import Data.Text qualified as T
 import Effectful
 import Effectful.Error.Static
-import LlmChat
+import Rake
 import Relude
 import Test.Hspec
 
 specWithProvider
     :: forall es
-     . ( LlmChatStorage :> es
-       , Error LlmChatError :> es
-       , LlmChat :> es
+     . ( RakeStorage :> es
+       , Error RakeError :> es
+       , Rake :> es
        )
     => (forall a. Eff es a -> IO a)
     -> Spec
