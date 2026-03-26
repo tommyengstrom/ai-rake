@@ -11,6 +11,7 @@ import Effectful
 import Effectful.Concurrent
 import Effectful.Error.Static
 import Rake
+import Rake.Error (renderRakeError)
 import Rake.Providers.OpenAI.Chat
 import Relude
 import System.Environment (getEnv)
@@ -20,23 +21,27 @@ main = do
   apiKey <- toText <$> getEnv "OPENAI_API_KEY"
   runEff
     . runConcurrent
-    . runErrorNoCallStackWith @RakeError (error . show)
+    . runErrorNoCallStackWith @RakeError (error . toString . renderRakeError)
     $ runRakeOpenAIChat (defaultOpenAIChatSettings apiKey) do
-        newItems <-
-          chat
+        outcome <-
+          chatOutcome
             defaultChatConfig{maxToolRounds = 8}
             [ system "You are a helpful assistant."
             , user "What is 2 + 2?"
             ]
 
-        print (lastAssistantTextsStrict newItems)
+        case outcome of
+          ChatFinished{appendedItems} ->
+            print (lastAssistantTextsStrict appendedItems)
+          other ->
+            print other
 ```
 
 ## Current Scope
 
 - Canonical conversations are `[HistoryItem]`
-- Generic chat entrypoint is `chat`
-- `chatOutcome` is the low-level variant for agent loops that need explicit pause/failure state
+- Generic chat entrypoint is `chatOutcome`
+- `withResumableChat` is the recommended durable wrapper for agent loops that need persistence
 - Supported chat providers are OpenAI Chat, xAI Chat, and Gemini Chat
 - Shared/local history items cover text messages, tool calls, and tool results
 - Provider-native history is preserved for OpenAI Responses, xAI Responses, and Gemini Interactions items
@@ -49,17 +54,25 @@ Notes:
 - `lastAssistantTexts` and `decodeLastAssistant` are best-effort helpers.
 - `lastAssistantTextsStrict` and `decodeLastAssistantStrict` only look at the latest contiguous assistant tail.
 - Canonical conversations are append-only agent logs. Provider-native items can be marked `ItemPending` or `ItemCompleted` inside persisted history.
-- `chat` is strict in control flow, not transcript shape: it throws on paused and failed rounds, but successful runs can still include earlier pending tool calls or assistant output in the returned canonical suffix.
-- `chatOutcome` returns append-only canonical history plus explicit pause/failure state.
+- Anything named `appendedItems` is the newly returned append-only suffix, not the full conversation history.
+- History items get stable `HistoryItemId`s before replay and persistence. When storage is used, the embedded item id matches the storage row id.
+- `chatOutcome` and `withResumableChat` require `IOE` because the library assigns `HistoryItemId`s before replay and persistence.
+- `chatOutcome` returns an append-only canonical suffix plus explicit pause/failure state. Failed outcomes append a durable `ReplayBarrier` control item into the returned suffix.
+- `withResumableChat` is the recommended durable wrapper for append-only loops. It persists paused and failed suffixes through `chatOutcome`.
 - Stored unresolved tool calls are resumed locally before the next provider request instead of being replayed back at the model.
-- `withStorage` and `withStorageBy` are snapshot-based convenience wrappers around `chat`; they load the current history, run the action, and append the returned canonical suffix.
-- `withStorageBy chatOutcomeItems (chatOutcome config)` is the safe low-level storage pattern for resumable agent loops.
+- Historical unresolved tool calls whose local tool no longer exists are resumed into a synthetic `"Tool not found"` result and the loop continues.
+- `chatOutcome` throws `ConversationBlocked` for blocked histories and includes the latest valid reset checkpoint when the supplied history already has stable item ids.
+- `validResetCheckpoints`, `latestValidCheckpoint`, and `resetToLatestValidCheckpoint` work with `HistoryItemId` checkpoints, not raw log offsets. Use `resetTo` for item checkpoints and `resetToStart` to rewind to the beginning.
+- `withStorage` and `withStorageBy` are snapshot-based helpers; they load the current history, run the action, and append the returned suffix.
+- `withStorageBy chatOutcomeAppendedItems (chatOutcome config)` is the advanced low-level storage pattern for resumable agent loops, but `withResumableChat` is the preferred public entrypoint.
 - `modifyConversationAtomic` is the short-lived mutation helper to use when concurrent writers matter.
+- `renderRakeError` gives user-facing text for blocked conversations, including when no concrete reset checkpoint can be suggested for id-less direct histories.
 - Shared/local multipart content is text-only for now; richer media remains provider-native until both adapters support the same generic representation.
 - Provider-switch conversion warnings are logged to stderr by default when native items lose information during projection.
 - OpenAI and xAI chat adapters target the Responses API; Gemini chat targets the Interactions API.
-- Gemini-specific built-in Interactions tools are available through `GeminiChatSettings.providerTools`, while local function tools still flow through the shared `chat` loop.
-- Gemini image generation, OpenAI image generation, and xAI Grok Imagine image/video generation are available through provider-specific helper modules instead of the shared `chat` API.
+- Gemini-specific built-in Interactions tools are available through `GeminiChatSettings.providerTools`, while local function tools still flow through the shared chat loop.
+- Switching away from Gemini keeps generic unresolved tool state portable. Gemini-only pending `thought` metadata is reused only for same-provider Gemini continuation and is dropped when replaying into OpenAI/xAI.
+- Gemini image generation, OpenAI image generation, and xAI Grok Imagine image/video generation are available through provider-specific helper modules instead of the shared chat API.
 
 ## Persistence
 
@@ -88,20 +101,23 @@ main = do
     $ setupConversationTables tables
 ```
 
-Use `withStorage (chat config) conversationId` for strict load-run-append chat flows, `withStorageBy chatOutcomeItems (chatOutcome config) conversationId` for resumable append-only agent logs, and `modifyConversationAtomic` for short-lived read-modify-write mutations that must serialize correctly under concurrent access.
+Use `withResumableChat config conversationId` for resumable append-only agent logs, `withStorageBy chatOutcomeAppendedItems (chatOutcome config)` for advanced manual suffix persistence, and `modifyConversationAtomic` for short-lived read-modify-write mutations that must serialize correctly under concurrent access.
+
+`chatOutcome` is the durable path for failed rounds. If a run returns `ChatFailed`, the returned `appendedItems` suffix includes a `ReplayBarrier`, and later `chatOutcome`/`withResumableChat` calls will refuse to continue until you append a reset control item that rewinds before the blocked suffix.
+
+PostgreSQL item ids are unique per conversation, not globally. `setupConversationTables` also performs a best-effort migration away from the library's older global `item_id` uniqueness constraint; if an older installation renamed that legacy constraint manually, drop it yourself and rerun setup.
 
 Minimal resumable loop:
 
 ```haskell
 outcome <-
-  withStorageBy
-    chatOutcomeItems
-    (chatOutcome defaultChatConfig{tools = [myTool]})
+  withResumableChat
+    defaultChatConfig{tools = [myTool]}
     conversationId
 
 case outcome of
-  ChatFinished{historyItems} ->
-    print (lastAssistantTextsStrict historyItems)
+  ChatFinished{appendedItems} ->
+    print (lastAssistantTextsStrict appendedItems)
 
   ChatPaused{pauseReason} ->
     print pauseReason
@@ -109,6 +125,21 @@ case outcome of
   ChatFailed{failureReason} ->
     print failureReason
 ```
+
+Recover from a blocked append-only history:
+
+```haskell
+history <- getConversation conversationId
+
+case resetToLatestValidCheckpoint history of
+  Nothing ->
+    pure ()
+  Just rewindItem ->
+    appendItems conversationId [rewindItem]
+```
+
+If you need to present all reset options to a user, inspect `validResetCheckpoints history`. The checkpoints target `HistoryItemId`s from the active conversation branch, not append-log offsets.
+Compute those checkpoints from the full stored conversation, not from `appendedItems`.
 
 ## Media Generation
 
@@ -118,6 +149,7 @@ case outcome of
 import Effectful
 import Effectful.Error.Static
 import Rake
+import Rake.Error (renderRakeError)
 import Rake.Providers.Gemini.Images
 import Rake.Providers.OpenAI.Images
 import Rake.Providers.XAI.Imagine
@@ -130,7 +162,7 @@ main = do
   openAiKey <- toText <$> getEnv "OPENAI_API_KEY"
   xaiKey <- toText <$> getEnv "XAI_API_KEY"
   runEff
-    . runErrorNoCallStackWith @RakeError (error . show)
+    . runErrorNoCallStackWith @RakeError (error . toString . renderRakeError)
     $ do
         geminiImage <-
           generateGeminiImage

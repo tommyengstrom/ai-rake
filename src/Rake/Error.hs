@@ -11,14 +11,14 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.Text qualified as T
 import Network.HTTP.Types.Status (statusCode)
 import Data.Generics.Labels ()
+import Rake.Types (ReplayBlockReason (..), ResetCheckpoint (..))
 import Servant.Client (ClientError (..), ResponseF (..))
 import Relude
 
 data RakeError
     = LlmClientError ClientError
     | LlmExpectationError String
-    | ProviderTerminalFailure Text
-    | ToolLoopLimitExceeded Int
+    | ConversationBlocked ReplayBlockReason (Maybe ResetCheckpoint)
     deriving stock (Show, Eq, Generic)
 
 renderRakeError :: RakeError -> Text
@@ -27,10 +27,32 @@ renderRakeError = \case
         renderClientError clientError
     LlmExpectationError err ->
         toText err
-    ProviderTerminalFailure err ->
-        err
-    ToolLoopLimitExceeded maxRounds ->
-        "Tool loop limit exceeded after " <> show maxRounds <> " rounds"
+    ConversationBlocked blockedReason maybeCheckpoint ->
+        renderBlockedConversation blockedReason maybeCheckpoint
+
+renderBlockedConversation :: ReplayBlockReason -> Maybe ResetCheckpoint -> Text
+renderBlockedConversation blockedReason maybeCheckpoint =
+    stripTrailingPeriod (renderReplayBlockReason blockedReason)
+        <> ". Reset before continuing."
+        <> case maybeCheckpoint of
+            Just checkpoint ->
+                " Latest valid reset checkpoint: " <> renderResetCheckpoint checkpoint
+            Nothing ->
+                " No concrete reset checkpoint can be suggested because the supplied history has no stable item ids."
+
+renderReplayBlockReason :: ReplayBlockReason -> Text
+renderReplayBlockReason = \case
+    ReplayInvalidReset checkpoint ->
+        "Invalid reset checkpoint " <> renderResetCheckpoint checkpoint
+    ReplayBlocked reason ->
+        reason
+
+renderResetCheckpoint :: ResetCheckpoint -> Text
+renderResetCheckpoint = \case
+    ResetToStart ->
+        "start"
+    ResetToItem itemId ->
+        "item " <> show itemId
 
 renderClientError :: ClientError -> Text
 renderClientError = \case

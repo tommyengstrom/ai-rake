@@ -5,6 +5,7 @@ import Data.Aeson.Key (fromText)
 import Data.Aeson.KeyMap qualified as KM
 import Data.IORef qualified as IORef
 import Data.Map qualified as Map
+import Data.UUID qualified as UUID
 import Effectful
 import Effectful.Concurrent (Concurrent, runConcurrent)
 import Effectful.Dispatch.Dynamic (interpretWith)
@@ -17,15 +18,15 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Rake" $ do
-    describe "chat" $ do
+    describe "chatOutcome" $ do
         it "returns canonical history including provider tool calls, tool results, and final assistant output" $ do
             let pendingCall = loopToolCall "loop-1"
             result <-
-                runMockChatWithRounds
+                runMockChatOutcome
                     [ toolProviderRound [responsesToolCallItem ItemPending pendingCall] [pendingCall]
                     , finalProviderRound [responsesAssistantItem ItemCompleted "{\"answer\":4}"]
                     ]
-                    ( chat
+                    ( chatOutcome
                         defaultChatConfig
                             { maxToolRounds = 1
                             , tools = [loopTool]
@@ -35,50 +36,46 @@ spec = describe "Rake" $ do
 
             result
                 `shouldBe` Right
-                    [ responsesToolCallItem ItemPending pendingCall
-                    , toolResult "loop-1" "looped"
-                    , responsesAssistantItem ItemCompleted "{\"answer\":4}"
-                    ]
+                    ChatFinished
+                        { appendedItems =
+                            [ responsesToolCallItem ItemPending pendingCall
+                            , toolResult "loop-1" "looped"
+                            , responsesAssistantItem ItemCompleted "{\"answer\":4}"
+                            ]
+                        }
 
-        it "fails when maxToolRounds is exceeded" $ do
+        it "returns ConversationBlocked without a reset hint for id-less blocked histories" $ do
+            let barrierMessage = "Responses response status was failed"
             result <-
-                runMockChatWithRounds
-                    [ toolProviderRound [responsesToolCallItem ItemPending (loopToolCall "loop-1")] [loopToolCall "loop-1"]
-                    , toolProviderRound [responsesToolCallItem ItemPending (loopToolCall "loop-2")] [loopToolCall "loop-2"]
-                    , toolProviderRound [responsesToolCallItem ItemPending (loopToolCall "loop-3")] [loopToolCall "loop-3"]
-                    ]
-                    ( chat
-                        defaultChatConfig
-                            { maxToolRounds = 2
-                            , tools = [loopTool]
-                            }
-                        [user "start"]
-                    )
+                runMockChatOutcome
+                    []
+                    (chatOutcome defaultChatConfig [assistantText "{\"answer\":4}", replayBarrierItem barrierMessage])
 
-            result `shouldBe` Left (ToolLoopLimitExceeded 2)
+            case result of
+                Left (ConversationBlocked (ReplayBlocked reason) Nothing)
+                    | reason == barrierMessage ->
+                        pure ()
+                other ->
+                    expectationFailure ("Unexpected blocked-chat result: " <> show other)
 
-        it "keeps chat strict for paused incomplete rounds" $ do
-            let pendingAssistant = responsesAssistantItem ItemPending "working on it"
+        it "returns ConversationBlocked with a reset hint when the supplied history already has ids" $ do
+            let barrierMessage = "Responses response status was failed"
+                priorAnswer =
+                    setHistoryItemId (Just (fixedHistoryItemId 1)) (assistantText "{\"answer\":4}")
+                barrier =
+                    setHistoryItemId (Just (fixedHistoryItemId 2)) (replayBarrierItem barrierMessage)
             result <-
-                runMockChatWithRounds
-                    [ pausedProviderRound
-                        (PauseIncomplete "Responses response status was incomplete")
-                        [pendingAssistant]
-                    ]
-                    (chat defaultChatConfig [user "start"])
+                runMockChatOutcome
+                    []
+                    (chatOutcome defaultChatConfig [priorAnswer, barrier])
 
-            result `shouldBe` Left (LlmExpectationError "Responses response status was incomplete")
-
-        it "maps terminal provider failures onto ProviderTerminalFailure" $ do
-            result <-
-                runMockChatWithRounds
-                    [ failedProviderRound
-                        (FailureProvider "Responses response status was failed")
-                        []
-                    ]
-                    (chat defaultChatConfig [user "start"])
-
-            result `shouldBe` Left (ProviderTerminalFailure "Responses response status was failed")
+            case result of
+                Left (ConversationBlocked (ReplayBlocked reason) (Just (ResetToItem checkpointId)))
+                    | reason == barrierMessage
+                    , checkpointId == fixedHistoryItemId 1 ->
+                        pure ()
+                other ->
+                    expectationFailure ("Unexpected blocked-chat result with ids: " <> show other)
 
         it "threads sampling options through every request round" $ do
             samplingRef <- IORef.newIORef []
@@ -89,11 +86,11 @@ spec = describe "Rake" $ do
                         }
                 pendingCall = loopToolCall "loop-1"
             result <-
-                runRecordedMockChat samplingRef
+                runRecordedMockChatOutcome samplingRef
                     [ toolProviderRound [responsesToolCallItem ItemPending pendingCall] [pendingCall]
                     , finalProviderRound [responsesAssistantItem ItemCompleted "{\"answer\":4}"]
                     ]
-                    ( chat
+                    ( chatOutcome
                         defaultChatConfig
                             { maxToolRounds = 1
                             , tools = [loopTool]
@@ -104,10 +101,13 @@ spec = describe "Rake" $ do
 
             result
                 `shouldBe` Right
-                    [ responsesToolCallItem ItemPending pendingCall
-                    , toolResult "loop-1" "looped"
-                    , responsesAssistantItem ItemCompleted "{\"answer\":4}"
-                    ]
+                    ChatFinished
+                        { appendedItems =
+                            [ responsesToolCallItem ItemPending pendingCall
+                            , toolResult "loop-1" "looped"
+                            , responsesAssistantItem ItemCompleted "{\"answer\":4}"
+                            ]
+                        }
             recordedSampling <- IORef.readIORef samplingRef
             recordedSampling `shouldBe` [samplingOptions, samplingOptions]
 
@@ -125,7 +125,7 @@ spec = describe "Rake" $ do
             result
                 `shouldBe` Right
                     ChatPaused
-                        { historyItems = [pendingAssistant]
+                        { appendedItems = [pendingAssistant]
                         , pauseReason = PauseIncomplete "Responses response status was incomplete"
                         }
 
@@ -152,7 +152,7 @@ spec = describe "Rake" $ do
             result
                 `shouldBe` Right
                     ChatPaused
-                        { historyItems =
+                        { appendedItems =
                             [ pendingAssistant
                             , responsesToolCallItem ItemPending pendingCall
                             , toolResult "loop-1" "looped"
@@ -179,7 +179,7 @@ spec = describe "Rake" $ do
             result
                 `shouldBe` Right
                     ChatPaused
-                        { historyItems =
+                        { appendedItems =
                             [ responsesToolCallItem ItemPending firstCall
                             , toolResult "loop-1" "looped"
                             , responsesToolCallItem ItemPending secondCall
@@ -188,10 +188,12 @@ spec = describe "Rake" $ do
                         }
 
         it "returns failed outcomes with canonical history items included" $ do
+            let failureMessage =
+                    "Gemini interaction completed without tool calls or assistant message"
             result <-
                 runMockChatOutcome
                     [ failedProviderRound
-                        (FailureContract "Gemini interaction completed without tool calls or assistant message")
+                        (FailureContract failureMessage)
                         [geminiThought]
                     ]
                     (chatOutcome defaultChatConfig [user "start"])
@@ -199,14 +201,129 @@ spec = describe "Rake" $ do
             result
                 `shouldBe` Right
                     ChatFailed
-                        { historyItems = [geminiThought]
-                        , failureReason = FailureContract "Gemini interaction completed without tool calls or assistant message"
+                        { appendedItems = [geminiThought, replayBarrierItem failureMessage]
+                        , failureReason = FailureContract failureMessage
                         }
 
-        it "exposes canonical suffixes through chatOutcomeItems" $ do
+        it "emits replay barriers through onItem for failed outcomes" $ do
+            let failureMessage = "Responses response status was failed"
+            emittedItemsRef <- IORef.newIORef ([] :: [HistoryItem])
+            result <-
+                runMockChatOutcome
+                    [ failedProviderRound
+                        (FailureProvider failureMessage)
+                        []
+                    ]
+                    ( chatOutcome
+                        defaultChatConfig
+                            { onItem = \historyItem -> liftIO (IORef.modifyIORef' emittedItemsRef (<> [historyItem]))
+                            }
+                        [user "start"]
+                    )
+
+            result
+                `shouldBe` Right
+                    ChatFailed
+                        { appendedItems = [replayBarrierItem failureMessage]
+                        , failureReason = FailureProvider failureMessage
+                        }
+            emittedItems <- IORef.readIORef emittedItemsRef
+            stripHistoryItemIds emittedItems `shouldBe` [replayBarrierItem failureMessage]
+
+        it "fails duplicate fresh tool-call rounds before any tool executes" $ do
+            executionsRef <- IORef.newIORef (0 :: Int)
+            let duplicatedCall = countingToolCall "dup-1"
+                duplicatedCallItem = responsesToolCallItem ItemPending duplicatedCall
+                failureMessage = duplicateToolCallFailureMessage "dup-1"
+            result <-
+                runMockChatOutcome
+                    [ toolProviderRound
+                        [duplicatedCallItem, duplicatedCallItem]
+                        [duplicatedCall, duplicatedCall]
+                    ]
+                    ( chatOutcome
+                        defaultChatConfig
+                            { tools = [countingTool executionsRef]
+                            }
+                        [user "start"]
+                    )
+
+            result
+                `shouldBe` Right
+                    ChatFailed
+                        { appendedItems =
+                            [ duplicatedCallItem
+                            , duplicatedCallItem
+                            , replayBarrierItem failureMessage
+                            ]
+                        , failureReason = FailureContract failureMessage
+                        }
+            IORef.readIORef executionsRef `shouldReturn` 0
+
+        it "fails fresh rounds whose declared tool calls do not match appended round history" $ do
+            executionsRef <- IORef.newIORef (0 :: Int)
+            let historyCall = countingToolCall "hist-1"
+                declaredCall = countingToolCall "declared-1"
+                historyCallItem = responsesToolCallItem ItemPending historyCall
+            result <-
+                runMockChatOutcome
+                    [ toolProviderRound
+                        [historyCallItem]
+                        [declaredCall]
+                    ]
+                    ( chatOutcome
+                        defaultChatConfig
+                            { tools = [countingTool executionsRef]
+                            }
+                        [user "start"]
+                    )
+
+            result
+                `shouldBe` Right
+                    ChatFailed
+                        { appendedItems =
+                            [ historyCallItem
+                            , replayBarrierItem toolCallProjectionMismatchFailureMessage
+                            ]
+                        , failureReason = FailureContract toolCallProjectionMismatchFailureMessage
+                        }
+            IORef.readIORef executionsRef `shouldReturn` 0
+
+        it "allows fresh tool calls that reuse an already resolved tool call id" $ do
+            executionsRef <- IORef.newIORef (0 :: Int)
+            let repeatedCall = countingToolCall "reused-1"
+                repeatedCallItem = responsesToolCallItem ItemPending repeatedCall
+                finalAssistant = responsesAssistantItem ItemCompleted "done"
+            result <-
+                runMockChatOutcome
+                    [ toolProviderRound [repeatedCallItem] [repeatedCall]
+                    , finalProviderRound [finalAssistant]
+                    ]
+                    ( chatOutcome
+                        defaultChatConfig
+                            { tools = [countingTool executionsRef]
+                            }
+                        [ user "start"
+                        , repeatedCallItem
+                        , toolResult "reused-1" "already done"
+                        ]
+                    )
+
+            result
+                `shouldBe` Right
+                    ChatFinished
+                        { appendedItems =
+                            [ repeatedCallItem
+                            , toolResult "reused-1" "counted"
+                            , finalAssistant
+                            ]
+                        }
+            IORef.readIORef executionsRef `shouldReturn` 1
+
+        it "exposes canonical suffixes through chatOutcomeAppendedItems" $ do
             let pausedOutcome =
                     ChatPaused
-                        { historyItems =
+                        { appendedItems =
                             [ responsesToolCallItem ItemPending (loopToolCall "loop-1")
                             , toolResult "loop-1" "looped"
                             ]
@@ -214,17 +331,17 @@ spec = describe "Rake" $ do
                         }
                 failedOutcome =
                     ChatFailed
-                        { historyItems = [geminiThought]
+                        { appendedItems = [geminiThought, replayBarrierItem "bad round"]
                         , failureReason = FailureContract "bad round"
                         }
 
-            chatOutcomeItems pausedOutcome
+            chatOutcomeAppendedItems pausedOutcome
                 `shouldBe`
                     [ responsesToolCallItem ItemPending (loopToolCall "loop-1")
                     , toolResult "loop-1" "looped"
                     ]
-            chatOutcomeItems failedOutcome
-                `shouldBe` [geminiThought]
+            chatOutcomeAppendedItems failedOutcome
+                `shouldBe` [geminiThought, replayBarrierItem "bad round"]
 
     describe "assistant helpers" $ do
         it "keeps lastAssistantTexts as a best-effort helper" $ do
@@ -254,6 +371,17 @@ spec = describe "Rake" $ do
             decodeLastAssistantStrict @Value [pendingAssistant]
                 `shouldBe` Left (LlmExpectationError "Assistant returned no message in latest turn")
 
+        it "treats replay barriers as blocking in strict helpers" $ do
+            let barrierMessage = "Responses response status was failed"
+                history =
+                    [ assistantText "{\"answer\":4}"
+                    , replayBarrierItem barrierMessage
+                    ]
+
+            lastAssistantTextsStrict history `shouldBe` []
+            decodeLastAssistantStrict @Value history
+                `shouldBe` Left (ConversationBlocked (ReplayBlocked barrierMessage) Nothing)
+
         it "ignores pending assistant output in best-effort helpers too" $ do
             let pendingAssistant = responsesAssistantItem ItemPending "{\"answer\":4}"
 
@@ -279,7 +407,7 @@ spec = describe "Rake" $ do
                         (\conversation -> pure (conversation <> [assistantText "Hello"]))
                         convId
                 storedHistory <- getConversation convId
-                pure (fullHistory, storedHistory)
+                pure (stripHistoryItemIds fullHistory, stripHistoryItemIds storedHistory)
 
             result
                 `shouldBe` Right
@@ -292,11 +420,52 @@ spec = describe "Rake" $ do
                 convId <- createConversation
                 appendItems convId [user "Hi"]
                 _ <- withStorageBy identity (\_ -> pure [assistantText "Hello"]) convId
-                getConversation convId
+                stripHistoryItemIds <$> getConversation convId
 
             result `shouldBe` Right [user "Hi", assistantText "Hello"]
 
-        it "persists completed items from strict chat" $ do
+        it "does not strip a prefix when the embedded history ids disagree" $ do
+            result <- runStorageTest do
+                convId <- createConversation
+                appendItems convId [user "Hi"]
+                _ <-
+                    withStorageBy
+                        identity
+                        ( \conversation ->
+                            pure
+                                ( [ setHistoryItemId (Just (fixedHistoryItemId 99)) historyItem
+                                  | historyItem <- conversation
+                                  ]
+                                    <> [assistantText "Hello"]
+                                )
+                        )
+                        convId
+                getConversation convId
+
+            case result of
+                Right [firstItem, secondItem, thirdItem] -> do
+                    setHistoryItemId Nothing firstItem `shouldBe` user "Hi"
+                    secondItem `shouldBe` setHistoryItemId (Just (fixedHistoryItemId 99)) (user "Hi")
+                    setHistoryItemId Nothing thirdItem `shouldBe` assistantText "Hello"
+                other ->
+                    expectationFailure ("Unexpected stored history: " <> show other)
+
+        it "returns stored history with embedded ids matching storage ids" $ do
+            result <- runStorageTest do
+                convId <- createConversation
+                appendItems convId [user "Hi", assistantText "Hello"]
+                storedConversation <- getStoredConversation convId
+                history <- getConversation convId
+                pure (storedConversation, history)
+
+            case result of
+                Right (storedConversation, history) -> do
+                    fmap historyItemId history
+                        `shouldBe` [Just storedItemId | StoredItem{itemId = storedItemId} <- storedConversation]
+                Left err ->
+                    expectationFailure ("Unexpected storage failure: " <> show err)
+
+        it "persists completed items from withResumableChat" $ do
             let finalAssistant = responsesAssistantItem ItemCompleted "Hello"
             result <-
                 runStorageOutcomeTest
@@ -304,13 +473,13 @@ spec = describe "Rake" $ do
                     do
                         convId <- createConversation
                         appendItems convId [user "Hi"]
-                        newItems <- withStorage (chat defaultChatConfig) convId
+                        outcome <- withResumableChat defaultChatConfig convId
                         storedHistory <- getConversation convId
-                        pure (newItems, storedHistory)
+                        pure (stripHistoryItemIdsFromOutcome outcome, stripHistoryItemIds storedHistory)
 
             result
                 `shouldBe` Right
-                    ( [finalAssistant]
+                    ( ChatFinished{appendedItems = [finalAssistant]}
                     , [user "Hi", finalAssistant]
                     )
 
@@ -327,19 +496,47 @@ spec = describe "Rake" $ do
                         appendItems convId [user "start"]
                         outcome <-
                             withStorageBy
-                                chatOutcomeItems
+                                chatOutcomeAppendedItems
                                 (chatOutcome defaultChatConfig)
                                 convId
                         storedHistory <- getConversation convId
-                        pure (outcome, storedHistory)
+                        pure (stripHistoryItemIdsFromOutcome outcome, stripHistoryItemIds storedHistory)
 
             result
                 `shouldBe` Right
                     ( ChatPaused
-                        { historyItems = [pendingAssistant]
+                        { appendedItems = [pendingAssistant]
                         , pauseReason = PauseIncomplete "Responses response status was incomplete"
                         }
                     , [user "start", pendingAssistant]
+                    )
+
+        it "persists failed rounds with an explicit replay barrier" $ do
+            let failureMessage = "Responses response status was failed"
+            result <-
+                runStorageOutcomeTest
+                    [ failedProviderRound
+                        (FailureProvider failureMessage)
+                        []
+                    ]
+                    do
+                        convId <- createConversation
+                        appendItems convId [user "start"]
+                        outcome <-
+                            withStorageBy
+                                chatOutcomeAppendedItems
+                                (chatOutcome defaultChatConfig)
+                                convId
+                        storedHistory <- getConversation convId
+                        pure (stripHistoryItemIdsFromOutcome outcome, stripHistoryItemIds storedHistory)
+
+            result
+                `shouldBe` Right
+                    ( ChatFailed
+                        { appendedItems = [replayBarrierItem failureMessage]
+                        , failureReason = FailureProvider failureMessage
+                        }
+                    , [user "start", replayBarrierItem failureMessage]
                     )
 
         it "persists unresolved tool calls on tool loop limit pauses" $ do
@@ -357,7 +554,7 @@ spec = describe "Rake" $ do
                         appendItems convId [user "start"]
                         outcome <-
                             withStorageBy
-                                chatOutcomeItems
+                                chatOutcomeAppendedItems
                                 ( chatOutcome
                                     defaultChatConfig
                                         { maxToolRounds = 1
@@ -366,12 +563,12 @@ spec = describe "Rake" $ do
                                 )
                                 convId
                         storedHistory <- getConversation convId
-                        pure (outcome, storedHistory)
+                        pure (stripHistoryItemIdsFromOutcome outcome, stripHistoryItemIds storedHistory)
 
             result
                 `shouldBe` Right
                     ( ChatPaused
-                        { historyItems =
+                        { appendedItems =
                             [ pendingCallItem
                             , toolResult "loop-1" "looped"
                             , unresolvedCallItem
@@ -398,7 +595,7 @@ spec = describe "Rake" $ do
                         appendItems convId [user "start"]
                         _ <-
                             withStorageBy
-                                chatOutcomeItems
+                                chatOutcomeAppendedItems
                                 (chatOutcome defaultChatConfig)
                                 convId
                         storedHistory <- getConversation convId
@@ -419,9 +616,9 @@ spec = describe "Rake" $ do
                 pendingCallItem = responsesToolCallItem ItemPending pendingCall
                 finalAssistant = responsesAssistantItem ItemCompleted "done"
             result <-
-                runHistoryRecordedMockChat historyRef
+                runHistoryRecordedMockChatOutcome historyRef
                     [ finalProviderRound [finalAssistant] ]
-                    ( chat
+                    ( chatOutcome
                         defaultChatConfig
                             { tools = [loopTool]
                             }
@@ -430,9 +627,12 @@ spec = describe "Rake" $ do
 
             result
                 `shouldBe` Right
-                    [ toolResult "loop-1" "looped"
-                    , finalAssistant
-                    ]
+                    ChatFinished
+                        { appendedItems =
+                            [ toolResult "loop-1" "looped"
+                            , finalAssistant
+                            ]
+                        }
             recordedHistories <- IORef.readIORef historyRef
             recordedHistories
                 `shouldBe`
@@ -442,6 +642,50 @@ spec = describe "Rake" $ do
                       ]
                     ]
 
+        it "withResumableChat matches the raw durable storage wrapper" $ do
+            let pendingAssistant = responsesAssistantItem ItemPending "working on it"
+                pauseReason = PauseIncomplete "Responses response status was incomplete"
+                expectedOutcome =
+                    ChatPaused
+                        { appendedItems = [pendingAssistant]
+                        , pauseReason
+                        }
+                expectedStoredHistory = [user "start", pendingAssistant]
+            result <-
+                runStorageOutcomeTest
+                    [ pausedProviderRound pauseReason [pendingAssistant]
+                    , pausedProviderRound pauseReason [pendingAssistant]
+                    ]
+                    do
+                        resumableConversationId <- createConversation
+                        appendItems resumableConversationId [user "start"]
+                        resumableOutcome <- withResumableChat defaultChatConfig resumableConversationId
+                        resumableHistory <- stripHistoryItemIds <$> getConversation resumableConversationId
+
+                        rawConversationId <- createConversation
+                        appendItems rawConversationId [user "start"]
+                        rawOutcome <-
+                            withStorageBy
+                                chatOutcomeAppendedItems
+                                (chatOutcome defaultChatConfig)
+                                rawConversationId
+                        rawHistory <- stripHistoryItemIds <$> getConversation rawConversationId
+
+                        pure
+                            ( stripHistoryItemIdsFromOutcome resumableOutcome
+                            , resumableHistory
+                            , stripHistoryItemIdsFromOutcome rawOutcome
+                            , rawHistory
+                            )
+
+            result
+                `shouldBe` Right
+                    ( expectedOutcome
+                    , expectedStoredHistory
+                    , expectedOutcome
+                    , expectedStoredHistory
+                    )
+
 loopTool :: ToolDef es
 loopTool =
     defineToolNoArgument
@@ -449,41 +693,57 @@ loopTool =
         "Loop forever"
         (pure (Right "looped"))
 
-runMockChatWithRounds
-    :: [ProviderRound]
-    -> Eff '[Rake, Error RakeError, IOE] a
-    -> IO (Either RakeError a)
-runMockChatWithRounds plannedRounds =
-    runEff
-        . runErrorNoCallStack
-        . runMockRake plannedRounds
+countingTool :: IOE :> es => IORef.IORef Int -> ToolDef es
+countingTool executionsRef =
+    defineToolNoArgument
+        "counting_tool"
+        "Counts executions"
+        do
+            liftIO $ IORef.modifyIORef' executionsRef (+ 1)
+            pure (Right "counted")
+
+countingToolCall :: ToolCallId -> ToolCall
+countingToolCall toolCallId =
+    ToolCall
+        { toolCallId
+        , toolName = "counting_tool"
+        , toolArgs = mempty
+        }
 
 runMockChatOutcome
     :: [ProviderRound]
-    -> Eff '[Rake, Error RakeError, IOE] a
-    -> IO (Either RakeError a)
-runMockChatOutcome =
-    runMockChatWithRounds
+    -> Eff '[Rake, Error RakeError, IOE] ChatOutcome
+    -> IO (Either RakeError ChatOutcome)
+runMockChatOutcome plannedRounds action =
+    fmap (fmap stripHistoryItemIdsFromOutcome) $
+        runEff
+            . runErrorNoCallStack
+            . runMockRake plannedRounds
+            $ action
 
-runRecordedMockChat
+runRecordedMockChatOutcome
     :: IORef.IORef [SamplingOptions]
     -> [ProviderRound]
-    -> Eff '[Rake, Error RakeError, IOE] a
-    -> IO (Either RakeError a)
-runRecordedMockChat samplingRef plannedRounds =
-    runEff
-        . runErrorNoCallStack
-        . runRecordedMockRake samplingRef plannedRounds
+    -> Eff '[Rake, Error RakeError, IOE] ChatOutcome
+    -> IO (Either RakeError ChatOutcome)
+runRecordedMockChatOutcome samplingRef plannedRounds action =
+    fmap (fmap stripHistoryItemIdsFromOutcome) $
+        runEff
+            . runErrorNoCallStack
+            . runRecordedMockRake samplingRef plannedRounds
+            $ action
 
-runHistoryRecordedMockChat
+runHistoryRecordedMockChatOutcome
     :: IORef.IORef [[HistoryItem]]
     -> [ProviderRound]
-    -> Eff '[Rake, Error RakeError, IOE] a
-    -> IO (Either RakeError a)
-runHistoryRecordedMockChat historyRef plannedRounds =
-    runEff
-        . runErrorNoCallStack
-        . runHistoryRecordedMockRake historyRef plannedRounds
+    -> Eff '[Rake, Error RakeError, IOE] ChatOutcome
+    -> IO (Either RakeError ChatOutcome)
+runHistoryRecordedMockChatOutcome historyRef plannedRounds action =
+    fmap (fmap stripHistoryItemIdsFromOutcome) $
+        runEff
+            . runErrorNoCallStack
+            . runHistoryRecordedMockRake historyRef plannedRounds
+            $ action
 
 runMockRake
     :: IOE :> es
@@ -531,7 +791,7 @@ runHistoryRecordedMockRake historyRef plannedRounds eff = do
     responsesRef <- liftIO (IORef.newIORef plannedRounds)
     interpretWith eff \_ -> \case
         GetLlmResponse _ _ _ history -> do
-            liftIO $ IORef.modifyIORef' historyRef (<> [history])
+            liftIO $ IORef.modifyIORef' historyRef (<> [stripHistoryItemIds history])
             remainingResponses <- liftIO (IORef.readIORef responsesRef)
             case remainingResponses of
                 response : rest -> do
@@ -581,30 +841,30 @@ runStorageOutcomeTest plannedRounds action =
             either (error . show) pure result
 
 finalProviderRound :: [HistoryItem] -> ProviderRound
-finalProviderRound historyItems =
+finalProviderRound roundItems =
     ProviderRound
-        { historyItems
+        { roundItems
         , action = ProviderRoundDone
         }
 
 toolProviderRound :: [HistoryItem] -> [ToolCall] -> ProviderRound
-toolProviderRound historyItems toolCalls =
+toolProviderRound roundItems toolCalls =
     ProviderRound
-        { historyItems
+        { roundItems
         , action = ProviderRoundNeedsLocalTools toolCalls
         }
 
 pausedProviderRound :: ChatPauseReason -> [HistoryItem] -> ProviderRound
-pausedProviderRound pauseReason historyItems =
+pausedProviderRound pauseReason roundItems =
     ProviderRound
-        { historyItems
+        { roundItems
         , action = ProviderRoundPaused pauseReason
         }
 
 failedProviderRound :: ChatFailureReason -> [HistoryItem] -> ProviderRound
-failedProviderRound failureReason historyItems =
+failedProviderRound failureReason roundItems =
     ProviderRound
-        { historyItems
+        { roundItems
         , action = ProviderRoundFailed failureReason
         }
 
@@ -684,3 +944,34 @@ geminiThought =
                     , payload = object ["type" .= ("thought" :: Text)]
                     }
             }
+
+replayBarrierItem :: Text -> HistoryItem
+replayBarrierItem =
+    HControl . ReplayBarrier
+
+duplicateToolCallFailureMessage :: ToolCallId -> Text
+duplicateToolCallFailureMessage (ToolCallId toolCallIdText) =
+    "Active conversation contains multiple unresolved tool calls with id "
+        <> toolCallIdText
+        <> ". Append resetTo to rewind before continuing."
+
+toolCallProjectionMismatchFailureMessage :: Text
+toolCallProjectionMismatchFailureMessage =
+    "Provider round toolCalls did not match the unresolved tool calls implied by appended round history"
+
+stripHistoryItemIds :: [HistoryItem] -> [HistoryItem]
+stripHistoryItemIds =
+    map (setHistoryItemId Nothing)
+
+stripHistoryItemIdsFromOutcome :: ChatOutcome -> ChatOutcome
+stripHistoryItemIdsFromOutcome = \case
+    ChatFinished{appendedItems} ->
+        ChatFinished{appendedItems = stripHistoryItemIds appendedItems}
+    ChatPaused{appendedItems, pauseReason} ->
+        ChatPaused{appendedItems = stripHistoryItemIds appendedItems, pauseReason}
+    ChatFailed{appendedItems, failureReason} ->
+        ChatFailed{appendedItems = stripHistoryItemIds appendedItems, failureReason}
+
+fixedHistoryItemId :: Word32 -> HistoryItemId
+fixedHistoryItemId suffix =
+    HistoryItemId (UUID.fromWords 0 0 0 suffix)

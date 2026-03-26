@@ -12,7 +12,8 @@ import Test.Hspec
 
 specWithProvider
     :: forall es
-     . ( RakeStorage :> es
+     . ( IOE :> es
+       , RakeStorage :> es
        , Error RakeError :> es
        , Rake :> es
        )
@@ -20,31 +21,33 @@ specWithProvider
     -> Spec
 specWithProvider runEffectStack = do
     it "Responds to an initial system+user history" $ do
-        (response, conv) <- runEffectStack $ do
+        (outcome, conv) <- runEffectStack $ do
             convId <- createConversation
             appendItems
                 convId
                 [ system "Act exactly as a simple calculator. No extra text, just the answer."
                 , user "2 + 2"
                 ]
-            resp <- withStorage (chat defaultChatConfig) convId
+            resp <- withResumableChat defaultChatConfig convId
             conv <- getConversation convId
             pure (resp, conv)
+        let response = expectFinished outcome
 
         lastAssistantTexts response `shouldSatisfy` any (T.elem '4')
         length conv `shouldSatisfy` (>= 3)
 
     it "Executes a single tool call" $ do
-        response <- runEffectStack $ do
+        outcome <- runEffectStack $ do
             convId <- createConversation
             appendItems
                 convId
                 [ system "You are the user's assistant. When asked about contacts or phone numbers, use the available tools."
                 , user "What is my friend John's last name?"
                 ]
-            withStorage
-                (chat defaultChatConfig{tools = [listContacts]})
+            withResumableChat
+                defaultChatConfig{tools = [listContacts]}
                 convId
+        let response = expectFinished outcome
 
         response
             `shouldSatisfy` any
@@ -56,16 +59,17 @@ specWithProvider runEffectStack = do
                 )
 
     it "Executes multiple tool calls and returns the final answer" $ do
-        response <- runEffectStack $ do
+        outcome <- runEffectStack $ do
             convId <- createConversation
             appendItems
                 convId
                 [ system "You are the user's assistant. Use tools to answer contact and phone number questions."
                 , user "What is John's phone number?"
                 ]
-            withStorage
-                (chat defaultChatConfig{tools = [listContacts, showPhoneNumber]})
+            withResumableChat
+                defaultChatConfig{tools = [listContacts, showPhoneNumber]}
                 convId
+        let response = expectFinished outcome
 
         response
             `shouldSatisfy` any
@@ -81,16 +85,17 @@ specWithProvider runEffectStack = do
 
     describe "Structured Output" $ do
         it "Responds with JSON when requested" $ do
-            msgs <- runEffectStack $ do
+            outcome <- runEffectStack $ do
                 convId <- createConversation
                 appendItems
                     convId
                     [ system "You are a helpful assistant. Always provide direct answers."
                     , user "What is 2+2? Reply with a JSON object containing the field 'answer' with the numeric result."
                     ]
-                withStorage
-                    (chat defaultChatConfig{responseFormat = JsonValue})
+                withResumableChat
+                    defaultChatConfig{responseFormat = JsonValue}
                     convId
+            let msgs = expectFinished outcome
 
             val <- case decodeLastAssistant @Value msgs of
                 Left err -> expectationFailure (show err) >> fail "unreachable"
@@ -108,10 +113,11 @@ specWithProvider runEffectStack = do
                     [ system "You are a helpful assistant. Provide structured data when requested."
                     , user "Tell me about Albert Einstein. Include his name and approximate age at death."
                     ]
-                msgs <-
-                    withStorage
-                        (chat defaultChatConfig{responseFormat = jsonSchemaFormat @PersonInfo})
+                outcome <-
+                    withResumableChat
+                        defaultChatConfig{responseFormat = jsonSchemaFormat @PersonInfo}
                         convId
+                let msgs = expectFinished outcome
                 either throwError pure (decodeLastAssistant msgs)
 
             name `shouldSatisfy` T.isInfixOf "Einstein"
@@ -125,15 +131,14 @@ specWithProvider runEffectStack = do
                     [ system "You are a helpful assistant. Use tools when needed and provide structured responses."
                     , user "Get John's information and return it as structured data."
                     ]
-                msgs <-
-                    withStorage
-                        ( chat
-                            defaultChatConfig
-                                { responseFormat = jsonSchemaFormat @ContactInfo
-                                , tools = [listContacts, showPhoneNumber]
-                                }
-                        )
+                outcome <-
+                    withResumableChat
+                        defaultChatConfig
+                            { responseFormat = jsonSchemaFormat @ContactInfo
+                            , tools = [listContacts, showPhoneNumber]
+                            }
                         convId
+                let msgs = expectFinished outcome
                 decoded <- either throwError pure (decodeLastAssistant msgs)
                 pure (msgs, decoded)
 
@@ -174,6 +179,13 @@ data FullName = FullName
     }
     deriving stock (Show, Eq, Generic)
     deriving anyclass (FromJSON, ToJSON, ToSchema)
+
+expectFinished :: ChatOutcome -> [HistoryItem]
+expectFinished = \case
+    ChatFinished{appendedItems} ->
+        appendedItems
+    other ->
+        error ("Expected ChatFinished, got: " <> show other)
 
 showPhoneNumber :: ToolDef es
 showPhoneNumber =

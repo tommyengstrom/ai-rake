@@ -2,6 +2,7 @@ module Rake.ErrorSpec where
 
 import Data.Aeson (Value (..), object, (.=))
 import Rake.Error
+import Rake.Types
 import Relude
 import Test.Hspec
 
@@ -37,6 +38,11 @@ spec = describe "Rake.Error" $ do
             renderRakeError (LlmExpectationError "boom")
                 `shouldBe` "boom"
 
-        it "renders provider terminal failures directly" $ do
-            renderRakeError (ProviderTerminalFailure "provider said no")
-                `shouldBe` "provider said no"
+        it "renders blocked conversations with a reset checkpoint hint" $ do
+            renderRakeError (ConversationBlocked (ReplayBlocked "history is blocked") (Just ResetToStart))
+                `shouldBe` "history is blocked. Reset before continuing. Latest valid reset checkpoint: start"
+
+        it "renders blocked conversations without a checkpoint hint when history has no stable ids" $ do
+            renderRakeError (ConversationBlocked (ReplayBlocked "history is blocked") Nothing)
+                `shouldBe`
+                    "history is blocked. Reset before continuing. No concrete reset checkpoint can be suggested because the supplied history has no stable item ids."

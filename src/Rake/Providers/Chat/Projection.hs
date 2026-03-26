@@ -23,6 +23,8 @@ historyItemToGenericItems = \case
                 responsesPayloadToGenericItems itemLifecycle payload
             ProviderGeminiInteractions ->
                 geminiPayloadToGenericItems itemLifecycle payload
+    HControl{} ->
+        ([], [])
 
 historyItemsToGenericItems :: [HistoryItem] -> ([Text], [GenericItem])
 historyItemsToGenericItems =

@@ -10,6 +10,10 @@ and this project adheres to the
 
 - Changed canonical conversation storage to an append-only agent log. Provider-native items now carry `ItemPending` or `ItemCompleted`, and unresolved tool calls or incomplete assistant output are persisted as ordinary history instead of being hidden in transient loop state.
 - Replaced `chatOutcomeFinalizedItems` with `chatOutcomeItems` as the low-level storage extractor for resumable `chatOutcome` flows.
+- Added embedded `HistoryItemId`s plus `ResetCheckpoint`-based recovery helpers for append-only replay, including `validResetCheckpoints`, `latestValidCheckpoint`, `resetToLatestValidCheckpoint`, `resetTo`, and `resetToStart`.
+- `chat` and `chatOutcome` now require `IOE` so the library can assign `HistoryItemId`s before replay and persistence.
+- Added durable replay barriers for failed `chatOutcome` runs, and a typed `ConversationBlocked` error for strict `chat` callers.
+- Historical unresolved tool calls now resume into a synthetic `"Tool not found"` result when the local tool is no longer configured, instead of being silently dropped.
 - Added broader shared loop tests plus deterministic OpenAI/xAI/Gemini decoder tests for completed, tool-handoff, paused, failed, and thought-only rounds.
 - Added provider-specific media generation helpers for OpenAI Images (`gpt-image-1.5` by default) and xAI Grok Imagine image/video generation.
 - Added a `gen-image` CLI for OpenAI and Grok image generation, plus a separate `gen-video` CLI for Grok video generation from an image, video edits, and local append-style `--extend` continuations.

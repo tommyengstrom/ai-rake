@@ -5,6 +5,7 @@ import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.OpenApi
+import Data.UUID qualified as UUID
 import Rake
 import Relude
 import Test.Hspec
@@ -106,51 +107,61 @@ spec = describe "Rake.Types" $ do
                 `shouldBe` Just (nullableSchema exampleToolCallSchema)
 
     describe "HistoryItem JSON envelope" $ do
-        it "encodes schemaVersion 2 and completed lifecycle for local items" $ do
+        it "encodes schemaVersion 4 and completed lifecycle for local items" $ do
             let encoded = toJSON (user "hello")
-            lookupField "schemaVersion" encoded `shouldBe` Just (toJSON (2 :: Int))
+            lookupField "schemaVersion" encoded `shouldBe` Just (toJSON (4 :: Int))
             lookupField "apiFamily" encoded `shouldBe` Just (String "local")
             lookupField "itemLifecycle" encoded `shouldBe` Just (toJSON ItemCompleted)
 
-        it "decodes schemaVersion 2 envelopes and defaults missing lifecycle to completed" $ do
+        it "round-trips embedded history item ids" $ do
+            let itemId = historyItemIdAt 7
+                item = setHistoryItemId (Just itemId) (user "hello")
+                encoded = toJSON item
+            lookupField "historyItemId" encoded `shouldBe` Just (toJSON itemId)
+            fromJSON encoded `shouldBe` Success item
+
+        it "rejects envelopes without a schemaVersion" $ do
+            let encoded =
+                    object
+                        [ "apiFamily" .= ("local" :: Text)
+                        , "payload" .= LocalMessage{role = GenericUser, parts = [PartText "hello"]}
+                        ]
+            case fromJSON encoded :: Result HistoryItem of
+                Error{} ->
+                    pure ()
+                Success decoded ->
+                    expectationFailure ("Unexpectedly decoded: " <> show decoded)
+
+        it "rejects legacy schemaVersion 2 envelopes" $ do
             let encoded =
                     object
                         [ "apiFamily" .= ("local" :: Text)
                         , "schemaVersion" .= (2 :: Int)
                         , "payload" .= LocalMessage{role = GenericUser, parts = [PartText "hello"]}
                         ]
-            fromJSON encoded `shouldBe` Success (user "hello")
+            case fromJSON encoded :: Result HistoryItem of
+                Error{} ->
+                    pure ()
+                Success decoded ->
+                    expectationFailure ("Unexpectedly decoded: " <> show decoded)
 
-        it "decodes the old envelope format for schemaVersion 1" $ do
+        it "rejects legacy control item tags" $ do
             let encoded =
                     object
-                        [ "apiFamily" .= ("local" :: Text)
-                        , "schemaVersion" .= (1 :: Int)
-                        , "payload" .= LocalMessage{role = GenericUser, parts = [PartText "hello"]}
+                        [ "schemaVersion" .= (4 :: Int)
+                        , "apiFamily" .= ("control" :: Text)
+                        , "itemLifecycle" .= ItemCompleted
+                        , "payload"
+                            .= object
+                                [ "tag" .= ("ReplayBarrier" :: Text)
+                                , "contents" .= ("bad round" :: Text)
+                                ]
                         ]
-            fromJSON encoded `shouldBe` Success (user "hello")
-
-        it "decodes legacy OpenAI native envelopes into the unified provider form" $ do
-            let payload =
-                    NativeProviderItem
-                        { exchangeId = Just "response-openai"
-                        , nativeItemId = Just "item-openai"
-                        , payload = object ["type" .= ("message" :: Text)]
-                        }
-                encoded =
-                    object
-                        [ "apiFamily" .= ("openai.responses" :: Text)
-                        , "payload" .= payload
-                        ]
-            fromJSON encoded
-                `shouldBe` Success
-                    ( HProvider
-                        ProviderHistoryItem
-                            { apiFamily = ProviderOpenAIResponses
-                            , itemLifecycle = ItemCompleted
-                            , nativeItem = payload
-                            }
-                    )
+            case fromJSON encoded :: Result HistoryItem of
+                Error{} ->
+                    pure ()
+                Success decoded ->
+                    expectationFailure ("Unexpectedly decoded: " <> show decoded)
 
         it "round-trips pending Gemini native envelopes" $ do
             let item =
@@ -167,11 +178,23 @@ spec = describe "Rake.Types" $ do
                             }
             fromJSON (toJSON item) `shouldBe` Success item
 
+        it "round-trips reset control envelopes" $ do
+            let item = resetTo (historyItemIdAt 2)
+            fromJSON (toJSON item) `shouldBe` Success item
+
+        it "round-trips replay barrier control envelopes" $ do
+            let item = HControl (ReplayBarrier "Responses response status was failed")
+            fromJSON (toJSON item) `shouldBe` Success item
+
+        it "round-trips reset-to-start control envelopes" $ do
+            let item = HControl (ResetTo ResetToStart)
+            fromJSON (toJSON item) `shouldBe` Success item
+
         it "rejects unknown historical schema versions" $ do
             let encoded =
                     object
                         [ "apiFamily" .= ("local" :: Text)
-                        , "schemaVersion" .= (3 :: Int)
+                        , "schemaVersion" .= (5 :: Int)
                         , "payload" .= LocalMessage{role = GenericUser, parts = [PartText "hello"]}
                         ]
             case fromJSON encoded :: Result HistoryItem of
@@ -237,6 +260,10 @@ spec = describe "Rake.Types" $ do
         object
             [ "type" .= ("null" :: Text)
             ]
+
+    historyItemIdAt :: Word32 -> HistoryItemId
+    historyItemIdAt suffix =
+        HistoryItemId (UUID.fromWords 0 0 0 suffix)
 
     exampleToolCallSchema :: Value
     exampleToolCallSchema =

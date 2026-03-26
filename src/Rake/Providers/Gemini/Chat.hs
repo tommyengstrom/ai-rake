@@ -32,7 +32,7 @@ import Effectful.Error.Static
 import Network.HTTP.Client.TLS (newTlsManager)
 import Rake.Effect
 import Rake.Providers.Chat.Projection (historyItemToGenericItems, historyItemsToGenericItems)
-import Rake.Providers.Internal (defaultWarningLogger)
+import Rake.Providers.Internal (defaultWarningLogger, valueToCompactText)
 import Rake.Types
 import Relude
 import Servant.API (Header, JSON, Post, ReqBody)
@@ -373,7 +373,8 @@ renderGeminiHistoryItem requestLogger renderedHistory historyEntry = case histor
 
 shouldReuseGeminiNativePayload :: ItemLifecycle -> Value -> Bool
 shouldReuseGeminiNativePayload itemLifecycle payload =
-    itemLifecycle == ItemCompleted || not (isGeminiAssistantPayload payload)
+    (itemLifecycle == ItemCompleted && isGeminiAssistantPayload payload)
+        || (itemLifecycle == ItemPending && (isGeminiFunctionCallPayload payload || isGeminiThoughtPayload payload))
 
 isGeminiAssistantPayload :: Value -> Bool
 isGeminiAssistantPayload = \case
@@ -389,6 +390,20 @@ isGeminiTextType = \case
         True
     Just "text" ->
         True
+    _ ->
+        False
+
+isGeminiFunctionCallPayload :: Value -> Bool
+isGeminiFunctionCallPayload = \case
+    Object payloadObject ->
+        lookupText "type" payloadObject == Just "function_call"
+    _ ->
+        False
+
+isGeminiThoughtPayload :: Value -> Bool
+isGeminiThoughtPayload = \case
+    Object payloadObject ->
+        lookupText "type" payloadObject == Just "thought"
     _ ->
         False
 
@@ -426,6 +441,7 @@ data RenderedGeminiHistory = RenderedGeminiHistory
     , sawNonLeadingInstruction :: Bool
     , renderedTurns :: [Value]
     , toolCallNames :: Map Text Text
+    , openModelTurnHasFunctionCall :: Bool
     }
 
 initialRenderedGeminiHistory :: RenderedGeminiHistory
@@ -436,6 +452,7 @@ initialRenderedGeminiHistory =
         , sawNonLeadingInstruction = False
         , renderedTurns = []
         , toolCallNames = mempty
+        , openModelTurnHasFunctionCall = False
         }
 
 combinedSystemInstruction :: Maybe Text -> RenderedGeminiHistory -> Maybe Text
@@ -466,17 +483,16 @@ renderGeminiGenericItem renderedHistory = \case
                 renderedHistory
             )
     GenericToolCall{toolCall = ToolCall{toolCallId = ToolCallId toolCallId, toolName, toolArgs}} ->
-        pure $
-            appendGeminiTurnBlock
-                "model"
-                ( object
-                    [ "type" .= ("function_call" :: Text)
-                    , "id" .= toolCallId
-                    , "name" .= toolName
-                    , "arguments" .= toolArgs
-                    ]
-                )
-                (registerToolCall toolCallId toolName renderedHistory)
+        let RenderedGeminiHistory{openModelTurnHasFunctionCall = sawFunctionCallInCurrentModelTurn} =
+                renderedHistory
+            shouldInjectDummyThoughtSignature =
+                not sawFunctionCallInCurrentModelTurn
+         in
+            pure $
+                appendGeminiTurnBlock
+                    "model"
+                    (genericGeminiFunctionCallValue shouldInjectDummyThoughtSignature toolCallId toolName toolArgs)
+                    (registerToolCall toolCallId toolName renderedHistory)
     GenericToolResult{toolResult = ToolResult{toolCallId = ToolCallId toolCallId, toolResponse}} -> do
         let RenderedGeminiHistory{toolCallNames} = renderedHistory
         toolName <-
@@ -504,11 +520,27 @@ appendGeminiInstruction role text renderedHistory@RenderedGeminiHistory{instruct
         }
 
 appendGeminiTurnBlock :: Text -> Value -> RenderedGeminiHistory -> RenderedGeminiHistory
-appendGeminiTurnBlock role content renderedHistory@RenderedGeminiHistory{renderedTurns} =
+appendGeminiTurnBlock role content renderedHistory@RenderedGeminiHistory{renderedTurns, openModelTurnHasFunctionCall} =
     renderedHistory
         { sawConversationTurn = True
         , renderedTurns = appendGeminiTurn role content renderedTurns
+        , openModelTurnHasFunctionCall =
+            case role of
+                "model" ->
+                    if extendsExistingTurn
+                        then openModelTurnHasFunctionCall || isGeminiFunctionCallPayload content
+                        else isGeminiFunctionCallPayload content
+                _ ->
+                    False
         }
+  where
+    extendsExistingTurn =
+        case renderedTurns of
+            Object existingTurn : _
+                | renderedTurnRole existingTurn == Just role ->
+                    True
+            _ ->
+                False
 
 appendGeminiNativePayload :: Value -> RenderedGeminiHistory -> RenderedGeminiHistory
 appendGeminiNativePayload payload renderedHistory =
@@ -517,9 +549,40 @@ appendGeminiNativePayload payload renderedHistory =
         (\(toolCallId, toolName) -> appendGeminiTurnBlock "model" payload (registerToolCall toolCallId toolName renderedHistory))
         (geminiToolCallDetails payload)
 
+-- Gemini 3 function calling validates the current-turn function call against a
+-- thought signature. When replaying a foreign tool continuation into Gemini,
+-- there is no provider-issued signature to preserve, so we attach Google's
+-- documented dummy signature to the first replayed generic function_call in
+-- that step. Same-provider Gemini continuation keeps replaying the original
+-- native thought/function_call payloads unchanged.
+-- Docs: https://ai.google.dev/gemini-api/docs/thought-signatures
+geminiForeignTraceDummyThoughtSignature :: Text
+geminiForeignTraceDummyThoughtSignature =
+    "context_engineering_is_the_way_to_go"
+
+genericGeminiFunctionCallValue :: Bool -> Text -> Text -> Map Text Value -> Value
+genericGeminiFunctionCallValue includeDummyThoughtSignature toolCallId toolName toolArgs =
+    object $
+        [ "type" .= ("function_call" :: Text)
+        , "id" .= toolCallId
+        , "name" .= toolName
+        , "arguments" .= toolArgs
+        ]
+            <> [ "thought_signature" .= geminiForeignTraceDummyThoughtSignature
+               | includeDummyThoughtSignature
+               ]
+
 registerToolCall :: Text -> Text -> RenderedGeminiHistory -> RenderedGeminiHistory
 registerToolCall toolCallId toolName renderedHistory@RenderedGeminiHistory{toolCallNames} =
     renderedHistory{toolCallNames = Map.insert toolCallId toolName toolCallNames}
+
+renderedTurnRole :: Object -> Maybe Text
+renderedTurnRole turnObject =
+    KM.lookup "role" turnObject >>= \case
+        String turnRoleText ->
+            Just turnRoleText
+        _ ->
+            Nothing
 
 geminiToolCallDetails :: Value -> Maybe (Text, Text)
 geminiToolCallDetails = \case
@@ -570,9 +633,20 @@ textContentValue text =
 geminiToolResultValue :: ToolResponse -> Value
 geminiToolResultValue = \case
     ToolResponseText{text} ->
-        String text
+        geminiToolResultTextParts text
     ToolResponseJson{json} ->
-        json
+        geminiToolResultTextParts (valueToCompactText json)
+
+geminiToolResultTextParts :: Text -> Value
+geminiToolResultTextParts text =
+    toJSON
+        ( [ object
+                [ "type" .= ("text" :: Text)
+                , "text" .= text
+                ]
+          ]
+            :: [Value]
+        )
 
 localToolDeclarationToGeminiTool :: ToolDeclaration -> Value
 localToolDeclarationToGeminiTool ToolDeclaration{name, description, parameterSchema} =
@@ -585,9 +659,7 @@ localToolDeclarationToGeminiTool ToolDeclaration{name, description, parameterSch
 
 emptyToolParametersSchema :: Value
 emptyToolParametersSchema =
-    object
-        [ "type" .= ("object" :: Text)
-        ]
+    object []
 
 responseFormatSchema :: ResponseFormat -> Maybe Value
 responseFormatSchema = \case
@@ -641,6 +713,9 @@ decodeGeminiResponse responseValue = do
         Nothing ->
             Right Vector.empty
     let outputPayloads = Vector.toList outputs
+        interactionExchangeId =
+            lookupText "id" responseObject
+                <|> geminiFallbackExchangeId outputPayloads
         classificationHistoryItems =
             [ HProvider
                 ProviderHistoryItem
@@ -648,7 +723,7 @@ decodeGeminiResponse responseValue = do
                     , itemLifecycle = ItemCompleted
                     , nativeItem =
                         NativeProviderItem
-                            { exchangeId = lookupText "id" responseObject
+                            { exchangeId = interactionExchangeId
                             , nativeItemId = Nothing
                             , payload
                             }
@@ -665,7 +740,7 @@ decodeGeminiResponse responseValue = do
                 toolCalls
                 projectionNotes
         roundItemLifecycle = providerRoundItemLifecycle roundAction
-    historyItems <- forM outputPayloads $ \payload -> do
+    roundItems <- forM outputPayloads $ \payload -> do
         payloadObject <- expectObject "interaction output" payload
         pure $
             HProvider
@@ -674,12 +749,12 @@ decodeGeminiResponse responseValue = do
                     , itemLifecycle = roundItemLifecycle
                     , nativeItem =
                         NativeProviderItem
-                            { exchangeId = lookupText "id" responseObject
+                            { exchangeId = interactionExchangeId
                             , nativeItemId = geminiNativeItemId payloadObject
                             , payload
                             }
                     }
-    pure ProviderRound{historyItems, action = roundAction}
+    pure ProviderRound{roundItems, action = roundAction}
 
 geminiRoundAction
     :: Maybe Text
@@ -785,6 +860,16 @@ geminiNativeItemId payloadObject =
     lookupText "id" payloadObject
         <|> lookupText "call_id" payloadObject
         <|> lookupText "signature" payloadObject
+
+geminiFallbackExchangeId :: [Value] -> Maybe Text
+geminiFallbackExchangeId =
+    viaNonEmpty head . mapMaybe payloadNativeItemId
+  where
+    payloadNativeItemId = \case
+        Object payloadObject ->
+            geminiNativeItemId payloadObject
+        _ ->
+            Nothing
 
 expectObject :: Text -> Value -> Either RakeError Object
 expectObject label = \case

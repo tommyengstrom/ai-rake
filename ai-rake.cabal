@@ -145,6 +145,7 @@ test-suite ai-rake-test
       Rake.Provider.GeminiSpec
       Rake.Provider.MediaSpec
       Rake.Provider.OpenAISpec
+      Rake.ReplaySpec
       Rake.Provider.ResponsesRenderSpec
       Rake.Provider.XAISpec
       Rake.Storage.InMemorySpec

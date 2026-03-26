@@ -5,6 +5,7 @@ module Rake.Storage.InMemory
     ) where
 
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.UUID.V4 (nextRandom)
 import Effectful
 import Effectful.Concurrent
@@ -45,7 +46,7 @@ runRakeStorageInMemory eff = do
         AppendConversationItems conversationId historyItems ->
             MVar.modifyMVar_ conversationsVar $ \conversations -> do
                 conversation <- lookupConversation conversations conversationId
-                storedItems <- traverse mkStoredItem historyItems
+                storedItems <- mkStoredItems conversationId conversation historyItems
                 pure $
                     Map.insert conversationId (conversation <> storedItems) conversations
         ListConversations ->
@@ -53,9 +54,9 @@ runRakeStorageInMemory eff = do
         ModifyConversationAtomic conversationId modifyConversation ->
             MVar.modifyMVar conversationsVar $ \conversations -> do
                 conversation <- lookupConversation conversations conversationId
-                let currentHistory = map (\StoredItem{item} -> item) conversation
+                let currentHistory = map storedItemHistoryItem conversation
                     (result, newItems) = modifyConversation currentHistory
-                storedItems <- traverse mkStoredItem newItems
+                storedItems <- mkStoredItems conversationId conversation newItems
                 pure
                     ( Map.insert conversationId (conversation <> storedItems) conversations
                     , result
@@ -74,7 +75,44 @@ runRakeStorageInMemory eff = do
             Just conversation ->
                 pure conversation
 
-    mkStoredItem item = do
+    mkStoredItems conversationId conversation historyItems = do
+        normalizedItems <- ensureHistoryItemIds historyItems
+        validateConversationItemIds conversationId conversation normalizedItems
+        traverse mkStoredItem normalizedItems
+
+    mkStoredItem normalizedItem = do
         createdAt <- currentTime
-        itemId <- liftIO nextRandom
-        pure StoredItem{..}
+        let item = normalizedItem
+            itemId =
+                fromMaybe
+                    (error "ensureHistoryItemId returned a HistoryItem without an id")
+                    (historyItemId normalizedItem)
+        pure StoredItem{item, itemId, createdAt}
+
+    validateConversationItemIds conversationId conversation normalizedItems =
+        case duplicateHistoryItemId existingItemIds newItemIds of
+            Just duplicateItemId ->
+                throwError (DuplicateHistoryItemId conversationId duplicateItemId)
+            Nothing ->
+                pure ()
+      where
+        existingItemIds =
+            [ itemId
+            | StoredItem{itemId} <- conversation
+            ]
+        newItemIds =
+            [ itemId
+            | historyItem <- normalizedItems
+            , Just itemId <- [historyItemId historyItem]
+            ]
+
+    duplicateHistoryItemId existingItemIds =
+        go (Set.fromList existingItemIds)
+      where
+        go _ [] =
+            Nothing
+        go seenIds (itemId : remainingItemIds)
+            | Set.member itemId seenIds =
+                Just itemId
+            | otherwise =
+                go (Set.insert itemId seenIds) remainingItemIds

@@ -152,25 +152,8 @@ reusableNativePayloadForResponsesProvider providerTag = \case
         Nothing
 
 shouldReuseResponsesNativePayload :: ItemLifecycle -> Value -> Bool
-shouldReuseResponsesNativePayload itemLifecycle payload =
-    itemLifecycle == ItemCompleted || not (isResponsesAssistantPayload payload)
-
-isResponsesAssistantPayload :: Value -> Bool
-isResponsesAssistantPayload = \case
-    Object payloadObject ->
-        lookupText "role" payloadObject == Just "assistant"
-            && isResponseMessageType (lookupText "type" payloadObject)
-    _ ->
-        False
-
-isResponseMessageType :: Maybe Text -> Bool
-isResponseMessageType = \case
-    Nothing ->
-        True
-    Just "message" ->
-        True
-    _ ->
-        False
+shouldReuseResponsesNativePayload itemLifecycle _payload =
+    itemLifecycle == ItemCompleted
 
 responsesProviderApiFamily :: ResponsesProviderTag -> ProviderApiFamily
 responsesProviderApiFamily = \case
@@ -356,7 +339,7 @@ decodeResponsesResponse providerTag responseValue = do
                 toolCalls
                 projectionNotes
         roundItemLifecycle = providerRoundItemLifecycle roundAction
-    historyItems <- forM parsedOutputItems $ \(payload, payloadObject) -> do
+    roundItems <- forM parsedOutputItems $ \(payload, payloadObject) -> do
         let nativeItemId = lookupText "id" payloadObject
         pure $
             HProvider
@@ -370,7 +353,7 @@ decodeResponsesResponse providerTag responseValue = do
                             , payload
                             }
                     }
-    pure ProviderRound{historyItems, action = roundAction}
+    pure ProviderRound{roundItems, action = roundAction}
 
 responsesRoundAction
     :: Maybe Text

@@ -2,6 +2,7 @@ module Rake.Storage.Effect
     ( RakeStorage (..)
     , StoredItem (..)
     , ChatStorageError (..)
+    , storedItemHistoryItem
     , createConversation
     , deleteConversation
     , getStoredConversation
@@ -14,7 +15,6 @@ module Rake.Storage.Effect
     ) where
 
 import Data.Time
-import Data.UUID (UUID)
 import Effectful
 import Effectful.TH
 import Rake.Types
@@ -33,13 +33,14 @@ data RakeStorage :: Effect where
 
 data StoredItem = StoredItem
     { item :: HistoryItem
-    , itemId :: UUID
+    , itemId :: HistoryItemId
     , createdAt :: UTCTime
     }
     deriving stock (Show, Eq, Generic)
 
 data ChatStorageError
     = NoSuchConversation ConversationId
+    | DuplicateHistoryItemId ConversationId HistoryItemId
     deriving stock (Show, Eq)
 
 type instance DispatchOf RakeStorage = 'Dynamic
@@ -48,7 +49,7 @@ makeEffect ''RakeStorage
 
 getConversation :: RakeStorage :> es => ConversationId -> Eff es [HistoryItem]
 getConversation convId =
-    fmap (\StoredItem{item} -> item) <$> getStoredConversation convId
+    fmap storedItemHistoryItem <$> getStoredConversation convId
 
 appendItem :: RakeStorage :> es => ConversationId -> HistoryItem -> Eff es ()
 appendItem convId historyItem =
@@ -66,3 +67,7 @@ appendUserMessage
     -> Eff es ()
 appendUserMessage convId content =
     appendItem convId (user content)
+
+storedItemHistoryItem :: StoredItem -> HistoryItem
+storedItemHistoryItem StoredItem{item, itemId} =
+    setHistoryItemId (Just itemId) item

@@ -78,6 +78,17 @@ spec = describe "Responses request rendering" $ do
                         ]
                     )
 
+        it "renders Gemini no-argument tools with an empty parameters object" $ do
+            let tool =
+                    defineToolNoArgument "noop" "No-op tool" (pure (Right "ok"))
+
+            requestBody <-
+                captureGeminiRequestBody
+                    (withTools [tool] defaultChatConfig)
+                    [user "hello"]
+
+            firstToolParameters requestBody `shouldBe` Just (object [])
+
     describe "sampling options" $ do
         it "renders temperature when explicitly configured" $ do
             requestBody <-
@@ -144,23 +155,23 @@ spec = describe "Responses request rendering" $ do
 
             lookupPath ["input"] requestBody `shouldBe` Just (toJSON ([projectedAssistantMessage] :: [Value]))
 
-        it "annotates pending OpenAI-native assistant text even for OpenAI requests" $ do
+        it "drops pending OpenAI-native assistant text from replay for OpenAI requests" $ do
             (requestBody, notes) <-
                 captureOpenAIRender
                     defaultChatConfig
                     [pendingOpenAiNativeItem nativeResponsesAssistantPayload]
 
-            notes `shouldBe` ["Rendered pending assistant text as annotated assistant content for Responses input"]
-            lookupPath ["input"] requestBody `shouldBe` Just (toJSON ([projectedPendingAssistantMessage] :: [Value]))
+            notes `shouldBe` []
+            lookupPath ["input"] requestBody `shouldBe` Just (toJSON ([] :: [Value]))
 
-        it "annotates pending OpenAI-native assistant text without a type field" $ do
+        it "drops pending OpenAI-native assistant text without a type field" $ do
             (requestBody, notes) <-
                 captureOpenAIRender
                     defaultChatConfig
                     [pendingOpenAiNativeItem legacyResponsesAssistantPayload]
 
-            notes `shouldBe` ["Rendered pending assistant text as annotated assistant content for Responses input"]
-            lookupPath ["input"] requestBody `shouldBe` Just (toJSON ([projectedPendingAssistantMessage] :: [Value]))
+            notes `shouldBe` []
+            lookupPath ["input"] requestBody `shouldBe` Just (toJSON ([] :: [Value]))
 
         it "reuses native Gemini items unchanged for Gemini requests" $ do
             requestBody <-
@@ -188,50 +199,227 @@ spec = describe "Responses request rendering" $ do
 
             lookupPath ["input"] requestBody `shouldBe` Just (toJSON ([projectedAssistantMessage] :: [Value]))
 
-        it "annotates pending Gemini-native assistant text when projecting into OpenAI requests" $ do
+        it "drops pending Gemini-native assistant text when projecting into OpenAI requests" $ do
             (requestBody, notes) <-
                 captureOpenAIRender
                     defaultChatConfig
                     [pendingGeminiNativeItem nativeGeminiTextPayload]
 
-            notes `shouldBe` ["Rendered pending assistant text as annotated assistant content for Responses input"]
-            lookupPath ["input"] requestBody `shouldBe` Just (toJSON ([projectedPendingAssistantMessage] :: [Value]))
+            notes `shouldBe` []
+            lookupPath ["input"] requestBody `shouldBe` Just (toJSON ([] :: [Value]))
 
-        it "annotates pending Gemini-native assistant text even for Gemini requests" $ do
+        it "drops pending Gemini-native assistant text even for Gemini requests" $ do
             requestBody <-
                 captureGeminiRequestBody
                     defaultChatConfig
                     [pendingGeminiNativeItem nativeGeminiTextPayload]
 
-            lookupPath ["input"] requestBody
-                `shouldBe` Just
-                    ( toJSON
-                        ( [ object
-                                [ "role" .= ("model" :: Text)
-                                , "content" .= ([pendingGeminiTextContent] :: [Value])
-                                ]
-                          ]
-                            :: [Value]
-                        )
-                    )
+            lookupPath ["input"] requestBody `shouldBe` Just (toJSON ([] :: [Value]))
 
-        it "annotates pending Gemini-native assistant text without a type field even for Gemini requests" $ do
+        it "drops pending Gemini-native assistant text without a type field even for Gemini requests" $ do
             requestBody <-
                 captureGeminiRequestBody
                     defaultChatConfig
                     [pendingGeminiNativeItem legacyGeminiTextPayload]
 
+            lookupPath ["input"] requestBody `shouldBe` Just (toJSON ([] :: [Value]))
+
+        it "replays Gemini thoughts alongside resolved tool calls" $ do
+            let pendingThought =
+                    nativeHistoryItem
+                        ProviderGeminiInteractions
+                        ItemPending
+                        "interaction-gemini"
+                        (Just "thought-1")
+                        (geminiThoughtPayload "thought-1")
+                pendingToolCall =
+                    nativeHistoryItem
+                        ProviderGeminiInteractions
+                        ItemPending
+                        "interaction-gemini"
+                        (Just "tool-call-1")
+                        (geminiFunctionCallPayload "tool-call-1" "lookup" (object ["name" .= ("John Snow" :: Text)]))
+
+            requestBody <-
+                captureGeminiRequestBody
+                    defaultChatConfig
+                    [ pendingThought
+                    , pendingToolCall
+                    , toolResultText "tool-call-1" "Contacts:\n- John Snow"
+                    ]
+
             lookupPath ["input"] requestBody
                 `shouldBe` Just
                     ( toJSON
                         ( [ object
                                 [ "role" .= ("model" :: Text)
-                                , "content" .= ([pendingGeminiTextContent] :: [Value])
+                                , "content"
+                                    .= ( [ geminiThoughtPayload "thought-1"
+                                         , geminiFunctionCallPayload "tool-call-1" "lookup" (object ["name" .= ("John Snow" :: Text)])
+                                         ]
+                                            :: [Value]
+                                       )
+                                ]
+                          , object
+                                [ "role" .= ("user" :: Text)
+                                , "content"
+                                    .= ( [ object
+                                                [ "type" .= ("function_result" :: Text)
+                                                , "name" .= ("lookup" :: Text)
+                                                , "call_id" .= ("tool-call-1" :: Text)
+                                                , "result"
+                                                    .= ( [ object
+                                                                [ "type" .= ("text" :: Text)
+                                                                , "text" .= ("Contacts:\n- John Snow" :: Text)
+                                                                ]
+                                                           ]
+                                                            :: [Value]
+                                                       )
+                                                ]
+                                           ]
+                                            :: [Value]
+                                       )
                                 ]
                           ]
                             :: [Value]
                         )
                     )
+
+        it "injects a dummy thought signature for foreign tool continuations rendered into Gemini" $ do
+            let pendingForeignToolCall =
+                    nativeHistoryItem
+                        ProviderOpenAIResponses
+                        ItemPending
+                        "response-openai"
+                        (Just "item-openai-tool")
+                        (responsesToolCallPayload "item-openai-tool" "tool-call-1" "lookup" (object []) "pending")
+
+            requestBody <-
+                captureGeminiRequestBody
+                    defaultChatConfig
+                    [ pendingForeignToolCall
+                    , toolResultText "tool-call-1" "Contacts:\n- Ada"
+                    ]
+
+            lookupPath ["input"] requestBody
+                `shouldBe` Just
+                    ( toJSON
+                        ( [ object
+                                [ "role" .= ("model" :: Text)
+                                , "content"
+                                    .= ( [ object
+                                                [ "type" .= ("function_call" :: Text)
+                                                , "id" .= ("tool-call-1" :: Text)
+                                                , "name" .= ("lookup" :: Text)
+                                                , "thought_signature" .= ("context_engineering_is_the_way_to_go" :: Text)
+                                                , "arguments" .= object []
+                                                ]
+                                           ]
+                                            :: [Value]
+                                       )
+                                ]
+                          , object
+                                [ "role" .= ("user" :: Text)
+                                , "content"
+                                    .= ( [ object
+                                                [ "type" .= ("function_result" :: Text)
+                                                , "name" .= ("lookup" :: Text)
+                                                , "call_id" .= ("tool-call-1" :: Text)
+                                                , "result"
+                                                    .= ( [ object
+                                                                [ "type" .= ("text" :: Text)
+                                                                , "text" .= ("Contacts:\n- Ada" :: Text)
+                                                                ]
+                                                           ]
+                                                            :: [Value]
+                                                       )
+                                                ]
+                                           ]
+                                            :: [Value]
+                                       )
+                                ]
+                          ]
+                            :: [Value]
+                        )
+                    )
+
+        it "drops Gemini thoughts but keeps portable Gemini tool continuations for OpenAI requests" $ do
+            let pendingThought =
+                    nativeHistoryItem
+                        ProviderGeminiInteractions
+                        ItemPending
+                        "interaction-gemini"
+                        (Just "thought-1")
+                        (geminiThoughtPayload "thought-1")
+                pendingToolCall =
+                    nativeHistoryItem
+                        ProviderGeminiInteractions
+                        ItemPending
+                        "interaction-gemini"
+                        (Just "tool-call-1")
+                        (geminiFunctionCallPayload "tool-call-1" "lookup" (object ["name" .= ("John Snow" :: Text)]))
+                expectedInput =
+                    [ object
+                        [ "type" .= ("function_call" :: Text)
+                        , "call_id" .= ("tool-call-1" :: Text)
+                        , "name" .= ("lookup" :: Text)
+                        , "arguments" .= ("{\"name\":\"John Snow\"}" :: Text)
+                        ]
+                    , object
+                        [ "type" .= ("function_call_output" :: Text)
+                        , "call_id" .= ("tool-call-1" :: Text)
+                        , "output" .= ("Contacts:\n- John Snow" :: Text)
+                        ]
+                    ]
+
+            requestBody <-
+                captureOpenAIRequestBody
+                    defaultChatConfig
+                    [ pendingThought
+                    , pendingToolCall
+                    , toolResultText "tool-call-1" "Contacts:\n- John Snow"
+                    ]
+
+            lookupPath ["input"] requestBody `shouldBe` Just (toJSON (expectedInput :: [Value]))
+
+        it "drops Gemini thoughts but keeps portable Gemini tool continuations for xAI requests" $ do
+            let pendingThought =
+                    nativeHistoryItem
+                        ProviderGeminiInteractions
+                        ItemPending
+                        "interaction-gemini"
+                        (Just "thought-1")
+                        (geminiThoughtPayload "thought-1")
+                pendingToolCall =
+                    nativeHistoryItem
+                        ProviderGeminiInteractions
+                        ItemPending
+                        "interaction-gemini"
+                        (Just "tool-call-1")
+                        (geminiFunctionCallPayload "tool-call-1" "lookup" (object ["name" .= ("John Snow" :: Text)]))
+                expectedInput =
+                    [ object
+                        [ "type" .= ("function_call" :: Text)
+                        , "call_id" .= ("tool-call-1" :: Text)
+                        , "name" .= ("lookup" :: Text)
+                        , "arguments" .= ("{\"name\":\"John Snow\"}" :: Text)
+                        ]
+                    , object
+                        [ "type" .= ("function_call_output" :: Text)
+                        , "call_id" .= ("tool-call-1" :: Text)
+                        , "output" .= ("Contacts:\n- John Snow" :: Text)
+                        ]
+                    ]
+
+            requestBody <-
+                captureXAIRequestBody
+                    defaultChatConfig
+                    [ pendingThought
+                    , pendingToolCall
+                    , toolResultText "tool-call-1" "Contacts:\n- John Snow"
+                    ]
+
+            lookupPath ["input"] requestBody `shouldBe` Just (toJSON (expectedInput :: [Value]))
 
     describe "multipart shared rendering" $ do
         it "renders shared history without conversion notes for OpenAI requests" $ do
@@ -270,11 +458,13 @@ spec = describe "Responses request rendering" $ do
 
             notes `shouldBe` ["Gemini moved non-leading system/developer messages into system_instruction"]
 
-        it "renders JSON tool results as JSON text for provider requests" $ do
+        it "renders JSON tool results as JSON text for completed tool exchanges" $ do
             requestBody <-
                 captureOpenAIRequestBody
                     defaultChatConfig
-                    [ toolResultJson "tool-call-1" (String "ok")
+                    [ toolCall "tool-call-1" "lookup" (fromList [("name", String "Ada")])
+                    , toolResultJson "tool-call-1" (String "ok")
+                    , toolCall "tool-call-2" "lookup" (fromList [("name", String "Grace")])
                     , toolResultJson "tool-call-2" (object ["answer" .= (4 :: Int)])
                     ]
 
@@ -282,9 +472,21 @@ spec = describe "Responses request rendering" $ do
                 `shouldBe` Just
                     ( toJSON
                         ( [ object
+                                [ "type" .= ("function_call" :: Text)
+                                , "call_id" .= ("tool-call-1" :: Text)
+                                , "name" .= ("lookup" :: Text)
+                                , "arguments" .= ("{\"name\":\"Ada\"}" :: Text)
+                                ]
+                          , object
                                 [ "type" .= ("function_call_output" :: Text)
                                 , "call_id" .= ("tool-call-1" :: Text)
                                 , "output" .= ("\"ok\"" :: Text)
+                                ]
+                          , object
+                                [ "type" .= ("function_call" :: Text)
+                                , "call_id" .= ("tool-call-2" :: Text)
+                                , "name" .= ("lookup" :: Text)
+                                , "arguments" .= ("{\"name\":\"Grace\"}" :: Text)
                                 ]
                           , object
                                 [ "type" .= ("function_call_output" :: Text)
@@ -317,7 +519,7 @@ spec = describe "Responses request rendering" $ do
             decodeOpenAIResponse (responsesResponse "response-openai" "completed" [payload])
                 `shouldBe` Right
                     ProviderRound
-                        { historyItems = [nativeHistoryItem ProviderOpenAIResponses ItemCompleted "response-openai" (Just "item-openai") payload]
+                        { roundItems = [nativeHistoryItem ProviderOpenAIResponses ItemCompleted "response-openai" (Just "item-openai") payload]
                         , action = ProviderRoundDone
                         }
 
@@ -327,7 +529,7 @@ spec = describe "Responses request rendering" $ do
             decodeXAIResponse (responsesResponse "response-xai" "completed" [payload])
                 `shouldBe` Right
                     ProviderRound
-                        { historyItems = [nativeHistoryItem ProviderXAIResponses ItemCompleted "response-xai" (Just "item-xai") payload]
+                        { roundItems = [nativeHistoryItem ProviderXAIResponses ItemCompleted "response-xai" (Just "item-xai") payload]
                         , action = ProviderRoundDone
                         }
 
@@ -349,7 +551,7 @@ spec = describe "Responses request rendering" $ do
             decodeOpenAIResponse (responsesResponse "response-openai" "in_progress" [payload])
                 `shouldBe` Right
                     ProviderRound
-                        { historyItems = [nativeHistoryItem ProviderOpenAIResponses ItemPending "response-openai" (Just "item-openai-tool") payload]
+                        { roundItems = [nativeHistoryItem ProviderOpenAIResponses ItemPending "response-openai" (Just "item-openai-tool") payload]
                         , action = ProviderRoundNeedsLocalTools [expectedToolCall]
                         }
 
@@ -371,7 +573,7 @@ spec = describe "Responses request rendering" $ do
             decodeXAIResponse (responsesResponse "response-xai" "completed" [payload])
                 `shouldBe` Right
                     ProviderRound
-                        { historyItems = [nativeHistoryItem ProviderXAIResponses ItemPending "response-xai" (Just "item-xai-tool") payload]
+                        { roundItems = [nativeHistoryItem ProviderXAIResponses ItemPending "response-xai" (Just "item-xai-tool") payload]
                         , action = ProviderRoundNeedsLocalTools [expectedToolCall]
                         }
 
@@ -381,7 +583,7 @@ spec = describe "Responses request rendering" $ do
             decodeOpenAIResponse (responsesResponse "response-openai" "incomplete" [payload])
                 `shouldBe` Right
                     ProviderRound
-                        { historyItems = [nativeHistoryItem ProviderOpenAIResponses ItemPending "response-openai" (Just "item-openai") payload]
+                        { roundItems = [nativeHistoryItem ProviderOpenAIResponses ItemPending "response-openai" (Just "item-openai") payload]
                         , action = ProviderRoundPaused (PauseIncomplete "Responses response status was incomplete")
                         }
 
@@ -389,7 +591,7 @@ spec = describe "Responses request rendering" $ do
             decodeXAIResponse (responsesResponse "response-xai" "failed" [])
                 `shouldBe` Right
                     ProviderRound
-                        { historyItems = []
+                        { roundItems = []
                         , action = ProviderRoundFailed (FailureProvider "Responses response status was failed")
                         }
 
@@ -410,7 +612,7 @@ spec = describe "Responses request rendering" $ do
             decodeOpenAIResponse (responsesResponse "response-openai" "completed" [toolPayload, failedPayload])
                 `shouldBe` Right
                     ProviderRound
-                        { historyItems =
+                        { roundItems =
                             [ nativeHistoryItem ProviderOpenAIResponses ItemPending "response-openai" (Just "item-openai-tool") toolPayload
                             , nativeHistoryItem ProviderOpenAIResponses ItemPending "response-openai" (Just "item-openai-message") failedPayload
                             ]
@@ -423,7 +625,7 @@ spec = describe "Responses request rendering" $ do
             decodeGeminiResponse (geminiResponse "interaction-gemini" "completed" [payload])
                 `shouldBe` Right
                     ProviderRound
-                        { historyItems = [nativeHistoryItem ProviderGeminiInteractions ItemCompleted "interaction-gemini" (Just "item-gemini") payload]
+                        { roundItems = [nativeHistoryItem ProviderGeminiInteractions ItemCompleted "interaction-gemini" (Just "item-gemini") payload]
                         , action = ProviderRoundDone
                         }
 
@@ -443,7 +645,36 @@ spec = describe "Responses request rendering" $ do
             decodeGeminiResponse (geminiResponse "interaction-gemini" "requires_action" [payload])
                 `shouldBe` Right
                     ProviderRound
-                        { historyItems = [nativeHistoryItem ProviderGeminiInteractions ItemPending "interaction-gemini" (Just "item-gemini-tool") payload]
+                        { roundItems = [nativeHistoryItem ProviderGeminiInteractions ItemPending "interaction-gemini" (Just "item-gemini-tool") payload]
+                        , action = ProviderRoundNeedsLocalTools [expectedToolCall]
+                        }
+
+        it "falls back to the first output identifier as the Gemini exchange id when store=false omits it" $ do
+            let thoughtPayload = geminiThoughtPayload "thought-1"
+                toolPayload =
+                    geminiFunctionCallPayload
+                        "item-gemini-tool"
+                        "lookup"
+                        (object ["name" .= ("Ada" :: Text)])
+                rawResponse =
+                    object
+                        [ "status" .= ("requires_action" :: Text)
+                        , "outputs" .= ([thoughtPayload, toolPayload] :: [Value])
+                        ]
+                expectedToolCall =
+                    ToolCall
+                        { toolCallId = "item-gemini-tool"
+                        , toolName = "lookup"
+                        , toolArgs = fromList [("name", String "Ada")]
+                        }
+
+            decodeGeminiResponse rawResponse
+                `shouldBe` Right
+                    ProviderRound
+                        { roundItems =
+                            [ nativeHistoryItem ProviderGeminiInteractions ItemPending "thought-1" (Just "thought-1") thoughtPayload
+                            , nativeHistoryItem ProviderGeminiInteractions ItemPending "thought-1" (Just "item-gemini-tool") toolPayload
+                            ]
                         , action = ProviderRoundNeedsLocalTools [expectedToolCall]
                         }
 
@@ -453,7 +684,7 @@ spec = describe "Responses request rendering" $ do
             decodeGeminiResponse (geminiResponse "interaction-gemini" "in_progress" [payload])
                 `shouldBe` Right
                     ProviderRound
-                        { historyItems = [nativeHistoryItem ProviderGeminiInteractions ItemPending "interaction-gemini" (Just "item-gemini") payload]
+                        { roundItems = [nativeHistoryItem ProviderGeminiInteractions ItemPending "interaction-gemini" (Just "item-gemini") payload]
                         , action = ProviderRoundPaused (PauseProviderWaiting "Gemini interaction status was in_progress")
                         }
 
@@ -461,7 +692,7 @@ spec = describe "Responses request rendering" $ do
             decodeGeminiResponse (geminiResponse "interaction-gemini" "failed" [])
                 `shouldBe` Right
                     ProviderRound
-                        { historyItems = []
+                        { roundItems = []
                         , action = ProviderRoundFailed (FailureProvider "Gemini interaction status was failed")
                         }
 
@@ -471,7 +702,7 @@ spec = describe "Responses request rendering" $ do
             decodeGeminiResponse (geminiResponse "interaction-gemini" "completed" [payload])
                 `shouldBe` Right
                     ProviderRound
-                        { historyItems = [nativeHistoryItem ProviderGeminiInteractions ItemPending "interaction-gemini" (Just "thought-1") payload]
+                        { roundItems = [nativeHistoryItem ProviderGeminiInteractions ItemPending "interaction-gemini" (Just "thought-1") payload]
                         , action =
                             ProviderRoundFailed
                                 ( FailureContract
@@ -578,7 +809,7 @@ captureOpenAIRender chatConfig history = do
             . runErrorNoCallStack
             $ runRakeOpenAIChat settings
             $ void
-            $ chat chatConfig history
+            $ chatOutcome chatConfig history
 
     result `shouldSatisfy` isLeft
     requestBody <- readRequest requestRef
@@ -618,7 +849,7 @@ captureXAIRender chatConfig history = do
             . runErrorNoCallStack
             $ runRakeXAIChat settings
             $ void
-            $ chat chatConfig history
+            $ chatOutcome chatConfig history
 
     result `shouldSatisfy` isLeft
     requestBody <- readRequest requestRef
@@ -663,7 +894,7 @@ captureGeminiRender chatConfig history = do
             . runErrorNoCallStack
             $ runRakeGeminiChat settings
             $ void
-            $ chat chatConfig history
+            $ chatOutcome chatConfig history
 
     result `shouldSatisfy` isLeft
     requestBody <- readRequest requestRef
@@ -750,26 +981,6 @@ projectedAssistantMessage =
     object
         [ "role" .= ("assistant" :: Text)
         , "content" .= ("native assistant text" :: Text)
-        ]
-
-projectedPendingAssistantMessage :: Value
-projectedPendingAssistantMessage =
-    object
-        [ "role" .= ("assistant" :: Text)
-        , "content"
-            .= ( "[INCOMPLETE ASSISTANT MESSAGE FROM PREVIOUS PROVIDER]\n"
-                    <> ("native assistant text" :: Text)
-               )
-        ]
-
-pendingGeminiTextContent :: Value
-pendingGeminiTextContent =
-    object
-        [ "type" .= ("text" :: Text)
-        , "text"
-            .= ( "[INCOMPLETE ASSISTANT MESSAGE FROM PREVIOUS PROVIDER]\n"
-                    <> ("native assistant text" :: Text)
-               )
         ]
 
 nativeGeminiTextPayload :: Value
@@ -996,6 +1207,7 @@ sharedGeminiHistoryRequest =
                         [ "type" .= ("function_call" :: Text)
                         , "id" .= ("tool-call-1" :: Text)
                         , "name" .= ("lookup" :: Text)
+                        , "thought_signature" .= ("context_engineering_is_the_way_to_go" :: Text)
                         , "arguments" .= object ["name" .= ("John Snow" :: Text)]
                         ]
                    ]
@@ -1005,11 +1217,18 @@ sharedGeminiHistoryRequest =
     , object
         [ "role" .= ("user" :: Text)
         , "content"
-            .= ( [ object
+                    .= ( [ object
                         [ "type" .= ("function_result" :: Text)
                         , "name" .= ("lookup" :: Text)
                         , "call_id" .= ("tool-call-1" :: Text)
-                        , "result" .= ("ok" :: Text)
+                        , "result"
+                            .= ( [ object
+                                        [ "type" .= ("text" :: Text)
+                                        , "text" .= ("\"ok\"" :: Text)
+                                        ]
+                                   ]
+                                    :: [Value]
+                               )
                         ]
                    ]
                     :: [Value]
@@ -1030,7 +1249,14 @@ nativeGeminiToolResultPayload resultText =
     object
         [ "type" .= ("function_result" :: Text)
         , "call_id" .= ("tool-call-1" :: Text)
-        , "result" .= resultText
+        , "result"
+            .= ( [ object
+                        [ "type" .= ("text" :: Text)
+                        , "text" .= resultText
+                        ]
+                   ]
+                    :: [Value]
+               )
         ]
 
 scalarAndCompositeJsonCases :: [Text]

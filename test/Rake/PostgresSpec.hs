@@ -5,7 +5,7 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Time
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
-import Data.UUID (UUID)
+import Data.UUID (UUID, fromWords)
 import Data.UUID.V4 (nextRandom)
 import Database.PostgreSQL.Simple
 import Effectful
@@ -140,7 +140,7 @@ postgresStorageBehaviourSpec pool conversationsTable =
                     observedLength <-
                         modifyConversationAtomic convId \history ->
                             (length history, [user secondPrompt])
-                    finalHistory <- getConversation convId
+                    finalHistory <- map (setHistoryItemId Nothing) <$> getConversation convId
                     pure (observedLength, finalHistory)
 
                 liftIO $
@@ -196,11 +196,44 @@ postgresStorageBehaviourSpec pool conversationsTable =
 
                 liftIO $ convId `shouldNotSatisfy` (`elem` listAfterDelete)
                 liftIO $ fetchResult `shouldBe` Left (NoSuchConversation convId)
+
+        it "allows the same HistoryItemId in different conversations" $ do
+            let sharedItemId = fixedHistoryItemId 1
+                sharedUserMessage = setHistoryItemId (Just sharedItemId) (user "hello")
+
+            result <- runStack do
+                firstConversationId <- createConversation
+                secondConversationId <- createConversation
+                appendItem firstConversationId sharedUserMessage
+                appendItem secondConversationId sharedUserMessage
+                (,) <$> getConversation firstConversationId <*> getConversation secondConversationId
+
+            result `shouldBe` Right ([sharedUserMessage], [sharedUserMessage])
+
+        it "rejects duplicate HistoryItemIds within one conversation" $ do
+            let duplicateItemId = fixedHistoryItemId 1
+                firstMessage = setHistoryItemId (Just duplicateItemId) (user "hello")
+                secondMessage = setHistoryItemId (Just duplicateItemId) (assistantText "world")
+
+            result <- runStack do
+                conversationId <- createConversation
+                appendItems conversationId [firstMessage, secondMessage]
+
+            result
+                `shouldSatisfy` \case
+                    Left (DuplicateHistoryItemId _ itemId) ->
+                        itemId == duplicateItemId
+                    _ ->
+                        False
   where
     reverseUserTexts history =
         [ text
         | HLocal LocalMessage{role = GenericUser, parts = [PartText{text}]} <- reverse history
         ]
+
+fixedHistoryItemId :: Word32 -> HistoryItemId
+fixedHistoryItemId suffix =
+    HistoryItemId (fromWords 0 0 0 suffix)
 
 newConversationsTable :: IO ConversationTables
 newConversationsTable = do

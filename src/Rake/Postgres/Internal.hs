@@ -85,6 +85,12 @@ instance ToField ConversationId where
 instance FromField ConversationId where
     fromField field maybeData = ConversationId <$> fromField field maybeData
 
+instance ToField HistoryItemId where
+    toField (HistoryItemId uuid) = toField uuid
+
+instance FromField HistoryItemId where
+    fromField field maybeData = HistoryItemId <$> fromField field maybeData
+
 instance ToField HistoryItem where
     toField historyItem = toField (toJSON historyItem)
 

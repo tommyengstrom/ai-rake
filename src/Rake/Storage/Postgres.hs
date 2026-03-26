@@ -9,7 +9,7 @@ module Rake.Storage.Postgres
     ) where
 
 import Data.Time (UTCTime)
-import Data.UUID (UUID)
+import Data.Set qualified as Set
 import Data.UUID.V4 (nextRandom)
 import Database.PostgreSQL.Simple (Only (..), Query)
 import Database.PostgreSQL.Simple.FromRow (FromRow (..))
@@ -25,7 +25,7 @@ import Rake.Types
 import Relude
 
 data ItemRow = ItemRow
-    { storedItemId :: UUID
+    { storedItemId :: HistoryItemId
     , conversationId :: ConversationId
     , historyItem :: HistoryItem
     , createdAt :: UTCTime
@@ -71,7 +71,8 @@ runRakeStoragePostgres tables = interpret $ \_ -> \case
             withPinnedConnection $
                 PG.withTransaction do
                     lockConversation tables conversationId
-                    insertRows <- mkInsertRows conversationId historyItems
+                    existingItemIds <- Set.fromList . map fromOnly <$> PG.query (selectConversationItemIdsQuery tables) (Only conversationId)
+                    insertRows <- mkInsertRows conversationId existingItemIds historyItems
                     void $
                         PG.executeMany
                             (insertItemsQuery tables)
@@ -85,12 +86,17 @@ runRakeStoragePostgres tables = interpret $ \_ -> \case
                 lockConversation tables conversationId
                 rows <- PG.query (selectItemsQuery tables) (Only conversationId)
                 let currentHistory =
-                        [ item
-                        | ItemRow{historyItem = item} <- (rows :: [ItemRow])
+                        [ storedItemHistoryItem StoredItem{itemId = storedItemId, item = historyItem, createdAt}
+                        | ItemRow{storedItemId, historyItem, createdAt} <- (rows :: [ItemRow])
                         ]
+                    existingItemIds =
+                        Set.fromList
+                            [ storedItemId
+                            | ItemRow{storedItemId} <- (rows :: [ItemRow])
+                            ]
                     (result, newItems) = modifyConversation currentHistory
                 unless (null newItems) do
-                    insertRows <- mkInsertRows conversationId newItems
+                    insertRows <- mkInsertRows conversationId existingItemIds newItems
                     void $
                         PG.executeMany
                             (insertItemsQuery tables)
@@ -98,7 +104,7 @@ runRakeStoragePostgres tables = interpret $ \_ -> \case
                 pure result
   where
     itemRowToStoredItem ItemRow{storedItemId = itemId, historyItem = item, createdAt} =
-        StoredItem{itemId, item, createdAt}
+        StoredItem{itemId, item = setHistoryItemId (Just itemId) item, createdAt}
 
 conversationExists
     :: ( WithConnection :> es
@@ -131,14 +137,22 @@ lockConversation tables conversationId = do
         throwError (NoSuchConversation conversationId)
 
 mkInsertRows
-    :: IOE :> es
+    :: ( IOE :> es
+       , Error ChatStorageError :> es
+       )
     => ConversationId
+    -> Set.Set HistoryItemId
     -> [HistoryItem]
-    -> Eff es [(UUID, ConversationId, HistoryItem)]
-mkInsertRows conversationId historyItems =
-    forM historyItems $ \historyItem -> do
-        itemId <- liftIO nextRandom
-        pure (itemId, conversationId, historyItem)
+    -> Eff es [(HistoryItemId, ConversationId, HistoryItem)]
+mkInsertRows conversationId existingItemIds historyItems = do
+    normalizedItems <- ensureHistoryItemIds historyItems
+    validateConversationItemIds conversationId existingItemIds normalizedItems
+    forM normalizedItems $ \normalizedItem -> do
+        let itemId =
+                fromMaybe
+                    (error "ensureHistoryItemId returned a HistoryItem without an id")
+                    (historyItemId normalizedItem)
+        pure (itemId, conversationId, normalizedItem)
 
 setupConversationTables
     :: ( IOE :> es
@@ -151,6 +165,8 @@ setupConversationTables tables =
         PG.withTransaction do
             void $ PG.execute_ (createConversationsTableQuery tables)
             void $ PG.execute_ (createItemsTableQuery tables)
+            void $ PG.execute_ (dropLegacyGlobalItemIdConstraintQuery tables)
+            void $ PG.execute_ (createItemsConversationItemUniqueIndexQuery tables)
             void $ PG.execute_ (createItemsIndexQuery tables)
 
 withPinnedConnection
@@ -180,13 +196,30 @@ createItemsTableQuery tables =
             <> renderIdentifier (itemsTableName tables)
             <> " ("
             <> "id BIGSERIAL PRIMARY KEY, "
-            <> "item_id UUID NOT NULL UNIQUE, "
+            <> "item_id UUID NOT NULL, "
             <> "conversation_id UUID NOT NULL REFERENCES "
             <> renderIdentifier (conversationTableName tables)
             <> " (conversation_id) ON DELETE CASCADE, "
             <> "item JSONB NOT NULL, "
             <> "created_at timestamp with time zone NOT NULL DEFAULT now()"
             <> ")"
+
+dropLegacyGlobalItemIdConstraintQuery :: ConversationTables -> Query
+dropLegacyGlobalItemIdConstraintQuery tables =
+    toQueryText $
+        "ALTER TABLE "
+            <> renderIdentifier (itemsTableName tables)
+            <> " DROP CONSTRAINT IF EXISTS "
+            <> renderIdentifier (legacyGlobalItemIdConstraintName tables)
+
+createItemsConversationItemUniqueIndexQuery :: ConversationTables -> Query
+createItemsConversationItemUniqueIndexQuery tables =
+    toQueryText $
+        "CREATE UNIQUE INDEX IF NOT EXISTS "
+            <> renderIdentifier (itemsConversationItemUniqueIndexName tables)
+            <> " ON "
+            <> renderIdentifier (itemsTableName tables)
+            <> " (conversation_id, item_id)"
 
 insertConversationQuery :: ConversationTables -> Query
 insertConversationQuery tables =
@@ -230,6 +263,13 @@ selectItemsQuery tables =
             <> renderIdentifier (itemsTableName tables)
             <> " WHERE conversation_id = ? ORDER BY created_at ASC, id ASC"
 
+selectConversationItemIdsQuery :: ConversationTables -> Query
+selectConversationItemIdsQuery tables =
+    toQueryText $
+        "SELECT item_id FROM "
+            <> renderIdentifier (itemsTableName tables)
+            <> " WHERE conversation_id = ?"
+
 listConversationsQuery :: ConversationTables -> Query
 listConversationsQuery tables =
     toQueryText $
@@ -255,8 +295,49 @@ itemsTableName ConversationTables{itemsTable} = itemsTable
 itemsConversationIndexName :: ConversationTables -> PgIdentifier
 itemsConversationIndexName ConversationTables{itemsConversationIndex} = itemsConversationIndex
 
+itemsConversationItemUniqueIndexName :: ConversationTables -> PgIdentifier
+itemsConversationItemUniqueIndexName tables =
+    fromRight
+        (error "ConversationTables produced an invalid composite item-id index name")
+        (mkPgIdentifier ("uidx_" <> pgIdentifierText (itemsTableName tables) <> "_conv_item"))
+
+legacyGlobalItemIdConstraintName :: ConversationTables -> PgIdentifier
+legacyGlobalItemIdConstraintName tables =
+    fromRight
+        (error "ConversationTables produced an invalid legacy item-id constraint name")
+        (mkPgIdentifier (pgIdentifierText (itemsTableName tables) <> "_item_id_key"))
+
 renderIdentifier :: PgIdentifier -> Text
 renderIdentifier = quotePgIdentifier
 
 toQueryText :: Text -> Query
 toQueryText = fromString . toString
+
+validateConversationItemIds
+    :: Error ChatStorageError :> es
+    => ConversationId
+    -> Set.Set HistoryItemId
+    -> [HistoryItem]
+    -> Eff es ()
+validateConversationItemIds conversationId existingItemIds normalizedItems =
+    case duplicateHistoryItemId existingItemIds normalizedItems of
+        Just duplicateItemId ->
+            throwError (DuplicateHistoryItemId conversationId duplicateItemId)
+        Nothing ->
+            pure ()
+
+duplicateHistoryItemId :: Set.Set HistoryItemId -> [HistoryItem] -> Maybe HistoryItemId
+duplicateHistoryItemId existingItemIds normalizedItems =
+    go existingItemIds
+        [ itemId
+        | historyItem <- normalizedItems
+        , Just itemId <- [historyItemId historyItem]
+        ]
+  where
+    go _ [] =
+        Nothing
+    go seenIds (itemId : remainingItemIds)
+        | Set.member itemId seenIds =
+            Just itemId
+        | otherwise =
+            go (Set.insert itemId seenIds) remainingItemIds

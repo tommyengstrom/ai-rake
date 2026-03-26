@@ -1,7 +1,10 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module Rake.Types
     ( ResponseFormat (..)
     , jsonSchemaFormat
     , ConversationId (..)
+    , HistoryItemId (..)
     , ToolName
     , ToolDescription
     , ToolCallId (..)
@@ -21,8 +24,16 @@ module Rake.Types
     , ProviderApiFamily (..)
     , NativeProviderItem (..)
     , ProviderHistoryItem (..)
-    , HistoryItem (..)
+    , ResetCheckpoint (..)
+    , ControlItem (..)
+    , HistoryItem (HLocal, HProvider, HControl)
+    , historyItemId
+    , setHistoryItemId
+    , ensureHistoryItemId
+    , ensureHistoryItemIds
     , historyItemLifecycle
+    , ReplayBlockReason (..)
+    , ReplayState (..)
     , ProviderRoundAction (..)
     , ProviderRound (..)
     , ChatPauseReason (..)
@@ -44,6 +55,8 @@ module Rake.Types
     , assistantText
     , assistantParts
     , toolCall
+    , resetToStart
+    , resetTo
     , toolResult
     , toolResultText
     , toolResultJson
@@ -58,7 +71,8 @@ import Data.Proxy (Proxy (..))
 import Data.String (IsString (..))
 import Data.Text (Text)
 import Data.UUID (UUID)
-import Effectful (Eff)
+import Data.UUID.V4 (nextRandom)
+import Effectful (Eff, IOE, (:>), liftIO)
 import GHC.Generics (Generic)
 import Rake.Internal.Schema (normalizeStructuredOutputSchema)
 import Prelude
@@ -83,6 +97,10 @@ newtype ConversationId = ConversationId UUID
         , FromHttpApiData
         , ToHttpApiData
         )
+
+newtype HistoryItemId = HistoryItemId UUID
+    deriving stock (Show, Eq, Ord, Generic)
+    deriving newtype (FromJSON, ToJSON)
 
 type ToolName = Text
 type ToolDescription = Text
@@ -218,10 +236,117 @@ data ProviderHistoryItem = ProviderHistoryItem
     deriving stock (Show, Eq, Generic)
     deriving anyclass (FromJSON, ToJSON)
 
-data HistoryItem
-    = HLocal LocalItem
-    | HProvider ProviderHistoryItem
+data ResetCheckpoint
+    = ResetToStart
+    | ResetToItem HistoryItemId
+    deriving stock (Show, Eq, Ord, Generic)
+
+instance ToJSON ResetCheckpoint where
+    toJSON = \case
+        ResetToStart ->
+            object ["type" .= ("start" :: Text)]
+        ResetToItem itemId ->
+            object
+                [ "type" .= ("item" :: Text)
+                , "itemId" .= itemId
+                ]
+
+instance FromJSON ResetCheckpoint where
+    parseJSON = withObject "ResetCheckpoint" $ \obj -> do
+        checkpointType <- obj .: "type"
+        case checkpointType :: Text of
+            "start" ->
+                pure ResetToStart
+            "item" ->
+                ResetToItem <$> obj .: "itemId"
+            other ->
+                fail $ "Unsupported ResetCheckpoint type: " <> show other
+
+data ControlItem
+    = ResetTo ResetCheckpoint
+    | ReplayBarrier Text
     deriving stock (Show, Eq, Generic)
+
+instance ToJSON ControlItem where
+    toJSON = \case
+        ResetTo checkpoint ->
+            object
+                [ "type" .= ("reset_to" :: Text)
+                , "checkpoint" .= checkpoint
+                ]
+        ReplayBarrier reason ->
+            object
+                [ "type" .= ("replay_barrier" :: Text)
+                , "reason" .= reason
+                ]
+
+instance FromJSON ControlItem where
+    parseJSON = withObject "ControlItem" $ \obj -> do
+        controlType <- obj .: "type"
+        case controlType :: Text of
+            "reset_to" ->
+                ResetTo <$> obj .: "checkpoint"
+            "replay_barrier" ->
+                ReplayBarrier <$> obj .: "reason"
+            other ->
+                fail $ "Unsupported ControlItem type: " <> show other
+
+data HistoryItemBody
+    = HistoryItemLocal LocalItem
+    | HistoryItemProvider ProviderHistoryItem
+    | HistoryItemControl ControlItem
+    deriving stock (Show, Eq, Generic)
+
+data HistoryItem = HistoryItem
+    { historyItemIdField :: Maybe HistoryItemId
+    , historyItemBody :: HistoryItemBody
+    }
+    deriving stock (Eq, Generic)
+
+pattern HLocal :: LocalItem -> HistoryItem
+pattern HLocal item <- HistoryItem _ (HistoryItemLocal item)
+    where
+        HLocal item = HistoryItem Nothing (HistoryItemLocal item)
+
+pattern HProvider :: ProviderHistoryItem -> HistoryItem
+pattern HProvider item <- HistoryItem _ (HistoryItemProvider item)
+    where
+        HProvider item = HistoryItem Nothing (HistoryItemProvider item)
+
+pattern HControl :: ControlItem -> HistoryItem
+pattern HControl item <- HistoryItem _ (HistoryItemControl item)
+    where
+        HControl item = HistoryItem Nothing (HistoryItemControl item)
+
+{-# COMPLETE HLocal, HProvider, HControl #-}
+
+instance Show HistoryItem where
+    show HistoryItem{historyItemIdField, historyItemBody} =
+        "HistoryItem {historyItemId = "
+            <> show historyItemIdField
+            <> ", historyItemBody = "
+            <> show historyItemBody
+            <> "}"
+
+historyItemId :: HistoryItem -> Maybe HistoryItemId
+historyItemId HistoryItem{historyItemIdField} = historyItemIdField
+
+setHistoryItemId :: Maybe HistoryItemId -> HistoryItem -> HistoryItem
+setHistoryItemId itemId historyItem =
+    historyItem{historyItemIdField = itemId}
+
+ensureHistoryItemId :: IOE :> es => HistoryItem -> Eff es HistoryItem
+ensureHistoryItemId historyItem =
+    case historyItemId historyItem of
+        Just{} ->
+            pure historyItem
+        Nothing -> do
+            itemId <- HistoryItemId <$> liftIO nextRandom
+            pure (setHistoryItemId (Just itemId) historyItem)
+
+ensureHistoryItemIds :: IOE :> es => [HistoryItem] -> Eff es [HistoryItem]
+ensureHistoryItemIds =
+    traverse ensureHistoryItemId
 
 historyItemLifecycle :: HistoryItem -> ItemLifecycle
 historyItemLifecycle = \case
@@ -229,6 +354,22 @@ historyItemLifecycle = \case
         ItemCompleted
     HProvider ProviderHistoryItem{itemLifecycle} ->
         itemLifecycle
+    HControl{} ->
+        ItemCompleted
+
+data ReplayBlockReason
+    = ReplayInvalidReset ResetCheckpoint
+    | ReplayBlocked Text
+    deriving stock (Show, Eq, Generic)
+
+data ReplayState = ReplayState
+    { activeHistory :: [HistoryItem]
+    , replayHistory :: [HistoryItem]
+    , resumableToolCalls :: [ToolCall]
+    , pendingArtifacts :: [HistoryItem]
+    , blocked :: Maybe ReplayBlockReason
+    }
+    deriving stock (Show, Eq, Generic)
 
 data ChatPauseReason
     = PauseIncomplete Text
@@ -249,21 +390,21 @@ data ProviderRoundAction
     deriving stock (Show, Eq, Generic)
 
 data ProviderRound = ProviderRound
-    { historyItems :: [HistoryItem]
+    { roundItems :: [HistoryItem]
     , action :: ProviderRoundAction
     }
     deriving stock (Show, Eq, Generic)
 
 data ChatOutcome
     = ChatFinished
-        { historyItems :: [HistoryItem]
+        { appendedItems :: [HistoryItem]
         }
     | ChatPaused
-        { historyItems :: [HistoryItem]
+        { appendedItems :: [HistoryItem]
         , pauseReason :: ChatPauseReason
         }
     | ChatFailed
-        { historyItems :: [HistoryItem]
+        { appendedItems :: [HistoryItem]
         , failureReason :: ChatFailureReason
         }
     deriving stock (Show, Eq, Generic)
@@ -344,6 +485,14 @@ toolCall toolCallId toolName toolArgs =
                     }
             }
 
+resetToStart :: HistoryItem
+resetToStart =
+    HControl (ResetTo ResetToStart)
+
+resetTo :: HistoryItemId -> HistoryItem
+resetTo =
+    HControl . ResetTo . ResetToItem
+
 toolResult :: ToolCallId -> ToolResponse -> HistoryItem
 toolResult toolCallId toolResponse =
     HLocal
@@ -366,7 +515,7 @@ localMessage role parts =
     HLocal LocalMessage{role, parts}
 
 historyItemSchemaVersion :: Int
-historyItemSchemaVersion = 2
+historyItemSchemaVersion = 4
 
 instance ToJSON HistoryItem where
     toJSON historyItem =
@@ -375,58 +524,50 @@ instance ToJSON HistoryItem where
                 toEnvelope "local" (toJSON item)
             HProvider ProviderHistoryItem{apiFamily, nativeItem} ->
                 toEnvelope (providerApiFamilyText apiFamily) (toJSON nativeItem)
+            HControl controlItem ->
+                toEnvelope "control" (toJSON controlItem)
       where
         toEnvelope :: Text -> Value -> Value
         toEnvelope apiFamily payload =
-            object
+            object $
                 [ "schemaVersion" .= historyItemSchemaVersion
                 , "apiFamily" .= apiFamily
                 , "itemLifecycle" .= historyItemLifecycle historyItem
                 , "payload" .= payload
                 ]
+                    <> maybe [] (\itemId -> ["historyItemId" .= itemId]) (historyItemId historyItem)
 
 instance FromJSON HistoryItem where
     parseJSON = withObject "HistoryItem" $ \obj -> do
         apiFamily <- obj .: "apiFamily"
-        schemaVersion <- obj .:? "schemaVersion" :: Parser (Maybe Int)
+        schemaVersion <- obj .: "schemaVersion" :: Parser Int
         itemLifecycle <- fromMaybe ItemCompleted <$> (obj .:? "itemLifecycle")
+        itemId <- obj .:? "historyItemId"
         payload <- obj .: "payload"
 
         case schemaVersion of
-            Nothing ->
-                parseV1 apiFamily payload
-            Just 1 ->
-                parseV1 apiFamily payload
-            Just 2 ->
-                parseV2 apiFamily itemLifecycle payload
-            Just version ->
+            4 ->
+                parseV4 apiFamily itemLifecycle itemId payload
+            version ->
                 fail $ "Unsupported HistoryItem schema version: " <> show version
       where
-        parseV1 :: Text -> Value -> Parser HistoryItem
-        parseV1 apiFamily payload =
-            case apiFamily of
-                "local" ->
-                    HLocal <$> parseJSON payload
-                "openai.responses" ->
-                    HProvider . ProviderHistoryItem ProviderOpenAIResponses ItemCompleted <$> parseJSON payload
-                "xai.responses" ->
-                    HProvider . ProviderHistoryItem ProviderXAIResponses ItemCompleted <$> parseJSON payload
-                "gemini.interactions" ->
-                    HProvider . ProviderHistoryItem ProviderGeminiInteractions ItemCompleted <$> parseJSON payload
-                other ->
-                    fail $ "Unsupported HistoryItem apiFamily: " <> show other
+        wrapHistoryItem :: Maybe HistoryItemId -> HistoryItem -> HistoryItem
+        wrapHistoryItem maybeItemId =
+            setHistoryItemId maybeItemId
 
-        parseV2 :: Text -> ItemLifecycle -> Value -> Parser HistoryItem
-        parseV2 apiFamily itemLifecycle payload =
+        parseV4 :: Text -> ItemLifecycle -> Maybe HistoryItemId -> Value -> Parser HistoryItem
+        parseV4 apiFamily itemLifecycle itemId payload =
             case apiFamily of
                 "local" ->
-                    HLocal <$> parseJSON payload
+                    wrapHistoryItem itemId . HLocal <$> parseJSON payload
                 "openai.responses" ->
-                    HProvider . ProviderHistoryItem ProviderOpenAIResponses itemLifecycle <$> parseJSON payload
+                    wrapHistoryItem itemId . HProvider . ProviderHistoryItem ProviderOpenAIResponses itemLifecycle <$> parseJSON payload
                 "xai.responses" ->
-                    HProvider . ProviderHistoryItem ProviderXAIResponses itemLifecycle <$> parseJSON payload
+                    wrapHistoryItem itemId . HProvider . ProviderHistoryItem ProviderXAIResponses itemLifecycle <$> parseJSON payload
                 "gemini.interactions" ->
-                    HProvider . ProviderHistoryItem ProviderGeminiInteractions itemLifecycle <$> parseJSON payload
+                    wrapHistoryItem itemId . HProvider . ProviderHistoryItem ProviderGeminiInteractions itemLifecycle <$> parseJSON payload
+                "control" ->
+                    wrapHistoryItem itemId . HControl <$> parseJSON payload
                 other ->
                     fail $ "Unsupported HistoryItem apiFamily: " <> show other
 
