@@ -8,6 +8,7 @@ module Rake
     , latestValidCheckpoint
     , resetToLatestValidCheckpoint
     , itemTexts
+    , filterUnavailableMediaHistory
     , lastAssistantTexts
     , lastAssistantTextsStrict
     , decodeLastAssistant
@@ -26,7 +27,7 @@ import Effectful
 import Effectful.Error.Static
 import Rake.Effect as X
 import Rake.Media as X
-import Rake.Providers.Chat.Projection (historyItemToGenericItems, historyItemsToGenericItems)
+import Rake.MediaStorage.Effect as X
 import Rake.Storage.Effect as X
 import Rake.Tool as X
 import Rake.Types as X
@@ -35,7 +36,6 @@ import Relude
 data PendingToolCallState = PendingToolCallState
     { pendingToolCall :: ToolCall
     , pendingToolCallItemIndex :: Int
-    , pendingGeminiThoughtReplayExchangeId :: Maybe Text
     }
 
 data ToolMatchingState = ToolMatchingState
@@ -45,13 +45,13 @@ data ToolMatchingState = ToolMatchingState
     , resolvedToolCallItemIndexes :: Set.Set Int
     , replayableToolResultIndexes :: Set.Set Int
     , strayToolResultIndexes :: Set.Set Int
-    , geminiThoughtReplayExchangeIds :: Set.Set Text
     , duplicateToolCallBlock :: Maybe ReplayBlockReason
     }
 
 chatOutcome
     :: ( IOE :> es
        , Error RakeError :> es
+       , RakeMediaStorage :> es
        , Rake :> es
        )
     => ChatConfig es
@@ -71,8 +71,73 @@ chatOutcomeAppendedItems = \case
         appendedItems
 
 itemTexts :: HistoryItem -> [Text]
-itemTexts historyItem =
-    concatMap genericItemTexts (snd (historyItemToGenericItems historyItem))
+itemTexts HistoryItem{genericItem = historyGenericItem} =
+    genericItemTexts historyGenericItem
+
+filterUnavailableMediaHistory
+    :: RakeMediaStorage :> es
+    => ProviderApiFamily
+    -> [HistoryItem]
+    -> Eff es [HistoryItem]
+filterUnavailableMediaHistory providerFamily =
+    fmap catMaybes . traverse (filterUnavailableMediaHistoryItem providerFamily)
+
+filterUnavailableMediaHistoryItem
+    :: RakeMediaStorage :> es
+    => ProviderApiFamily
+    -> HistoryItem
+    -> Eff es (Maybe HistoryItem)
+filterUnavailableMediaHistoryItem providerFamily historyItem@HistoryItem
+    { genericItem = GenericMessage{role, parts}
+    } = do
+    filteredParts <- catMaybes <$> traverse (filterAvailableMessagePart providerFamily) parts
+    pure $
+        case filteredParts of
+            [] ->
+                Nothing
+            _
+                | filteredParts == parts ->
+                    Just historyItem
+                | otherwise ->
+                    Just
+                        historyItem
+                            { genericItem = GenericMessage{role, parts = filteredParts}
+                            , providerItem = Nothing
+                            }
+filterUnavailableMediaHistoryItem _ historyItem =
+    pure (Just historyItem)
+
+filterAvailableMessagePart
+    :: RakeMediaStorage :> es
+    => ProviderApiFamily
+    -> MessagePart
+    -> Eff es (Maybe MessagePart)
+filterAvailableMessagePart providerFamily part = case part of
+    PartText{} ->
+        pure (Just part)
+    PartRefusal{} ->
+        pure (Just part)
+    PartImage{blobId} ->
+        keepIfMediaAvailable providerFamily blobId part
+    PartAudio{blobId} ->
+        keepIfMediaAvailable providerFamily blobId part
+    PartFile{blobId} ->
+        keepIfMediaAvailable providerFamily blobId part
+
+keepIfMediaAvailable
+    :: RakeMediaStorage :> es
+    => ProviderApiFamily
+    -> MediaBlobId
+    -> MessagePart
+    -> Eff es (Maybe MessagePart)
+keepIfMediaAvailable providerFamily blobId part = do
+    maybeMediaRef <- lookupMediaReference providerFamily blobId
+    pure $
+        case maybeMediaRef of
+            Just{} ->
+                Just part
+            Nothing ->
+                Nothing
 
 conversationReplayState :: [HistoryItem] -> ReplayState
 conversationReplayState history =
@@ -100,7 +165,6 @@ conversationReplayState history =
         , resolvedToolCallItemIndexes = matchingResolvedToolCallItemIndexes
         , replayableToolResultIndexes = matchingReplayableToolResultIndexes
         , strayToolResultIndexes = matchingStrayToolResultIndexes
-        , geminiThoughtReplayExchangeIds = matchingGeminiThoughtReplayExchangeIds
         , duplicateToolCallBlock
         } =
             foldl'
@@ -124,8 +188,8 @@ conversationReplayState history =
             (zip [0 ..] activeItems)
 
     applyControlItem (currentActiveHistory, currentBlocked) historyItem =
-        case historyItem of
-            HControl (ResetTo checkpoint) ->
+        case genericItem historyItem of
+            GenericResetTo{checkpoint} ->
                 case applyResetCheckpoint checkpoint currentActiveHistory of
                     Left blockedReason ->
                         (currentActiveHistory, Just blockedReason)
@@ -141,15 +205,15 @@ conversationReplayState history =
                     matchingState
                     (historyItemToolCalls historyItem)
          in
-            case historyItem of
-                HLocal LocalToolResult{toolResult = ToolResult{toolCallId}} ->
+            case genericItem historyItem of
+                GenericToolResult{toolResult = ToolResult{toolCallId}} ->
                     resolveToolResult itemIndex toolCallId stateAfterToolCalls
                 _ ->
                     stateAfterToolCalls
 
     registerPendingToolCall
         itemIndex
-        historyItem
+        _historyItem
         matchingState@ToolMatchingState
             { unresolvedToolCallsById = stateUnresolvedToolCallsById
             , unresolvedToolCallOrderRev = stateUnresolvedToolCallOrderRev
@@ -172,8 +236,6 @@ conversationReplayState history =
                             PendingToolCallState
                                 { pendingToolCall
                                 , pendingToolCallItemIndex = itemIndex
-                                , pendingGeminiThoughtReplayExchangeId =
-                                    historyItemGeminiPendingFunctionCallExchangeId historyItem
                                 }
                             stateUnresolvedToolCallsById
                     , unresolvedToolCallOrderRev =
@@ -191,7 +253,6 @@ conversationReplayState history =
             , resolvedToolCallItemIndexes = stateResolvedToolCallItemIndexes
             , replayableToolResultIndexes = stateReplayableToolResultIndexes
             , strayToolResultIndexes = stateStrayToolResultIndexes
-            , geminiThoughtReplayExchangeIds = stateGeminiThoughtReplayExchangeIds
             } =
         case Map.lookup toolCallId stateUnresolvedToolCallsById of
             Nothing ->
@@ -199,7 +260,7 @@ conversationReplayState history =
                     { strayToolResultIndexes =
                         Set.insert itemIndex stateStrayToolResultIndexes
                     }
-            Just PendingToolCallState{pendingToolCallItemIndex, pendingGeminiThoughtReplayExchangeId} ->
+            Just PendingToolCallState{pendingToolCallItemIndex} ->
                 let unresolvedToolCallsById' =
                         Map.delete toolCallId stateUnresolvedToolCallsById
                     unresolvedToolCallCountsByItemIndex' =
@@ -210,12 +271,6 @@ conversationReplayState history =
                         if toolCallItemFullyResolved
                             then Set.insert pendingToolCallItemIndex stateResolvedToolCallItemIndexes
                             else stateResolvedToolCallItemIndexes
-                    geminiThoughtReplayExchangeIds' =
-                        case (pendingGeminiThoughtReplayExchangeId, toolCallItemFullyResolved) of
-                            (Just exchangeId, True) ->
-                                Set.insert exchangeId stateGeminiThoughtReplayExchangeIds
-                            _ ->
-                                stateGeminiThoughtReplayExchangeIds
                  in
                     matchingState
                         { unresolvedToolCallsById = unresolvedToolCallsById'
@@ -223,32 +278,29 @@ conversationReplayState history =
                         , resolvedToolCallItemIndexes = resolvedToolCallItemIndexes'
                         , replayableToolResultIndexes =
                             Set.insert itemIndex stateReplayableToolResultIndexes
-                        , geminiThoughtReplayExchangeIds = geminiThoughtReplayExchangeIds'
                         }
 
     classifyReplayItem (replayItems, pendingItems) (itemIndex, historyItem) =
-        case historyItem of
-            HControl{} ->
+        case genericItem historyItem of
+            GenericResetTo{} ->
                 (replayItems, pendingItems)
-            HLocal localItem ->
-                case localItem of
-                    LocalToolResult{}
-                        | Set.member itemIndex matchingReplayableToolResultIndexes ->
-                            (historyItem : replayItems, pendingItems)
-                        | Set.member itemIndex matchingStrayToolResultIndexes ->
-                            (replayItems, pendingItems)
-                        | otherwise ->
-                            (replayItems, pendingItems)
-                    _
-                        | Set.member itemIndex unresolvedToolCallItemIndexes ->
-                            (replayItems, historyItem : pendingItems)
-                        | hasReplayableToolCalls itemIndex historyItem ->
-                            (historyItem : replayItems, pendingItems)
-                        | not (null (historyItemToolCalls historyItem)) ->
-                            (replayItems, historyItem : pendingItems)
-                        | otherwise ->
-                            (historyItem : replayItems, pendingItems)
-            HProvider ProviderHistoryItem{itemLifecycle = ItemCompleted} ->
+            GenericReplayBarrier{} ->
+                (replayItems, pendingItems)
+            GenericToolResult{}
+                | Set.member itemIndex matchingReplayableToolResultIndexes ->
+                    (historyItem : replayItems, pendingItems)
+                | Set.member itemIndex matchingStrayToolResultIndexes ->
+                    (replayItems, pendingItems)
+                | historyItemLifecycle historyItem == ItemPending ->
+                    (replayItems, historyItem : pendingItems)
+                | otherwise ->
+                    (replayItems, pendingItems)
+            GenericNonPortable{}
+                | historyItemLifecycle historyItem == ItemCompleted ->
+                    (historyItem : replayItems, pendingItems)
+                | otherwise ->
+                    (replayItems, historyItem : pendingItems)
+            _ ->
                 if historyItemHasFailure historyItem
                     then
                         (replayItems, historyItem : pendingItems)
@@ -261,19 +313,7 @@ conversationReplayState history =
                     else if not (null (historyItemToolCalls historyItem))
                         then
                             (replayItems, historyItem : pendingItems)
-                    else
-                        (historyItem : replayItems, pendingItems)
-            HProvider ProviderHistoryItem{itemLifecycle = ItemPending} ->
-                if historyItemHasFailure historyItem
-                    then
-                        (replayItems, historyItem : pendingItems)
-                    else if historyItemShouldReplayGeminiThought matchingGeminiThoughtReplayExchangeIds historyItem
-                        then
-                            (historyItem : replayItems, pendingItems)
-                    else if Set.member itemIndex unresolvedToolCallItemIndexes
-                        then
-                            (replayItems, historyItem : pendingItems)
-                    else if hasReplayableToolCalls itemIndex historyItem
+                    else if historyItemLifecycle historyItem == ItemCompleted
                         then
                             (historyItem : replayItems, pendingItems)
                     else
@@ -299,7 +339,10 @@ lastAssistantTexts history =
     fromMaybe [] $
         viaNonEmpty head
             [ messagePartsText parts
-            | GenericMessage{role = GenericAssistant, parts, itemLifecycle = ItemCompleted} <- List.reverse (flattenReplayHistory history)
+            | HistoryItem
+                { itemLifecycle = ItemCompleted
+                , genericItem = GenericMessage{role = GenericAssistant, parts}
+                } <- List.reverse (flattenReplayHistory history)
             ]
 
 lastAssistantTextsStrict :: [HistoryItem] -> [Text]
@@ -308,7 +351,7 @@ lastAssistantTextsStrict history =
         Just{} ->
             []
         Nothing ->
-            concatMap genericItemTexts (assistantMessageTail history)
+            concatMap itemTexts (assistantMessageTail history)
 
 decodeLastAssistant
     :: forall a
@@ -325,8 +368,11 @@ decodeLastAssistant history =
             Left (LlmExpectationError "Assistant last message is not a message item")
   where
     assistantMessages =
-        [ genericItem
-        | genericItem@GenericMessage{role = GenericAssistant, itemLifecycle = ItemCompleted} <- List.reverse (flattenReplayHistory history)
+        [ assistantItem
+        | HistoryItem
+            { itemLifecycle = ItemCompleted
+            , genericItem = assistantItem@GenericMessage{role = GenericAssistant}
+            } <- List.reverse (flattenReplayHistory history)
         ]
 
 decodeLastAssistantStrict
@@ -342,7 +388,7 @@ decodeLastAssistantStrict history =
             case assistantMessageTail history of
                 [] ->
                     Left (LlmExpectationError "Assistant returned no message in latest turn")
-                [GenericMessage{parts}] ->
+                [HistoryItem{genericItem = GenericMessage{parts}}] ->
                     decodeAssistantMessageParts "Assistant latest turn" parts
                 _ ->
                     Left (LlmExpectationError "Assistant latest turn is not a single message")
@@ -368,6 +414,7 @@ executeToolCalls tools toolCalls =
 handleToolLoop
     :: ( IOE :> es
        , Error RakeError :> es
+       , RakeMediaStorage :> es
        , Rake :> es
        )
     => [ToolDef es]
@@ -392,6 +439,7 @@ handleToolLoop tools responseFormat samplingOptions onItem maxRounds checkpointH
 
     ProviderRound
         { roundItems = roundHistoryItemsRaw
+        , mediaReferences = roundMediaReferences
         , action = roundAction
         } <-
         getLlmResponse
@@ -399,6 +447,7 @@ handleToolLoop tools responseFormat samplingOptions onItem maxRounds checkpointH
             responseFormat
             samplingOptions
             (let ReplayState{replayHistory} = conversationReplayState fullHistoryAfterResume in replayHistory)
+    saveMediaReferences roundMediaReferences
     roundHistoryItems <- ensureHistoryItemIds roundHistoryItemsRaw
     traverse_ onItem roundHistoryItems
 
@@ -467,10 +516,10 @@ handleToolLoop tools responseFormat samplingOptions onItem maxRounds checkpointH
     toolCallProjectionMismatchReason =
         "Provider round toolCalls did not match the unresolved tool calls implied by appended round history"
 
-flattenReplayHistory :: [HistoryItem] -> [GenericItem]
+flattenReplayHistory :: [HistoryItem] -> [HistoryItem]
 flattenReplayHistory history =
     let ReplayState{replayHistory} = conversationReplayState history
-     in snd (historyItemsToGenericItems replayHistory)
+     in replayHistory
 
 validResetCheckpoints :: [HistoryItem] -> [ResetCheckpoint]
 validResetCheckpoints history =
@@ -507,7 +556,7 @@ resetToLatestValidCheckpoint history =
             | currentReplayIsStable ->
                 Nothing
             | otherwise ->
-                Just (HControl (ResetTo latestCheckpoint))
+                Just (resetToCheckpoint latestCheckpoint)
   where
     currentReplayIsStable =
         case conversationReplayState history of
@@ -516,12 +565,28 @@ resetToLatestValidCheckpoint history =
             ReplayState{blocked = Just{}} ->
                 False
 
-assistantMessageTail :: [HistoryItem] -> [GenericItem]
+    resetToCheckpoint = \case
+        ResetToStart ->
+            resetToStart
+        ResetToItem itemId ->
+            resetTo itemId
+
+assistantMessageTail :: [HistoryItem] -> [HistoryItem]
 assistantMessageTail =
-    reverse . takeWhile isAssistantMessage . List.reverse . flattenReplayHistory
+    reverse
+        . takeWhile isAssistantMessage
+        . dropWhile isCompletedNonPortable
+        . List.reverse
+        . flattenReplayHistory
   where
     isAssistantMessage = \case
-        GenericMessage{role = GenericAssistant, itemLifecycle = ItemCompleted} ->
+        HistoryItem{itemLifecycle = ItemCompleted, genericItem = GenericMessage{role = GenericAssistant}} ->
+            True
+        _ ->
+            False
+
+    isCompletedNonPortable = \case
+        HistoryItem{itemLifecycle = ItemCompleted, genericItem = GenericNonPortable{}} ->
             True
         _ ->
             False
@@ -538,6 +603,12 @@ genericItemTexts = \case
                 [text]
             ToolResponseJson{} ->
                 []
+    GenericResetTo{} ->
+        []
+    GenericReplayBarrier{} ->
+        []
+    GenericNonPortable{} ->
+        []
 
 messagePartsText :: [MessagePart] -> [Text]
 messagePartsText =
@@ -546,6 +617,14 @@ messagePartsText =
     partText = \case
         PartText{text} ->
             Just text
+        PartRefusal{text} ->
+            Just text
+        PartImage{} ->
+            Nothing
+        PartAudio{} ->
+            Nothing
+        PartFile{} ->
+            Nothing
 
 decodeAssistantMessageParts
     :: forall a
@@ -553,11 +632,12 @@ decodeAssistantMessageParts
     => String
     -> [MessagePart]
     -> Either RakeError a
-decodeAssistantMessageParts label = \case
-    parts@(PartText{} : _) ->
-        first LlmExpectationError (eitherDecodeStrictText (mconcat (messagePartsText parts)))
-    [] ->
-        Left (LlmExpectationError (label <> " contains no text content"))
+decodeAssistantMessageParts label parts =
+    case messagePartsText parts of
+        [] ->
+            Left (LlmExpectationError (label <> " contains no text content"))
+        texts ->
+            first LlmExpectationError (eitherDecodeStrictText (mconcat texts))
 
 throwIfReplayBlocked
     :: Error RakeError :> es
@@ -588,19 +668,10 @@ historyItemHasFailure =
     isJust . historyItemFailureSignal
 
 historyItemFailureSignal :: HistoryItem -> Maybe Text
-historyItemFailureSignal = \case
-    HControl (ReplayBarrier reason) ->
+historyItemFailureSignal HistoryItem{genericItem = GenericReplayBarrier{reason}} =
         Just reason
-    HProvider ProviderHistoryItem{apiFamily, nativeItem = NativeProviderItem{payload}} ->
-        case apiFamily of
-            ProviderOpenAIResponses ->
-                responsesPayloadFailureSignal payload
-            ProviderXAIResponses ->
-                responsesPayloadFailureSignal payload
-            ProviderGeminiInteractions ->
-                Nothing
-    _ ->
-        Nothing
+historyItemFailureSignal _ =
+    Nothing
 
 chatFailureReasonText :: ChatFailureReason -> Text
 chatFailureReasonText = \case
@@ -610,66 +681,19 @@ chatFailureReasonText = \case
         failureReason
 
 failureBarrier :: ChatFailureReason -> HistoryItem
-failureBarrier =
-    HControl . ReplayBarrier . chatFailureReasonText
-
-responsesPayloadFailureSignal :: Value -> Maybe Text
-responsesPayloadFailureSignal = \case
-    Object payloadObject ->
-        case KM.lookup "status" payloadObject of
-            Just (String "failed") ->
-                Just "Responses output item status was failed. Append resetTo to rewind before continuing."
-            Just (String "cancelled") ->
-                Just "Responses output item status was cancelled. Append resetTo to rewind before continuing."
-            Just (String "canceled") ->
-                Just "Responses output item status was canceled. Append resetTo to rewind before continuing."
-            Just (String "expired") ->
-                Just "Responses output item status was expired. Append resetTo to rewind before continuing."
-            _ ->
-                Nothing
-    _ ->
-        Nothing
+failureBarrier failureReason =
+    HistoryItem
+        { historyItemIdField = Nothing
+        , itemLifecycle = ItemCompleted
+        , genericItem = GenericReplayBarrier{reason = chatFailureReasonText failureReason}
+        , providerItem = Nothing
+        }
 
 historyItemToolCalls :: HistoryItem -> [ToolCall]
-historyItemToolCalls historyItem =
-    [ genericToolCall'
-    | GenericToolCall{toolCall = genericToolCall'} <- snd (historyItemToGenericItems historyItem)
-    ]
-
-historyItemGeminiPendingFunctionCallExchangeId :: HistoryItem -> Maybe Text
-historyItemGeminiPendingFunctionCallExchangeId historyItem = case historyItem of
-    HProvider ProviderHistoryItem
-        { apiFamily = ProviderGeminiInteractions
-        , itemLifecycle = ItemPending
-        , nativeItem = NativeProviderItem{exchangeId = Just providerExchangeId, payload}
-        }
-            | geminiPayloadType payload == Just "function_call" ->
-                Just providerExchangeId
-    _ ->
-        Nothing
-
-historyItemShouldReplayGeminiThought :: Set.Set Text -> HistoryItem -> Bool
-historyItemShouldReplayGeminiThought replayExchangeIds = \case
-    HProvider ProviderHistoryItem
-        { apiFamily = ProviderGeminiInteractions
-        , itemLifecycle = ItemPending
-        , nativeItem = NativeProviderItem{exchangeId = Just providerExchangeId, payload}
-        } ->
-            Set.member providerExchangeId replayExchangeIds
-                && geminiPayloadType payload == Just "thought"
-    _ ->
-        False
-
-geminiPayloadType :: Value -> Maybe Text
-geminiPayloadType = \case
-    Object payloadObject ->
-        KM.lookup "type" payloadObject >>= \case
-            String payloadType ->
-                Just payloadType
-            _ ->
-                Nothing
-    _ ->
-        Nothing
+historyItemToolCalls HistoryItem{genericItem = GenericToolCall{toolCall = genericToolCall'}} =
+    [genericToolCall']
+historyItemToolCalls _ =
+    []
 
 duplicateUnresolvedToolCallReason :: ToolCallId -> Text
 duplicateUnresolvedToolCallReason (ToolCallId toolCallIdText) =
@@ -728,7 +752,6 @@ emptyToolMatchingState =
         , resolvedToolCallItemIndexes = mempty
         , replayableToolResultIndexes = mempty
         , strayToolResultIndexes = mempty
-        , geminiThoughtReplayExchangeIds = mempty
         , duplicateToolCallBlock = Nothing
         }
 
@@ -744,6 +767,7 @@ withResumableChat
     :: ( RakeStorage :> es
        , IOE :> es
        , Error RakeError :> es
+       , RakeMediaStorage :> es
        , Rake :> es
        )
     => ChatConfig es

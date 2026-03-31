@@ -17,7 +17,8 @@ import Effectful.Error.Static
 import Network.HTTP.Client.TLS (newTlsManager)
 import Rake.Effect
 import Rake.Internal.Schema (normalizeStructuredOutputSchema)
-import Rake.Providers.Chat.Projection (historyItemToGenericItems, historyItemsToGenericItems)
+import Rake.MediaStorage.Effect
+import Rake.Providers.Chat.Projection (classifyResponsesPayload)
 import Rake.Providers.Internal (runChatProvider, valueToCompactText)
 import Rake.Types
 import Relude
@@ -56,6 +57,7 @@ runResponsesChatProvider
     :: forall es a
      . ( IOE :> es
        , Error RakeError :> es
+       , RakeMediaStorage :> es
        )
     => ResponsesProviderConfig es
     -> Eff (Rake ': es) a
@@ -94,7 +96,10 @@ runResponsesChatProvider config@ResponsesProviderConfig{..} eff = do
         LlmExpectationError ("Invalid base URL: " <> show err)
 
 buildResponsesRequestBody
-    :: ResponsesProviderConfig es
+    :: ( Error RakeError :> es
+       , RakeMediaStorage :> es
+       )
+    => ResponsesProviderConfig es
     -> [ToolDeclaration]
     -> ResponseFormat
     -> SamplingOptions
@@ -129,31 +134,15 @@ buildResponsesRequestBody ResponsesProviderConfig{providerTag, requestLogger, mo
             responseFormatToValue responseFormat
 
 renderHistoryItemForResponses
-    :: ResponsesProviderTag
+    :: ( Error RakeError :> es
+       , RakeMediaStorage :> es
+       )
+    => ResponsesProviderTag
     -> (NativeMsgFormat -> Eff es ())
     -> HistoryItem
     -> Eff es [Value]
-renderHistoryItemForResponses providerTag requestLogger historyItem =
-    case reusableNativePayloadForResponsesProvider providerTag historyItem of
-        Just payload ->
-            pure [payload]
-        Nothing -> do
-            let (notes, genericItems) = historyItemToGenericItems historyItem
-            traverse_ (requestLogger . NativeConversionNote) notes
-            fmap concat (traverse (renderGenericItemForResponses requestLogger) genericItems)
-
-reusableNativePayloadForResponsesProvider :: ResponsesProviderTag -> HistoryItem -> Maybe Value
-reusableNativePayloadForResponsesProvider providerTag = \case
-    HProvider ProviderHistoryItem{apiFamily, itemLifecycle, nativeItem = NativeProviderItem{payload}}
-        | apiFamily == responsesProviderApiFamily providerTag
-        , shouldReuseResponsesNativePayload itemLifecycle payload ->
-            Just payload
-    _ ->
-        Nothing
-
-shouldReuseResponsesNativePayload :: ItemLifecycle -> Value -> Bool
-shouldReuseResponsesNativePayload itemLifecycle _payload =
-    itemLifecycle == ItemCompleted
+renderHistoryItemForResponses providerTag requestLogger =
+    renderCanonicalHistoryItemForResponses providerTag requestLogger
 
 responsesProviderApiFamily :: ResponsesProviderTag -> ProviderApiFamily
 responsesProviderApiFamily = \case
@@ -193,46 +182,136 @@ emptyToolParametersSchema =
             , "properties" .= object []
             ]
 
-renderGenericItemForResponses
-    :: (NativeMsgFormat -> Eff es ())
-    -> GenericItem
+renderCanonicalHistoryItemForResponses
+    :: ( Error RakeError :> es
+       , RakeMediaStorage :> es
+       )
+    => ResponsesProviderTag
+    -> (NativeMsgFormat -> Eff es ())
+    -> HistoryItem
     -> Eff es [Value]
-renderGenericItemForResponses requestLogger = \case
-    GenericMessage{role, parts, itemLifecycle} -> do
-        traverse_ (requestLogger . NativeConversionNote) (pendingAssistantAnnotationNote role itemLifecycle)
-        pure [messageValue (genericRoleToText role) (messagePartsValue role itemLifecycle parts)]
-    GenericToolCall{toolCall = genericToolCall'} ->
-        pure [toolCallValue genericToolCall']
-    GenericToolResult{toolResult = genericToolResult'} ->
-        pure [toolResultValue genericToolResult']
+renderCanonicalHistoryItemForResponses providerTag requestLogger HistoryItem
+    { itemLifecycle = lifecycle
+    , genericItem = genericHistoryItem
+    , providerItem = maybeProviderItem
+    } =
+    case genericHistoryItem of
+        GenericMessage{role, parts} -> do
+            traverse_ (requestLogger . NativeConversionNote) (pendingAssistantAnnotationNote role lifecycle)
+            content <- messagePartsValue (responsesProviderApiFamily providerTag) role lifecycle parts
+            pure [messageValue (genericRoleToText role) content]
+        GenericToolCall{toolCall = genericToolCall'} ->
+            pure [toolCallValue genericToolCall']
+        GenericToolResult{toolResult = genericToolResult'} ->
+            pure [toolResultValue genericToolResult']
+        GenericResetTo{} ->
+            pure []
+        GenericReplayBarrier{} ->
+            pure []
+        GenericNonPortable ->
+            pure $
+                case maybeProviderItem of
+                    Just ProviderItem{apiFamily, payload}
+                        | lifecycle == ItemCompleted
+                        , apiFamily == responsesProviderApiFamily providerTag ->
+                            [payload]
+                    _ ->
+                        []
 
-messagePartsValue :: GenericRole -> ItemLifecycle -> [MessagePart] -> Value
-messagePartsValue role itemLifecycle =
-    messagePartsValueForRole role . annotatePendingAssistantParts role itemLifecycle
+messagePartsValue
+    :: ( Error RakeError :> es
+       , RakeMediaStorage :> es
+       )
+    => ProviderApiFamily
+    -> GenericRole
+    -> ItemLifecycle
+    -> [MessagePart]
+    -> Eff es Value
+messagePartsValue providerFamily role lifecycle =
+    messagePartsValueForRole providerFamily role . annotatePendingAssistantParts role lifecycle
 
-messagePartsValueForRole :: GenericRole -> [MessagePart] -> Value
-messagePartsValueForRole role = \case
-    [] ->
-        String ""
-    [PartText{text}] ->
-        String text
-    parts ->
-        Array . Vector.fromList $
-            [ object
-                [ "type" .= messageTextPartType role
-                , "text" .= text
-                        ]
-            | PartText{text} <- parts
+messagePartsValueForRole
+    :: ( Error RakeError :> es
+       , RakeMediaStorage :> es
+       )
+    => ProviderApiFamily
+    -> GenericRole
+    -> [MessagePart]
+    -> Eff es Value
+messagePartsValueForRole providerFamily role parts = do
+    renderedParts <- traverse (renderResponsesMessagePart providerFamily) parts
+    pure $
+        case renderedParts of
+            [] ->
+                String ""
+            [RenderedResponsesTextPart text] ->
+                String text
+            _ ->
+                Array . Vector.fromList $
+                    map (renderedResponsesPartValue role) renderedParts
+
+data RenderedResponsesPart
+    = RenderedResponsesTextPart Text
+    | RenderedResponsesNativePart Value
+
+renderResponsesMessagePart
+    :: ( Error RakeError :> es
+       , RakeMediaStorage :> es
+       )
+    => ProviderApiFamily
+    -> MessagePart
+    -> Eff es RenderedResponsesPart
+renderResponsesMessagePart providerFamily = \case
+    PartText{text} ->
+        pure (RenderedResponsesTextPart text)
+    PartRefusal{text} ->
+        pure (RenderedResponsesTextPart text)
+    PartImage{blobId} ->
+        resolveResponsesMediaPart providerFamily blobId
+    PartAudio{blobId} ->
+        resolveResponsesMediaPart providerFamily blobId
+    PartFile{blobId} ->
+        resolveResponsesMediaPart providerFamily blobId
+  where
+    resolveResponsesMediaPart targetProviderFamily blobId = do
+        maybeRequestPart <- lookupMediaReference targetProviderFamily blobId
+        case maybeRequestPart of
+            Just requestPart ->
+                pure (RenderedResponsesNativePart requestPart)
+            Nothing ->
+                let MediaBlobId blobIdText = blobId
+                 in
+                throwError
+                    ( LlmExpectationError
+                        ( "No stored media reference is available for blob "
+                            <> toString blobIdText
+                            <> " when rendering "
+                            <> toString (providerApiFamilyText targetProviderFamily)
+                        )
+                    )
+
+renderedResponsesPartValue :: GenericRole -> RenderedResponsesPart -> Value
+renderedResponsesPartValue role = \case
+    RenderedResponsesTextPart text ->
+        object
+            [ "type" .= messageTextPartType role
+            , "text" .= text
             ]
+    RenderedResponsesNativePart requestPart ->
+        requestPart
 
 annotatePendingAssistantParts :: GenericRole -> ItemLifecycle -> [MessagePart] -> [MessagePart]
-annotatePendingAssistantParts role itemLifecycle parts
-    | role == GenericAssistant && itemLifecycle == ItemPending =
+annotatePendingAssistantParts role lifecycle parts
+    | role == GenericAssistant && lifecycle == ItemPending =
         case parts of
             [] ->
                 [PartText pendingAssistantAnnotation]
             PartText{text} : rest ->
                 PartText{ text = pendingAssistantAnnotation <> text } : rest
+            PartRefusal{text} : rest ->
+                PartRefusal{ text = pendingAssistantAnnotation <> text } : rest
+            _ ->
+                PartText pendingAssistantAnnotation : parts
     | otherwise =
         parts
   where
@@ -240,8 +319,8 @@ annotatePendingAssistantParts role itemLifecycle parts
         "[INCOMPLETE ASSISTANT MESSAGE FROM PREVIOUS PROVIDER]\n"
 
 pendingAssistantAnnotationNote :: GenericRole -> ItemLifecycle -> [Text]
-pendingAssistantAnnotationNote role itemLifecycle
-    | role == GenericAssistant && itemLifecycle == ItemPending =
+pendingAssistantAnnotationNote role lifecycle
+    | role == GenericAssistant && lifecycle == ItemPending =
         ["Rendered pending assistant text as annotated assistant content for Responses input"]
     | otherwise =
         []
@@ -305,6 +384,7 @@ decodeResponsesResponse providerTag responseValue = do
     responseObject <- expectObject "response" responseValue
     let responseId = lookupText "id" responseObject
         responseStatus = lookupText "status" responseObject
+        responseApiFamily = responsesProviderApiFamily providerTag
     outputItems <- case KM.lookup "output" responseObject of
         Just outputValue ->
             expectArray "response.output" outputValue
@@ -314,22 +394,19 @@ decodeResponsesResponse providerTag responseValue = do
         payloadObject <- expectObject "response.output item" payload
         pure (payload, payloadObject)
     let outputStatuses = mapMaybe (lookupText "status" . snd) parsedOutputItems
-        classificationHistoryItems =
-            [ HProvider
-                ProviderHistoryItem
-                    { apiFamily = responsesProviderApiFamily providerTag
-                    , itemLifecycle = ItemCompleted
-                    , nativeItem =
-                        NativeProviderItem
-                            { exchangeId = responseId
-                            , nativeItemId = Nothing
-                            , payload
-                            }
-                    }
-            | (payload, _) <- parsedOutputItems
+        classifiedOutputItems =
+            [ let (notes, canonicalItem, mediaReferences) = classifyResponsesPayload responseApiFamily responseId payload
+               in (payload, payloadObject, notes, canonicalItem, mediaReferences)
+            | (payload, payloadObject) <- parsedOutputItems
             ]
-        (projectionNotes, projectedItems) =
-            historyItemsToGenericItems classificationHistoryItems
+        projectionNotes =
+            concatMap (\(_, _, notes, _, _) -> notes) classifiedOutputItems
+        projectedItems =
+            [ canonicalItem
+            | (_, _, _, canonicalItem, _) <- classifiedOutputItems
+            ]
+        roundMediaReferences =
+            concatMap (\(_, _, _, _, mediaReferences) -> mediaReferences) classifiedOutputItems
         toolCalls = collectToolCalls projectedItems
         roundAction =
             responsesRoundAction
@@ -339,21 +416,23 @@ decodeResponsesResponse providerTag responseValue = do
                 toolCalls
                 projectionNotes
         roundItemLifecycle = providerRoundItemLifecycle roundAction
-    roundItems <- forM parsedOutputItems $ \(payload, payloadObject) -> do
+    roundItems <- forM classifiedOutputItems $ \(payload, payloadObject, _, canonicalItem, _) -> do
         let nativeItemId = lookupText "id" payloadObject
         pure $
-            HProvider
-                ProviderHistoryItem
-                    { apiFamily = responsesProviderApiFamily providerTag
-                    , itemLifecycle = roundItemLifecycle
-                    , nativeItem =
-                        NativeProviderItem
-                            { exchangeId = responseId
+            HistoryItem
+                { historyItemIdField = Nothing
+                , itemLifecycle = roundItemLifecycle
+                , genericItem = canonicalItem
+                , providerItem =
+                    Just
+                        ProviderItem
+                            { apiFamily = responseApiFamily
+                            , exchangeId = responseId
                             , nativeItemId
                             , payload
                             }
-                    }
-    pure ProviderRound{roundItems, action = roundAction}
+                }
+    pure ProviderRound{roundItems, mediaReferences = roundMediaReferences, action = roundAction}
 
 responsesRoundAction
     :: Maybe Text

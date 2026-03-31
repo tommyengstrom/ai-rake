@@ -31,7 +31,8 @@ import Effectful.Dispatch.Dynamic (interpretWith)
 import Effectful.Error.Static
 import Network.HTTP.Client.TLS (newTlsManager)
 import Rake.Effect
-import Rake.Providers.Chat.Projection (historyItemToGenericItems, historyItemsToGenericItems)
+import Rake.MediaStorage.Effect
+import Rake.Providers.Chat.Projection (classifyGeminiPayloads)
 import Rake.Providers.Internal (defaultWarningLogger, valueToCompactText)
 import Rake.Types
 import Relude
@@ -273,6 +274,7 @@ runRakeGeminiChat
     :: forall es a
      . ( IOE :> es
        , Error RakeError :> es
+       , RakeMediaStorage :> es
        )
     => GeminiChatSettings es
     -> Eff (Rake ': es) a
@@ -303,7 +305,9 @@ runRakeGeminiChat settings@GeminiChatSettings{apiKey, baseUrl, requestLogger} ef
         LlmExpectationError ("Invalid base URL: " <> show err)
 
 buildGeminiRequestBody
-    :: Error RakeError :> es
+    :: ( Error RakeError :> es
+       , RakeMediaStorage :> es
+       )
     => GeminiChatSettings es
     -> [ToolDeclaration]
     -> ResponseFormat
@@ -345,7 +349,9 @@ buildGeminiRequestBody GeminiChatSettings{model, providerTools, systemInstructio
             <> fmap toJSON providerTools
 
 renderGeminiHistory
-    :: Error RakeError :> es
+    :: ( Error RakeError :> es
+       , RakeMediaStorage :> es
+       )
     => (NativeMsgFormat -> Eff es ())
     -> [HistoryItem]
     -> Eff es RenderedGeminiHistory
@@ -353,59 +359,15 @@ renderGeminiHistory requestLogger =
     foldlM (renderGeminiHistoryItem requestLogger) initialRenderedGeminiHistory
 
 renderGeminiHistoryItem
-    :: Error RakeError :> es
+    :: ( Error RakeError :> es
+       , RakeMediaStorage :> es
+       )
     => (NativeMsgFormat -> Eff es ())
     -> RenderedGeminiHistory
     -> HistoryItem
     -> Eff es RenderedGeminiHistory
-renderGeminiHistoryItem requestLogger renderedHistory historyEntry = case historyEntry of
-    HProvider ProviderHistoryItem
-        { apiFamily = ProviderGeminiInteractions
-        , itemLifecycle
-        , nativeItem = NativeProviderItem{payload}
-        }
-        | shouldReuseGeminiNativePayload itemLifecycle payload ->
-            pure (appendGeminiNativePayload payload renderedHistory)
-    fallbackHistoryItem -> do
-        let (notes, genericItems) = historyItemToGenericItems fallbackHistoryItem
-        traverse_ (requestLogger . NativeConversionNote) notes
-        foldlM renderGeminiGenericItem renderedHistory genericItems
-
-shouldReuseGeminiNativePayload :: ItemLifecycle -> Value -> Bool
-shouldReuseGeminiNativePayload itemLifecycle payload =
-    (itemLifecycle == ItemCompleted && isGeminiAssistantPayload payload)
-        || (itemLifecycle == ItemPending && (isGeminiFunctionCallPayload payload || isGeminiThoughtPayload payload))
-
-isGeminiAssistantPayload :: Value -> Bool
-isGeminiAssistantPayload = \case
-    Object payloadObject ->
-        lookupText "text" payloadObject /= Nothing
-            && isGeminiTextType (lookupText "type" payloadObject)
-    _ ->
-        False
-
-isGeminiTextType :: Maybe Text -> Bool
-isGeminiTextType = \case
-    Nothing ->
-        True
-    Just "text" ->
-        True
-    _ ->
-        False
-
-isGeminiFunctionCallPayload :: Value -> Bool
-isGeminiFunctionCallPayload = \case
-    Object payloadObject ->
-        lookupText "type" payloadObject == Just "function_call"
-    _ ->
-        False
-
-isGeminiThoughtPayload :: Value -> Bool
-isGeminiThoughtPayload = \case
-    Object payloadObject ->
-        lookupText "type" payloadObject == Just "thought"
-    _ ->
-        False
+renderGeminiHistoryItem requestLogger renderedHistory historyEntry =
+    renderGeminiCanonicalHistoryItem requestLogger renderedHistory historyEntry
 
 appendGeminiTurn :: Text -> Value -> [Value] -> [Value]
 appendGeminiTurn role content = \case
@@ -463,54 +425,89 @@ combinedSystemInstruction settingsInstruction RenderedGeminiHistory{instructionB
   where
     allBlocks = catMaybes [settingsInstruction] <> instructionBlocks
 
-renderGeminiGenericItem
-    :: Error RakeError :> es
-    => RenderedGeminiHistory
-    -> GenericItem
+renderGeminiCanonicalHistoryItem
+    :: ( Error RakeError :> es
+       , RakeMediaStorage :> es
+       )
+    => (NativeMsgFormat -> Eff es ())
+    -> RenderedGeminiHistory
+    -> HistoryItem
     -> Eff es RenderedGeminiHistory
-renderGeminiGenericItem renderedHistory = \case
-    GenericMessage{role = GenericSystem, parts} ->
-        pure (appendGeminiInstruction GenericSystem (messagePartsToText parts) renderedHistory)
-    GenericMessage{role = GenericDeveloper, parts} ->
-        pure (appendGeminiInstruction GenericDeveloper (messagePartsToText parts) renderedHistory)
-    GenericMessage{role = GenericUser, parts} ->
-        pure (appendGeminiTurnBlock "user" (textContentValue (messagePartsToText parts)) renderedHistory)
-    GenericMessage{role = GenericAssistant, parts, itemLifecycle} ->
-        pure
-            ( appendGeminiTurnBlock
-                "model"
-                (textContentValue (annotatePendingAssistantText itemLifecycle (messagePartsToText parts)))
-                renderedHistory
-            )
-    GenericToolCall{toolCall = ToolCall{toolCallId = ToolCallId toolCallId, toolName, toolArgs}} ->
-        let RenderedGeminiHistory{openModelTurnHasFunctionCall = sawFunctionCallInCurrentModelTurn} =
-                renderedHistory
-            shouldInjectDummyThoughtSignature =
-                not sawFunctionCallInCurrentModelTurn
-         in
+renderGeminiCanonicalHistoryItem _requestLogger renderedHistory HistoryItem
+    { itemLifecycle = lifecycle
+    , genericItem = genericHistoryItem
+    , providerItem = maybeProviderItem
+    } =
+    case genericHistoryItem of
+        GenericMessage{role = GenericSystem, parts} -> do
+            renderedText <- messagePartsToText parts
+            pure (appendGeminiInstruction GenericSystem renderedText renderedHistory)
+        GenericMessage{role = GenericDeveloper, parts} -> do
+            renderedText <- messagePartsToText parts
+            pure (appendGeminiInstruction GenericDeveloper renderedText renderedHistory)
+        GenericMessage{role = GenericUser, parts} -> do
+            renderedContentParts <- messagePartsToGeminiContentParts ProviderGeminiInteractions parts
+            pure (appendGeminiTurnBlocks "user" renderedContentParts renderedHistory)
+        GenericMessage{role = GenericAssistant, parts} -> do
+            renderedContentParts <- messagePartsToGeminiContentParts ProviderGeminiInteractions parts
+            pure
+                ( appendGeminiTurnBlocks
+                    "model"
+                    (annotatePendingAssistantContentParts lifecycle renderedContentParts)
+                    renderedHistory
+                )
+        GenericToolCall{toolCall = ToolCall{toolCallId = ToolCallId toolCallId, toolName, toolArgs, continuationAttachments}} ->
+            let geminiContinuationPayloads =
+                    [ continuationPayload
+                    | ToolCallContinuation
+                        { continuationProviderFamily = ProviderGeminiInteractions
+                        , continuationPayload
+                        } <- continuationAttachments
+                    ]
+                renderedHistoryWithContinuations =
+                    foldl' (flip (appendGeminiTurnBlock "model")) renderedHistory geminiContinuationPayloads
+                RenderedGeminiHistory{openModelTurnHasFunctionCall = sawFunctionCallInCurrentModelTurn} =
+                    renderedHistoryWithContinuations
+                shouldInjectDummyThoughtSignature =
+                    null geminiContinuationPayloads
+                        && not sawFunctionCallInCurrentModelTurn
+             in
+                pure $
+                    appendGeminiTurnBlock
+                        "model"
+                        (genericGeminiFunctionCallValue shouldInjectDummyThoughtSignature toolCallId toolName toolArgs)
+                        (registerToolCall toolCallId toolName renderedHistoryWithContinuations)
+        GenericToolResult{toolResult = ToolResult{toolCallId = ToolCallId toolCallId, toolResponse}} -> do
+            let RenderedGeminiHistory{toolCallNames} = renderedHistory
+            toolName <-
+                maybe
+                    (throwError (LlmExpectationError "Gemini function_result requires the preceding tool call name"))
+                    pure
+                    (Map.lookup toolCallId toolCallNames)
             pure $
                 appendGeminiTurnBlock
-                    "model"
-                    (genericGeminiFunctionCallValue shouldInjectDummyThoughtSignature toolCallId toolName toolArgs)
-                    (registerToolCall toolCallId toolName renderedHistory)
-    GenericToolResult{toolResult = ToolResult{toolCallId = ToolCallId toolCallId, toolResponse}} -> do
-        let RenderedGeminiHistory{toolCallNames} = renderedHistory
-        toolName <-
-            maybe
-                (throwError (LlmExpectationError "Gemini function_result requires the preceding tool call name"))
-                pure
-                (Map.lookup toolCallId toolCallNames)
-        pure $
-            appendGeminiTurnBlock
-                "user"
-                ( object
-                    [ "type" .= ("function_result" :: Text)
-                    , "name" .= toolName
-                    , "call_id" .= toolCallId
-                    , "result" .= geminiToolResultValue toolResponse
-                    ]
-                )
-                renderedHistory
+                    "user"
+                    ( object
+                        [ "type" .= ("function_result" :: Text)
+                        , "name" .= toolName
+                        , "call_id" .= toolCallId
+                        , "result" .= geminiToolResultValue toolResponse
+                        ]
+                    )
+                    renderedHistory
+        GenericResetTo{} ->
+            pure renderedHistory
+        GenericReplayBarrier{} ->
+            pure renderedHistory
+        GenericNonPortable ->
+            pure $
+                case maybeProviderItem of
+                    Just ProviderItem{apiFamily, payload}
+                        | lifecycle == ItemCompleted
+                        , apiFamily == ProviderGeminiInteractions ->
+                            appendGeminiTurnBlock "model" payload renderedHistory
+                    _ ->
+                        renderedHistory
 
 appendGeminiInstruction :: GenericRole -> Text -> RenderedGeminiHistory -> RenderedGeminiHistory
 appendGeminiInstruction role text renderedHistory@RenderedGeminiHistory{instructionBlocks, sawConversationTurn, sawNonLeadingInstruction} =
@@ -542,19 +539,19 @@ appendGeminiTurnBlock role content renderedHistory@RenderedGeminiHistory{rendere
             _ ->
                 False
 
-appendGeminiNativePayload :: Value -> RenderedGeminiHistory -> RenderedGeminiHistory
-appendGeminiNativePayload payload renderedHistory =
-    maybe
-        (appendGeminiTurnBlock "model" payload renderedHistory)
-        (\(toolCallId, toolName) -> appendGeminiTurnBlock "model" payload (registerToolCall toolCallId toolName renderedHistory))
-        (geminiToolCallDetails payload)
+isGeminiFunctionCallPayload :: Value -> Bool
+isGeminiFunctionCallPayload = \case
+    Object payloadObject ->
+        lookupText "type" payloadObject == Just "function_call"
+    _ ->
+        False
 
 -- Gemini 3 function calling validates the current-turn function call against a
 -- thought signature. When replaying a foreign tool continuation into Gemini,
 -- there is no provider-issued signature to preserve, so we attach Google's
 -- documented dummy signature to the first replayed generic function_call in
--- that step. Same-provider Gemini continuation keeps replaying the original
--- native thought/function_call payloads unchanged.
+-- that step. Same-provider Gemini continuation instead carries provider-owned
+-- continuation payloads on the pending ToolCall itself.
 -- Docs: https://ai.google.dev/gemini-api/docs/thought-signatures
 geminiForeignTraceDummyThoughtSignature :: Text
 geminiForeignTraceDummyThoughtSignature =
@@ -584,16 +581,6 @@ renderedTurnRole turnObject =
         _ ->
             Nothing
 
-geminiToolCallDetails :: Value -> Maybe (Text, Text)
-geminiToolCallDetails = \case
-    Object payloadObject
-        | lookupText "type" payloadObject == Just "function_call" -> do
-            toolCallId <- lookupText "id" payloadObject <|> lookupText "call_id" payloadObject
-            toolName <- lookupText "name" payloadObject
-            pure (toolCallId, toolName)
-    _ ->
-        Nothing
-
 instructionBlock :: GenericRole -> Text -> Text
 instructionBlock role content =
     roleLabel role <> ":\n" <> content
@@ -608,20 +595,74 @@ instructionBlock role content =
         GenericAssistant ->
             "Assistant"
 
-messagePartsToText :: [MessagePart] -> Text
+appendGeminiTurnBlocks :: Text -> [Value] -> RenderedGeminiHistory -> RenderedGeminiHistory
+appendGeminiTurnBlocks role contentParts history =
+    foldl' (\accumulatedHistory content -> appendGeminiTurnBlock role content accumulatedHistory) history contentParts
+
+messagePartsToText
+    :: Error RakeError :> es
+    => [MessagePart]
+    -> Eff es Text
 messagePartsToText =
-    foldMap partText
+    fmap mconcat . traverse partText
   where
     partText = \case
         PartText{text} ->
-            text
+            pure text
+        PartRefusal{text} ->
+            pure text
+        PartImage{} ->
+            throwError (LlmExpectationError "Generic media message parts require a blob resolver before they can be rendered to provider input")
+        PartAudio{} ->
+            throwError (LlmExpectationError "Generic media message parts require a blob resolver before they can be rendered to provider input")
+        PartFile{} ->
+            throwError (LlmExpectationError "Generic media message parts require a blob resolver before they can be rendered to provider input")
 
-annotatePendingAssistantText :: ItemLifecycle -> Text -> Text
-annotatePendingAssistantText itemLifecycle text
-    | itemLifecycle == ItemPending =
-        "[INCOMPLETE ASSISTANT MESSAGE FROM PREVIOUS PROVIDER]\n" <> text
+messagePartsToGeminiContentParts
+    :: ( Error RakeError :> es
+       , RakeMediaStorage :> es
+       )
+    => ProviderApiFamily
+    -> [MessagePart]
+    -> Eff es [Value]
+messagePartsToGeminiContentParts providerFamily =
+    traverse (messagePartToGeminiContentPart providerFamily)
+  where
+    messagePartToGeminiContentPart targetProviderFamily = \case
+        PartText{text} ->
+            pure (textContentValue text)
+        PartRefusal{text} ->
+            pure (textContentValue text)
+        PartImage{blobId} ->
+            resolveMediaContentPart targetProviderFamily blobId
+        PartAudio{blobId} ->
+            resolveMediaContentPart targetProviderFamily blobId
+        PartFile{blobId} ->
+            resolveMediaContentPart targetProviderFamily blobId
+
+    resolveMediaContentPart targetProviderFamily blobId = do
+        maybeRequestPart <- lookupMediaReference targetProviderFamily blobId
+        case maybeRequestPart of
+            Just requestPart ->
+                pure requestPart
+            Nothing ->
+                let MediaBlobId blobIdText = blobId
+                 in
+                throwError
+                    ( LlmExpectationError
+                        ( "No stored media reference is available for blob "
+                            <> toString blobIdText
+                            <> " when rendering "
+                            <> toString (providerApiFamilyText targetProviderFamily)
+                        )
+                    )
+
+annotatePendingAssistantContentParts :: ItemLifecycle -> [Value] -> [Value]
+annotatePendingAssistantContentParts lifecycle contentParts
+    | lifecycle == ItemPending =
+        textContentValue "[INCOMPLETE ASSISTANT MESSAGE FROM PREVIOUS PROVIDER]\n" : contentParts
     | otherwise =
-        text
+        contentParts
 
 textContentValue :: Text -> Value
 textContentValue text =
@@ -716,22 +757,14 @@ decodeGeminiResponse responseValue = do
         interactionExchangeId =
             lookupText "id" responseObject
                 <|> geminiFallbackExchangeId outputPayloads
-        classificationHistoryItems =
-            [ HProvider
-                ProviderHistoryItem
-                    { apiFamily = ProviderGeminiInteractions
-                    , itemLifecycle = ItemCompleted
-                    , nativeItem =
-                        NativeProviderItem
-                            { exchangeId = interactionExchangeId
-                            , nativeItemId = Nothing
-                            , payload
-                            }
-                    }
-            | payload <- outputPayloads
+        classifiedOutputItems =
+            classifyGeminiPayloads outputPayloads
+        projectionNotes =
+            concatMap (\(_, notes, _) -> notes) classifiedOutputItems
+        projectedItems =
+            [ canonicalItem
+            | (_, _, canonicalItem) <- classifiedOutputItems
             ]
-        (projectionNotes, projectedItems) =
-            historyItemsToGenericItems classificationHistoryItems
         toolCalls = collectToolCalls projectedItems
         roundAction =
             geminiRoundAction
@@ -740,21 +773,31 @@ decodeGeminiResponse responseValue = do
                 toolCalls
                 projectionNotes
         roundItemLifecycle = providerRoundItemLifecycle roundAction
-    roundItems <- forM outputPayloads $ \payload -> do
-        payloadObject <- expectObject "interaction output" payload
-        pure $
-            HProvider
-                ProviderHistoryItem
+    roundItems <- forM classifiedOutputItems $ \(payload, _, canonicalItem) -> do
+        let rawProviderItem =
+                ProviderItem
                     { apiFamily = ProviderGeminiInteractions
-                    , itemLifecycle = roundItemLifecycle
-                    , nativeItem =
-                        NativeProviderItem
-                            { exchangeId = interactionExchangeId
-                            , nativeItemId = geminiNativeItemId payloadObject
-                            , payload
-                            }
+                    , exchangeId = interactionExchangeId
+                    , nativeItemId =
+                        case payload of
+                            Object payloadObject ->
+                                geminiNativeItemId payloadObject
+                            _ ->
+                                Nothing
+                    , payload
                     }
-    pure ProviderRound{roundItems, action = roundAction}
+        pure $
+            case canonicalItem of
+                GenericNonPortable ->
+                    nonPortableHistoryItem roundItemLifecycle rawProviderItem
+                _ ->
+                    HistoryItem
+                        { historyItemIdField = Nothing
+                        , itemLifecycle = roundItemLifecycle
+                        , genericItem = canonicalItem
+                        , providerItem = Just rawProviderItem
+                        }
+    pure ProviderRound{roundItems, mediaReferences = [], action = roundAction}
 
 geminiRoundAction
     :: Maybe Text

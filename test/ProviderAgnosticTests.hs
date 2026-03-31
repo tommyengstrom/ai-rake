@@ -10,16 +10,23 @@ import Rake
 import Relude
 import Test.Hspec
 
+data ProviderImageFixture es = ProviderImageFixture
+    { providerFamily :: ProviderApiFamily
+    , registerImageFixture :: MediaBlobId -> Eff es ()
+    }
+
 specWithProvider
     :: forall es
      . ( IOE :> es
        , RakeStorage :> es
+       , RakeMediaStorage :> es
        , Error RakeError :> es
        , Rake :> es
        )
-    => (forall a. Eff es a -> IO a)
+    => ProviderImageFixture es
+    -> (forall a. Eff es a -> IO a)
     -> Spec
-specWithProvider runEffectStack = do
+specWithProvider ProviderImageFixture{registerImageFixture} runEffectStack = do
     it "Responds to an initial system+user history" $ do
         (outcome, conv) <- runEffectStack $ do
             convId <- createConversation
@@ -35,6 +42,34 @@ specWithProvider runEffectStack = do
 
         lastAssistantTexts response `shouldSatisfy` any (T.elem '4')
         length conv `shouldSatisfy` (>= 3)
+
+    it "stores and replays generic image chats" $ do
+        let blobId = "blob-image-1"
+            imageMessage =
+                userParts
+                    [ imagePart blobId (Just "image/png") (Just "tiny test image")
+                    , textPart "Reply with exactly READY."
+                    ]
+        (firstOutcome, secondOutcome, storedAfterFirst, storedAfterSecond) <- runEffectStack $ do
+            convId <- createConversation
+            registerImageFixture blobId
+            appendItems convId [imageMessage]
+            firstOutcome <- withResumableChat defaultChatConfig convId
+            storedAfterFirst <- getConversation convId
+            appendItems convId [user "Reply with exactly OK."]
+            secondOutcome <- withResumableChat defaultChatConfig convId
+            storedAfterSecond <- getConversation convId
+            pure (firstOutcome, secondOutcome, storedAfterFirst, storedAfterSecond)
+
+        let firstResponse = expectFinished firstOutcome
+            secondResponse = expectFinished secondOutcome
+            firstStoredHistory = map (setHistoryItemId Nothing) storedAfterFirst
+            secondStoredHistory = map (setHistoryItemId Nothing) storedAfterSecond
+
+        take 1 firstStoredHistory `shouldBe` [imageMessage]
+        take 1 secondStoredHistory `shouldBe` [imageMessage]
+        lastAssistantTexts firstResponse `shouldSatisfy` any (T.isInfixOf "READY" . T.toUpper)
+        lastAssistantTexts secondResponse `shouldSatisfy` any (T.isInfixOf "OK" . T.toUpper)
 
     it "Executes a single tool call" $ do
         outcome <- runEffectStack $ do
@@ -52,7 +87,10 @@ specWithProvider runEffectStack = do
         response
             `shouldSatisfy` any
                 ( \case
-                    HLocal LocalToolResult{toolResult = ToolResult{toolResponse = ToolResponseText{text = toolOutput}}} ->
+                    HistoryItem
+                        { providerItem = Nothing
+                        , genericItem = GenericToolResult{toolResult = ToolResult{toolResponse = ToolResponseText{text = toolOutput}}}
+                        } ->
                         T.isInfixOf "John Snow" toolOutput
                     _ ->
                         False
@@ -74,14 +112,17 @@ specWithProvider runEffectStack = do
         response
             `shouldSatisfy` any
                 ( \case
-                    HLocal LocalToolResult{toolResult = ToolResult{toolResponse = ToolResponseText{text = toolOutput}}} ->
+                    HistoryItem
+                        { providerItem = Nothing
+                        , genericItem = GenericToolResult{toolResult = ToolResult{toolResponse = ToolResponseText{text = toolOutput}}}
+                        } ->
                         T.isInfixOf "123-456-7890" toolOutput
                     _ ->
                         False
                 )
         lastAssistantTexts response `shouldSatisfy` any (T.isInfixOf "123-456-7890")
         response `shouldSatisfy` (>= 3) . length
-        length [() | HLocal LocalToolResult{} <- response] `shouldSatisfy` (>= 1)
+        length [() | HistoryItem{providerItem = Nothing, genericItem = GenericToolResult{}} <- response] `shouldSatisfy` (>= 1)
 
     describe "Structured Output" $ do
         it "Responds with JSON when requested" $ do
@@ -146,7 +187,7 @@ specWithProvider runEffectStack = do
             msgs
                 `shouldSatisfy` any
                     ( \case
-                        HLocal LocalToolResult{} -> True
+                        HistoryItem{providerItem = Nothing, genericItem = GenericToolResult{}} -> True
                         _ -> False
                     )
 

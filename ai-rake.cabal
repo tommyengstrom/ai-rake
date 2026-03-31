@@ -71,10 +71,12 @@ common shared_opts
   build-depends:
       aeson
     , base
+    , bytestring
     , containers
     , effectful
     , effectful-th
     , effectful-postgresql
+    , filelock
     , generic-lens
     , http-types
     , lens
@@ -98,6 +100,9 @@ library
       Rake.Effect
       Rake.Error
       Rake.Media
+      Rake.MediaStorage.Effect
+      Rake.MediaStorage.Directory
+      Rake.MediaStorage.InMemory
       Rake.Providers.Gemini.Chat
       Rake.Providers.Gemini.Images
       Rake.PostgresLogger
@@ -120,10 +125,12 @@ library
       Rake.Providers.XAI.Imagine.Types
   hs-source-dirs: src
   build-depends:
+    , directory
     , http-api-data
     , http-client
     , http-client-tls
     , effectful-core
+    , filepath
     , resource-pool
     , servant
     , servant-client
@@ -148,6 +155,9 @@ test-suite ai-rake-test
       Rake.ReplaySpec
       Rake.Provider.ResponsesRenderSpec
       Rake.Provider.XAISpec
+      Rake.MediaStorage.DirectorySpec
+      ProviderStructuredSchemaBehaviorTests
+      StructuredSchemaTestTypes
       Rake.Storage.InMemorySpec
       Rake.TypesSpec
       ProviderAgnosticTests

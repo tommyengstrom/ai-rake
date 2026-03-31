@@ -12,6 +12,7 @@ import Effectful.Dispatch.Dynamic (interpretWith)
 import Effectful.Error.Static
 import Effectful.Time (Time, runTime)
 import Rake
+import Rake.MediaStorage.InMemory (runRakeMediaStorageInMemory)
 import Rake.Storage.InMemory (runRakeStorageInMemory)
 import Relude
 import Test.Hspec
@@ -395,6 +396,120 @@ spec = describe "Rake" $ do
 
             decodeLastAssistantStrict @Value response `shouldBe` Right assistantPayload
 
+        it "treats refusal parts as assistant text in strict helpers" $ do
+            let assistantPayload = object ["answer" .= (4 :: Int)]
+                response = [assistantParts [refusalPart "{\"answer\":4}"]]
+
+            lastAssistantTextsStrict response `shouldBe` ["{\"answer\":4}"]
+            decodeLastAssistantStrict @Value response `shouldBe` Right assistantPayload
+
+        it "ignores media parts in assistant text helpers" $ do
+            let assistantPayload = object ["answer" .= (4 :: Int)]
+                response =
+                    [ assistantParts
+                        [ imagePart "blob-image-1" (Just "image/png") (Just "diagram")
+                        , textPart "{\"answer\":4}"
+                        ]
+                    ]
+
+            lastAssistantTextsStrict response `shouldBe` ["{\"answer\":4}"]
+            decodeLastAssistantStrict @Value response `shouldBe` Right assistantPayload
+
+        it "ignores trailing completed non-portable artifacts in strict helpers" $ do
+            let assistantPayload = object ["answer" .= (4 :: Int)]
+                completedGeminiThought =
+                    nonPortableHistoryItem
+                        ItemCompleted
+                        ProviderItem
+                            { apiFamily = ProviderGeminiInteractions
+                            , exchangeId = Just "interaction-gemini"
+                            , nativeItemId = Just "thought-1"
+                            , payload = object ["type" .= ("thought" :: Text)]
+                            }
+                history = [assistantText "{\"answer\":4}", completedGeminiThought]
+
+            lastAssistantTextsStrict history `shouldBe` ["{\"answer\":4}"]
+            decodeLastAssistantStrict @Value history `shouldBe` Right assistantPayload
+
+    describe "filterUnavailableMediaHistory" $ do
+        it "drops unavailable media parts but keeps remaining text" $ do
+            let history =
+                    [ HistoryItem
+                        { historyItemIdField = Nothing
+                        , itemLifecycle = ItemCompleted
+                        , genericItem =
+                            GenericMessage
+                                { role = GenericAssistant
+                                , parts =
+                                    [ textPart "hello"
+                                    , imagePart "blob-missing" (Just "image/png") (Just "diagram")
+                                    ]
+                                }
+                        , providerItem =
+                            Just
+                                ProviderItem
+                                    { apiFamily = ProviderOpenAIResponses
+                                    , exchangeId = Just "response-openai"
+                                    , nativeItemId = Just "item-openai"
+                                    , payload = object ["type" .= ("message" :: Text)]
+                                    }
+                        }
+                    ]
+
+            filteredHistory <-
+                runEff
+                    . runRakeMediaStorageInMemory
+                    $ filterUnavailableMediaHistory ProviderOpenAIResponses history
+
+            filteredHistory
+                `shouldBe`
+                    [ HistoryItem
+                        { historyItemIdField = Nothing
+                        , itemLifecycle = ItemCompleted
+                        , genericItem = GenericMessage{role = GenericAssistant, parts = [textPart "hello"]}
+                        , providerItem = Nothing
+                        }
+                    ]
+
+        it "drops media-only messages when no media ref exists" $ do
+            let history =
+                    [ userParts [imagePart "blob-missing" (Just "image/png") (Just "diagram")]
+                    , assistantParts [filePart "blob-missing-file" Nothing (Just "notes.txt")]
+                    ]
+
+            filteredHistory <-
+                runEff
+                    . runRakeMediaStorageInMemory
+                    $ filterUnavailableMediaHistory ProviderOpenAIResponses history
+
+            filteredHistory `shouldBe` []
+
+        it "leaves history unchanged when all required media refs exist" $ do
+            let history =
+                    [ assistantParts
+                        [ textPart "hello"
+                        , imagePart "blob-present" (Just "image/png") (Just "diagram")
+                        ]
+                    ]
+
+            filteredHistory <-
+                runEff
+                    . runRakeMediaStorageInMemory
+                    $ do
+                        saveMediaReference
+                            MediaProviderReference
+                                { mediaBlobId = "blob-present"
+                                , providerFamily = ProviderOpenAIResponses
+                                , providerRequestPart =
+                                    object
+                                        [ "type" .= ("input_image" :: Text)
+                                        , "image_url" .= ("https://example.com/present.png" :: Text)
+                                        ]
+                                }
+                        filterUnavailableMediaHistory ProviderOpenAIResponses history
+
+            filteredHistory `shouldBe` history
+
     describe "withStorage and withStorageBy" $ do
         it "strips an existing conversation prefix before appending" $ do
             result <- runStorageTest do
@@ -708,40 +823,44 @@ countingToolCall toolCallId =
         { toolCallId
         , toolName = "counting_tool"
         , toolArgs = mempty
+        , continuationAttachments = []
         }
 
 runMockChatOutcome
     :: [ProviderRound]
-    -> Eff '[Rake, Error RakeError, IOE] ChatOutcome
+    -> Eff '[Rake, RakeMediaStorage, Error RakeError, IOE] ChatOutcome
     -> IO (Either RakeError ChatOutcome)
 runMockChatOutcome plannedRounds action =
     fmap (fmap stripHistoryItemIdsFromOutcome) $
         runEff
             . runErrorNoCallStack
+            . runRakeMediaStorageInMemory
             . runMockRake plannedRounds
             $ action
 
 runRecordedMockChatOutcome
     :: IORef.IORef [SamplingOptions]
     -> [ProviderRound]
-    -> Eff '[Rake, Error RakeError, IOE] ChatOutcome
+    -> Eff '[Rake, RakeMediaStorage, Error RakeError, IOE] ChatOutcome
     -> IO (Either RakeError ChatOutcome)
 runRecordedMockChatOutcome samplingRef plannedRounds action =
     fmap (fmap stripHistoryItemIdsFromOutcome) $
         runEff
             . runErrorNoCallStack
+            . runRakeMediaStorageInMemory
             . runRecordedMockRake samplingRef plannedRounds
             $ action
 
 runHistoryRecordedMockChatOutcome
     :: IORef.IORef [[HistoryItem]]
     -> [ProviderRound]
-    -> Eff '[Rake, Error RakeError, IOE] ChatOutcome
+    -> Eff '[Rake, RakeMediaStorage, Error RakeError, IOE] ChatOutcome
     -> IO (Either RakeError ChatOutcome)
 runHistoryRecordedMockChatOutcome historyRef plannedRounds action =
     fmap (fmap stripHistoryItemIdsFromOutcome) $
         runEff
             . runErrorNoCallStack
+            . runRakeMediaStorageInMemory
             . runHistoryRecordedMockRake historyRef plannedRounds
             $ action
 
@@ -824,6 +943,7 @@ runStorageOutcomeTest
          , Error RakeError
          , RakeStorage
          , Error ChatStorageError
+         , RakeMediaStorage
          , Time
          , Concurrent
          , IOE
@@ -834,6 +954,7 @@ runStorageOutcomeTest plannedRounds action =
     runEff
         . runConcurrent
         . runTime
+        . runRakeMediaStorageInMemory
         . runErrorNoCallStack
         . runRakeStorageInMemory
         $ do
@@ -844,6 +965,7 @@ finalProviderRound :: [HistoryItem] -> ProviderRound
 finalProviderRound roundItems =
     ProviderRound
         { roundItems
+        , mediaReferences = []
         , action = ProviderRoundDone
         }
 
@@ -851,6 +973,7 @@ toolProviderRound :: [HistoryItem] -> [ToolCall] -> ProviderRound
 toolProviderRound roundItems toolCalls =
     ProviderRound
         { roundItems
+        , mediaReferences = []
         , action = ProviderRoundNeedsLocalTools toolCalls
         }
 
@@ -858,6 +981,7 @@ pausedProviderRound :: ChatPauseReason -> [HistoryItem] -> ProviderRound
 pausedProviderRound pauseReason roundItems =
     ProviderRound
         { roundItems
+        , mediaReferences = []
         , action = ProviderRoundPaused pauseReason
         }
 
@@ -865,6 +989,7 @@ failedProviderRound :: ChatFailureReason -> [HistoryItem] -> ProviderRound
 failedProviderRound failureReason roundItems =
     ProviderRound
         { roundItems
+        , mediaReferences = []
         , action = ProviderRoundFailed failureReason
         }
 
@@ -874,21 +999,24 @@ loopToolCall toolCallId =
         { toolCallId
         , toolName = "loop_tool"
         , toolArgs = mempty
+        , continuationAttachments = []
         }
 
 responsesAssistantItem :: ItemLifecycle -> Text -> HistoryItem
-responsesAssistantItem itemLifecycle textValue =
-    HProvider
-        ProviderHistoryItem
-            { apiFamily = ProviderOpenAIResponses
-            , itemLifecycle
-            , nativeItem =
-                NativeProviderItem
-                    { exchangeId = Just "response-openai"
-                    , nativeItemId = Just ("message-" <> lifecycleSuffix itemLifecycle)
+responsesAssistantItem lifecycle textValue =
+    HistoryItem
+        { historyItemIdField = Nothing
+        , itemLifecycle = lifecycle
+        , genericItem = GenericMessage{role = GenericAssistant, parts = [PartText textValue]}
+        , providerItem =
+            Just
+                ProviderItem
+                    { apiFamily = ProviderOpenAIResponses
+                    , exchangeId = Just "response-openai"
+                    , nativeItemId = Just ("message-" <> lifecycleSuffix lifecycle)
                     , payload =
                         object
-                            [ "id" .= ("native-message-" <> lifecycleSuffix itemLifecycle)
+                            [ "id" .= ("native-message-" <> lifecycleSuffix lifecycle)
                             , "type" .= ("message" :: Text)
                             , "role" .= ("assistant" :: Text)
                             , "content"
@@ -901,17 +1029,28 @@ responsesAssistantItem itemLifecycle textValue =
                                    )
                             ]
                     }
-            }
+        }
 
 responsesToolCallItem :: ItemLifecycle -> ToolCall -> HistoryItem
-responsesToolCallItem itemLifecycle ToolCall{toolCallId = ToolCallId toolCallId, toolName, toolArgs} =
-    HProvider
-        ProviderHistoryItem
-            { apiFamily = ProviderOpenAIResponses
-            , itemLifecycle
-            , nativeItem =
-                NativeProviderItem
-                    { exchangeId = Just "response-openai"
+responsesToolCallItem lifecycle ToolCall{toolCallId = ToolCallId toolCallId, toolName, toolArgs, continuationAttachments} =
+    HistoryItem
+        { historyItemIdField = Nothing
+        , itemLifecycle = lifecycle
+        , genericItem =
+            GenericToolCall
+                { toolCall =
+                    ToolCall
+                        { toolCallId = ToolCallId toolCallId
+                        , toolName
+                        , toolArgs
+                        , continuationAttachments
+                        }
+                }
+        , providerItem =
+            Just
+                ProviderItem
+                    { apiFamily = ProviderOpenAIResponses
+                    , exchangeId = Just "response-openai"
                     , nativeItemId = Just ("call-" <> toolCallId)
                     , payload =
                         object
@@ -922,7 +1061,7 @@ responsesToolCallItem itemLifecycle ToolCall{toolCallId = ToolCallId toolCallId,
                             , "arguments" .= Object (KM.fromMap (Map.mapKeys fromText toolArgs))
                             ]
                     }
-            }
+        }
 
 lifecycleSuffix :: ItemLifecycle -> Text
 lifecycleSuffix = \case
@@ -933,21 +1072,23 @@ lifecycleSuffix = \case
 
 geminiThought :: HistoryItem
 geminiThought =
-    HProvider
-        ProviderHistoryItem
+    nonPortableHistoryItem
+        ItemPending
+        ProviderItem
             { apiFamily = ProviderGeminiInteractions
-            , itemLifecycle = ItemPending
-            , nativeItem =
-                NativeProviderItem
-                    { exchangeId = Just "interaction-gemini"
-                    , nativeItemId = Just "thought-1"
-                    , payload = object ["type" .= ("thought" :: Text)]
-                    }
+            , exchangeId = Just "interaction-gemini"
+            , nativeItemId = Just "thought-1"
+            , payload = object ["type" .= ("thought" :: Text)]
             }
 
 replayBarrierItem :: Text -> HistoryItem
-replayBarrierItem =
-    HControl . ReplayBarrier
+replayBarrierItem reason =
+    HistoryItem
+        { historyItemIdField = Nothing
+        , itemLifecycle = ItemCompleted
+        , genericItem = GenericReplayBarrier{reason}
+        , providerItem = Nothing
+        }
 
 duplicateToolCallFailureMessage :: ToolCallId -> Text
 duplicateToolCallFailureMessage (ToolCallId toolCallIdText) =

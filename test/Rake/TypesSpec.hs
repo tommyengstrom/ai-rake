@@ -8,6 +8,7 @@ import Data.OpenApi
 import Data.UUID qualified as UUID
 import Rake
 import Relude
+import StructuredSchemaTestTypes
 import Test.Hspec
 
 data ClosedRecord = ClosedRecord
@@ -20,33 +21,6 @@ data OpenMapPayload = OpenMapPayload
     deriving stock (Show, Eq, Generic)
     deriving anyclass (FromJSON, ToJSON)
 
-data ExampleToolCall = ExampleToolCall
-    { tool :: Text
-    }
-    deriving stock (Show, Eq, Generic)
-    deriving anyclass (FromJSON, ToJSON, ToSchema)
-
-data RecordWithMaybe = RecordWithMaybe
-    { response :: Text
-    , translated_response :: Text
-    , toolCall :: Maybe ExampleToolCall
-    }
-    deriving stock (Show, Eq, Generic)
-    deriving anyclass (FromJSON, ToJSON, ToSchema)
-
-data NestedChild = NestedChild
-    { maybeText :: Maybe Text
-    }
-    deriving stock (Show, Eq, Generic)
-    deriving anyclass (FromJSON, ToJSON, ToSchema)
-
-data NestedRecord = NestedRecord
-    { label :: Text
-    , child :: Maybe NestedChild
-    }
-    deriving stock (Show, Eq, Generic)
-    deriving anyclass (FromJSON, ToJSON, ToSchema)
-
 instance ToSchema OpenMapPayload where
     declareNamedSchema _ =
         pure $
@@ -57,6 +31,40 @@ instance ToSchema OpenMapPayload where
 
 spec :: Spec
 spec = describe "Rake.Types" $ do
+    describe "typed structured schema rendering" $ do
+        it "renders non-nullary sums as top-level oneOf" $ do
+            case jsonSchemaFormat @NonNullarySum of
+                JsonSchema schemaValue ->
+                    schemaKeywordPaths "oneOf" schemaValue `shouldBe` ["$.oneOf"]
+                _ ->
+                    expectationFailure "Expected JsonSchema from jsonSchemaFormat"
+
+        it "renders Maybe fields as nullable anyOf" $ do
+            case jsonSchemaFormat @RecordWithMaybe of
+                JsonSchema schemaValue ->
+                    schemaKeywordPaths "anyOf" schemaValue `shouldBe` ["$.properties.toolCall.anyOf"]
+                _ ->
+                    expectationFailure "Expected JsonSchema from jsonSchemaFormat"
+
+        it "renders nullary enums as plain enum strings without union keywords" $ do
+            case jsonSchemaFormat @NullaryEnum of
+                JsonSchema schemaValue -> do
+                    schemaKeywordPaths "oneOf" schemaValue `shouldBe` []
+                    schemaKeywordPaths "anyOf" schemaValue `shouldBe` []
+                    lookupField "enum" schemaValue
+                        `shouldBe` Just (toJSON (["Alpha", "Beta"] :: [Text]))
+                _ ->
+                    expectationFailure "Expected JsonSchema from jsonSchemaFormat"
+
+        it "renders Maybe-bearing typed tool arguments with nullable anyOf" $ do
+            let tool = defineToolWithArgument @RecordWithMaybe "lookup" "lookup tool" (\_ -> pure (Right "ok"))
+                ToolDef{parameterSchema = parameterSchemaValue} = tool
+            case parameterSchemaValue of
+                Just schemaValue ->
+                    schemaKeywordPaths "anyOf" schemaValue `shouldBe` ["$.properties.toolCall.anyOf"]
+                Nothing ->
+                    expectationFailure "Expected parameterSchema from defineToolWithArgument"
+
     describe "jsonSchemaFormat" $ do
         it "adds additionalProperties false when the typed schema leaves it absent" $ do
             case jsonSchemaFormat @ClosedRecord of
@@ -106,76 +114,43 @@ spec = describe "Rake.Types" $ do
             (parameterSchemaValue >>= lookupPath ["properties", "toolCall"])
                 `shouldBe` Just (nullableSchema exampleToolCallSchema)
 
-    describe "HistoryItem JSON envelope" $ do
-        it "encodes schemaVersion 4 and completed lifecycle for local items" $ do
+    describe "HistoryItem JSON" $ do
+        it "encodes completed lifecycle for local items without a schemaVersion envelope" $ do
             let encoded = toJSON (user "hello")
-            lookupField "schemaVersion" encoded `shouldBe` Just (toJSON (4 :: Int))
-            lookupField "apiFamily" encoded `shouldBe` Just (String "local")
+            lookupField "schemaVersion" encoded `shouldBe` Nothing
             lookupField "itemLifecycle" encoded `shouldBe` Just (toJSON ItemCompleted)
+            fromJSON encoded `shouldBe` Success (user "hello")
 
         it "round-trips embedded history item ids" $ do
             let itemId = historyItemIdAt 7
                 item = setHistoryItemId (Just itemId) (user "hello")
                 encoded = toJSON item
-            lookupField "historyItemId" encoded `shouldBe` Just (toJSON itemId)
+            lookupField "historyItemIdField" encoded `shouldBe` Just (toJSON itemId)
             fromJSON encoded `shouldBe` Success item
 
-        it "rejects envelopes without a schemaVersion" $ do
-            let encoded =
-                    object
-                        [ "apiFamily" .= ("local" :: Text)
-                        , "payload" .= LocalMessage{role = GenericUser, parts = [PartText "hello"]}
-                        ]
-            case fromJSON encoded :: Result HistoryItem of
-                Error{} ->
-                    pure ()
-                Success decoded ->
-                    expectationFailure ("Unexpectedly decoded: " <> show decoded)
-
-        it "rejects legacy schemaVersion 2 envelopes" $ do
-            let encoded =
-                    object
-                        [ "apiFamily" .= ("local" :: Text)
-                        , "schemaVersion" .= (2 :: Int)
-                        , "payload" .= LocalMessage{role = GenericUser, parts = [PartText "hello"]}
-                        ]
-            case fromJSON encoded :: Result HistoryItem of
-                Error{} ->
-                    pure ()
-                Success decoded ->
-                    expectationFailure ("Unexpectedly decoded: " <> show decoded)
-
-        it "rejects legacy control item tags" $ do
-            let encoded =
-                    object
-                        [ "schemaVersion" .= (4 :: Int)
-                        , "apiFamily" .= ("control" :: Text)
-                        , "itemLifecycle" .= ItemCompleted
-                        , "payload"
-                            .= object
-                                [ "tag" .= ("ReplayBarrier" :: Text)
-                                , "contents" .= ("bad round" :: Text)
-                                ]
-                        ]
-            case fromJSON encoded :: Result HistoryItem of
-                Error{} ->
-                    pure ()
-                Success decoded ->
-                    expectationFailure ("Unexpectedly decoded: " <> show decoded)
-
-        it "round-trips pending Gemini native envelopes" $ do
+        it "round-trips non-portable provider-backed items" $ do
             let item =
-                    HProvider
-                        ProviderHistoryItem
+                    nonPortableHistoryItem
+                        ItemPending
+                        ProviderItem
                             { apiFamily = ProviderGeminiInteractions
-                            , itemLifecycle = ItemPending
-                            , nativeItem =
-                                NativeProviderItem
-                                    { exchangeId = Nothing
-                                    , nativeItemId = Just "native-thought"
-                                    , payload = object ["type" .= ("thought" :: Text)]
-                                    }
+                            , exchangeId = Nothing
+                            , nativeItemId = Just "native-thought"
+                            , payload = object ["type" .= ("thought" :: Text)]
                             }
+            fromJSON (toJSON item) `shouldBe` Success item
+
+        it "round-trips tool calls with continuation attachments" $ do
+            let item =
+                    toolCallWithContinuations
+                        "tool-call-1"
+                        "lookup"
+                        (fromList [("name", String "Ada")])
+                        [ ToolCallContinuation
+                            { continuationProviderFamily = ProviderGeminiInteractions
+                            , continuationPayload = object ["type" .= ("thought" :: Text), "signature" .= ("thought-1" :: Text)]
+                            }
+                        ]
             fromJSON (toJSON item) `shouldBe` Success item
 
         it "round-trips reset control envelopes" $ do
@@ -183,28 +158,31 @@ spec = describe "Rake.Types" $ do
             fromJSON (toJSON item) `shouldBe` Success item
 
         it "round-trips replay barrier control envelopes" $ do
-            let item = HControl (ReplayBarrier "Responses response status was failed")
+            let item =
+                    HistoryItem
+                        { historyItemIdField = Nothing
+                        , itemLifecycle = ItemCompleted
+                        , genericItem = GenericReplayBarrier{reason = "Responses response status was failed"}
+                        , providerItem = Nothing
+                        }
             fromJSON (toJSON item) `shouldBe` Success item
 
         it "round-trips reset-to-start control envelopes" $ do
-            let item = HControl (ResetTo ResetToStart)
+            let item = resetToStart
             fromJSON (toJSON item) `shouldBe` Success item
-
-        it "rejects unknown historical schema versions" $ do
-            let encoded =
-                    object
-                        [ "apiFamily" .= ("local" :: Text)
-                        , "schemaVersion" .= (5 :: Int)
-                        , "payload" .= LocalMessage{role = GenericUser, parts = [PartText "hello"]}
-                        ]
-            case fromJSON encoded :: Result HistoryItem of
-                Error{} ->
-                    pure ()
-                Success decoded ->
-                    expectationFailure ("Unexpectedly decoded: " <> show decoded)
 
         it "round-trips multipart text messages" $ do
             let item = userParts [textPart "hello", textPart " world"]
+            fromJSON (toJSON item) `shouldBe` Success item
+
+        it "round-trips refusal and media message parts" $ do
+            let item =
+                    assistantParts
+                        [ refusalPart "I can't help with that"
+                        , imagePart "blob-image-1" (Just "image/png") (Just "diagram")
+                        , audioPart "blob-audio-1" (Just "audio/mpeg") (Just "spoken note")
+                        , filePart "blob-file-1" Nothing (Just "notes.txt")
+                        ]
             fromJSON (toJSON item) `shouldBe` Success item
 
         it "round-trips JSON tool responses" $ do
@@ -236,6 +214,28 @@ spec = describe "Rake.Types" $ do
             KM.lookup (Key.fromText fieldName) currentObject >>= lookupPath rest
         _ ->
             Nothing
+
+    schemaKeywordPaths :: Text -> Value -> [Text]
+    schemaKeywordPaths keyword = go "$"
+      where
+        go currentPath = \case
+            Object objectValue ->
+                let keywordMatches =
+                        [ currentPath <> "." <> keyword
+                        | KM.member (Key.fromText keyword) objectValue
+                        ]
+                    nestedMatches =
+                        concatMap
+                            (uncurry (goObjectField currentPath))
+                            (KM.toList objectValue)
+                 in keywordMatches <> nestedMatches
+            Array values ->
+                concatMap (go (currentPath <> "[]")) (toList values)
+            _ ->
+                []
+
+        goObjectField currentPath fieldName fieldValue =
+            go (currentPath <> "." <> Key.toText fieldName) fieldValue
 
     requiredFieldNames :: Value -> Maybe [Text]
     requiredFieldNames schemaValue = do

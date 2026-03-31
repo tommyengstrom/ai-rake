@@ -9,6 +9,7 @@ import Data.Aeson (Value)
 import Effectful
 import Effectful.Error.Static
 import Rake.Effect
+import Rake.MediaStorage.Effect
 import Rake.Providers.Chat.Responses
 import Rake.Providers.Internal (defaultWarningLogger)
 import Rake.Types (ProviderRound)
@@ -38,6 +39,7 @@ runRakeOpenAIChat
     :: forall es a
      . ( IOE :> es
        , Error RakeError :> es
+       , RakeMediaStorage :> es
        )
     => OpenAIChatSettings es
     -> Eff (Rake ': es) a

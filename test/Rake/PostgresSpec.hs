@@ -228,7 +228,10 @@ postgresStorageBehaviourSpec pool conversationsTable =
   where
     reverseUserTexts history =
         [ text
-        | HLocal LocalMessage{role = GenericUser, parts = [PartText{text}]} <- reverse history
+        | HistoryItem
+            { providerItem = Nothing
+            , genericItem = GenericMessage{role = GenericUser, parts = [PartText{text}]}
+            } <- reverse history
         ]
 
 fixedHistoryItemId :: Word32 -> HistoryItemId

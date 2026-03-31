@@ -3,18 +3,40 @@
 
 module Rake.ReplaySpec where
 
+import Control.Exception (finally)
 import Data.Aeson
 import Data.IORef qualified as IORef
 import Data.UUID qualified as UUID
+import Data.UUID.V4 (nextRandom)
 import Effectful
 import Effectful.Concurrent (Concurrent, runConcurrent)
 import Effectful.Error.Static
 import Effectful.Time (Time, runTime)
 import Rake
 import Rake.ChatSpec qualified as Chat
+import Rake.MediaStorage.Directory (runRakeMediaStorageDirectory)
+import Rake.MediaStorage.InMemory (runRakeMediaStorageInMemory)
 import Rake.Provider.ResponsesRenderSpec qualified as Render
+import Rake.Providers.Gemini.Chat
+    ( GeminiChatSettings (..)
+    , defaultGeminiChatSettings
+    , runRakeGeminiChat
+    )
+import Rake.Providers.OpenAI.Chat
+    ( OpenAIChatSettings (..)
+    , decodeOpenAIResponse
+    , defaultOpenAIChatSettings
+    , runRakeOpenAIChat
+    )
+import Rake.Providers.XAI.Chat
+    ( XAIChatSettings (..)
+    , defaultXAIChatSettings
+    , runRakeXAIChat
+    )
 import Rake.Storage.InMemory (runRakeStorageInMemory)
 import Relude
+import System.Directory qualified as Directory
+import System.FilePath ((</>))
 import Test.Hspec
 
 spec :: Spec
@@ -107,33 +129,18 @@ spec = describe "Rake.Replay" $ do
             pendingArtifacts `shouldBe` []
             blocked `shouldBe` Nothing
 
-        it "replays Gemini thoughts for resolved same-provider tool continuations" $ do
-            let pendingThought =
-                    Render.nativeHistoryItem
-                        ProviderGeminiInteractions
-                        ItemPending
-                        "interaction-gemini"
-                        (Just "thought-1")
-                        (Render.geminiThoughtPayload "thought-1")
-                pendingCallItem =
-                    Render.nativeHistoryItem
-                        ProviderGeminiInteractions
-                        ItemPending
-                        "interaction-gemini"
-                        (Just "tool-call-1")
-                        (Render.geminiFunctionCallPayload "tool-call-1" "lookup" (object ["name" .= ("John Snow" :: Text)]))
+        it "replays Gemini continuation attachments for resolved same-provider tool continuations" $ do
+            let pendingCallItem = pendingGeminiToolCallWithThoughtItem "John Snow"
                 replayState =
                     conversationReplayState
-                        [ pendingThought
-                        , pendingCallItem
+                        [ pendingCallItem
                         , toolResultText "tool-call-1" "Contacts:\n- John Snow"
                         ]
                 ReplayState{replayHistory, resumableToolCalls, pendingArtifacts, blocked} = replayState
 
             replayHistory
                 `shouldBe`
-                    [ pendingThought
-                    , pendingCallItem
+                    [ pendingCallItem
                     , toolResultText "tool-call-1" "Contacts:\n- John Snow"
                     ]
             resumableToolCalls `shouldBe` []
@@ -164,9 +171,24 @@ spec = describe "Rake.Replay" $ do
                     [ start
                     , done
                     , pendingAssistant
-                    , HControl (ReplayBarrier barrierMessage)
+                    , Chat.replayBarrierItem barrierMessage
                     ]
 
+            validResetCheckpoints history
+                `shouldBe` [ResetToStart, ResetToItem (itemIdOf start), ResetToItem (itemIdOf done)]
+            latestValidCheckpoint history `shouldBe` Just (ResetToItem (itemIdOf done))
+            resetToLatestValidCheckpoint history `shouldBe` Just (resetTo (itemIdOf done))
+
+        it "treats pending non-portable artifacts as unfinished when computing reset checkpoints" $ do
+            let start = withHistoryId 1 (user "start")
+                done = withHistoryId 2 (assistantText "done")
+                pendingThought = withHistoryId 3 pendingGeminiUnusedThoughtItem
+                history = [start, done, pendingThought]
+                ReplayState{replayHistory, pendingArtifacts, blocked} = conversationReplayState history
+
+            replayHistory `shouldBe` [start, done]
+            pendingArtifacts `shouldBe` [pendingThought]
+            blocked `shouldBe` Nothing
             validResetCheckpoints history
                 `shouldBe` [ResetToStart, ResetToItem (itemIdOf start), ResetToItem (itemIdOf done)]
             latestValidCheckpoint history `shouldBe` Just (ResetToItem (itemIdOf done))
@@ -326,6 +348,190 @@ spec = describe "Rake.Replay" $ do
                       ]
                     ]
 
+        it "loses same-provider media replay after restart with the default ephemeral media store" $ do
+            let payload =
+                    Render.responsesAssistantPayloadWithContent
+                        "item-openai-image"
+                        [ object
+                            [ "type" .= ("input_image" :: Text)
+                            , "image_url" .= ("https://example.com/cat.png" :: Text)
+                            ]
+                        ]
+            decodedRound <-
+                case decodeOpenAIResponse (Render.responsesResponse "response-openai" "completed" [payload]) of
+                    Left err -> expectationFailure ("Expected OpenAI response to decode: " <> show err) >> fail "unreachable"
+                    Right roundValue -> pure roundValue
+
+            result <-
+                runEff
+                    . runConcurrent
+                    . runTime
+                    . runErrorNoCallStackWith @ChatStorageError (error . show)
+                    . runRakeStorageInMemory
+                    $ do
+                        let OpenAIChatSettings
+                                { apiKey = defaultApiKey
+                                , model = defaultModel
+                                , organizationId = defaultOrganizationId
+                                , projectId = defaultProjectId
+                                } = defaultOpenAIChatSettings "test-api-key"
+                            settings =
+                                OpenAIChatSettings
+                                    { apiKey = defaultApiKey
+                                    , model = defaultModel
+                                    , baseUrl = Render.unreachableBaseUrl
+                                    , organizationId = defaultOrganizationId
+                                    , projectId = defaultProjectId
+                                    , requestLogger = \_ -> pure ()
+                                    }
+                        convId <- createConversation
+                        appendItems convId [user "show me a cat"]
+
+                        firstResult <-
+                            runErrorNoCallStack @RakeError
+                                $ runRakeMediaStorageInMemory
+                                $ Chat.runMockRake [decodedRound]
+                                $ withResumableChat defaultChatConfig convId
+                        _ <- either (error . show) pure firstResult
+
+                        appendItems convId [user "what next?"]
+
+                        runErrorNoCallStack @RakeError
+                            $ runRakeMediaStorageInMemory
+                            $ runRakeOpenAIChat settings
+                            $ withResumableChat defaultChatConfig convId
+
+            result
+                `shouldBe` Left
+                    (LlmExpectationError "No stored media reference is available for blob openai.responses-response-openai-item-openai-image-0 when rendering openai.responses")
+
+        it "replays same-provider media after restart when using the directory media store" $
+            withTempMediaDirectory \mediaDirectory -> do
+                let payload =
+                        Render.responsesAssistantPayloadWithContent
+                            "item-openai-image"
+                            [ object
+                                [ "type" .= ("input_image" :: Text)
+                                , "image_url" .= ("https://example.com/cat.png" :: Text)
+                                ]
+                            ]
+                decodedRound <-
+                    case decodeOpenAIResponse (Render.responsesResponse "response-openai" "completed" [payload]) of
+                        Left err -> expectationFailure ("Expected OpenAI response to decode: " <> show err) >> fail "unreachable"
+                        Right roundValue -> pure roundValue
+
+                requestRef <- IORef.newIORef Nothing
+
+                result <-
+                    runEff
+                        . runConcurrent
+                        . runTime
+                        . runErrorNoCallStackWith @ChatStorageError (error . show)
+                        . runRakeStorageInMemory
+                        $ do
+                            let OpenAIChatSettings
+                                    { apiKey = defaultApiKey
+                                    , model = defaultModel
+                                    , organizationId = defaultOrganizationId
+                                    , projectId = defaultProjectId
+                                    } = defaultOpenAIChatSettings "test-api-key"
+                                settings =
+                                    OpenAIChatSettings
+                                        { apiKey = defaultApiKey
+                                        , model = defaultModel
+                                        , baseUrl = Render.unreachableBaseUrl
+                                        , organizationId = defaultOrganizationId
+                                        , projectId = defaultProjectId
+                                        , requestLogger = Render.recordRequest requestRef
+                                        }
+                            convId <- createConversation
+                            appendItems convId [user "show me a cat"]
+
+                            firstResult <-
+                                runErrorNoCallStack @RakeError
+                                    $ runRakeMediaStorageDirectory mediaDirectory
+                                    $ Chat.runMockRake [decodedRound]
+                                    $ withResumableChat defaultChatConfig convId
+                            _ <- either (error . show) pure firstResult
+
+                            appendItems convId [user "what next?"]
+
+                            runErrorNoCallStack @RakeError
+                                $ runRakeMediaStorageDirectory mediaDirectory
+                                $ runRakeOpenAIChat settings
+                                $ withResumableChat defaultChatConfig convId
+
+                result `shouldSatisfy` isLeft
+                requestBody <- Render.readRequest requestRef
+                Render.lookupPath ["input"] requestBody
+                    `shouldBe` Just
+                        ( toJSON
+                            ( [ object
+                                    [ "role" .= ("user" :: Text)
+                                    , "content" .= ("show me a cat" :: Text)
+                                    ]
+                              , object
+                                    [ "role" .= ("assistant" :: Text)
+                                    , "content"
+                                        .= ( [ object
+                                                    [ "type" .= ("input_image" :: Text)
+                                                    , "image_url" .= ("https://example.com/cat.png" :: Text)
+                                                    ]
+                                               ]
+                                                :: [Value]
+                                           )
+                                    ]
+                              , object
+                                    [ "role" .= ("user" :: Text)
+                                    , "content" .= ("what next?" :: Text)
+                                    ]
+                              ]
+                                :: [Value]
+                        )
+                    )
+
+    describe "stored generic media replay" $ do
+        forM_ storedMediaRenderCases $ \StoredMediaRenderCase{caseName, providerFamily, captureStoredRequestBody} -> do
+            it ("re-renders stored generic image history for " <> caseName) $ do
+                let blobId = "blob-image-1"
+                    requestPart = imageRequestPart providerFamily
+                requestBody <-
+                    captureStoredRequestBody
+                        [MediaProviderReference{mediaBlobId = blobId, providerFamily, providerRequestPart = requestPart}]
+                        [userParts [imagePart blobId (Just "image/png") (Just "diagram")]]
+
+                Render.lookupPath ["input"] requestBody
+                    `shouldBe` Just
+                        ( toJSON
+                            ( [ object
+                                    [ "role" .= ("user" :: Text)
+                                    , "content" .= ([requestPart] :: [Value])
+                                    ]
+                              ]
+                                :: [Value]
+                            )
+                        )
+
+            it ("re-renders stored generic audio history for " <> caseName) $ do
+                let blobId = "blob-audio-1"
+                    requestPart = audioRequestPart providerFamily
+                requestBody <-
+                    captureStoredRequestBody
+                        [MediaProviderReference{mediaBlobId = blobId, providerFamily, providerRequestPart = requestPart}]
+                        [userParts [audioPart blobId (Just "audio/wav") (Just "spoken note")]]
+
+                Render.lookupPath ["input"] requestBody
+                    `shouldBe` Just
+                        ( toJSON
+                            ( [ object
+                                    [ "role" .= ("user" :: Text)
+                                    , "content" .= ([requestPart] :: [Value])
+                                    ]
+                              ]
+                                :: [Value]
+                            )
+                        )
+
     describe "provider replay normalization" $ do
         it "turns unresolved pending OpenAI tool calls into Tool not found results before replay" $ do
             historyRef <- IORef.newIORef []
@@ -412,15 +618,15 @@ spec = describe "Rake.Replay" $ do
             requestBody <-
                 Render.captureGeminiRequestBody
                     defaultChatConfig
-                    [pendingGeminiThoughtItem]
+                    [pendingGeminiUnusedThoughtItem]
 
             Render.lookupPath ["input"] requestBody
                 `shouldBe` Just (toJSON ([] :: [Value]))
 
-        it "does not mark Gemini thoughts replayable when the only matching tool result appears before the pending tool call" $ do
+        it "keeps non-portable Gemini thought artifacts out of replay while still marking them pending" $ do
             let replayState =
                     conversationReplayState
-                        [ pendingGeminiThoughtItem
+                        [ pendingGeminiUnusedThoughtItem
                         , toolResultText "tool-call-1" "hello"
                         , pendingGeminiToolCallItem
                         ]
@@ -433,9 +639,10 @@ spec = describe "Rake.Replay" $ do
                         { toolCallId = "tool-call-1"
                         , toolName = "lookup"
                         , toolArgs = fromList [("name", String "Ada")]
+                        , continuationAttachments = []
                         }
                     ]
-            pendingArtifacts `shouldBe` [pendingGeminiThoughtItem, pendingGeminiToolCallItem]
+            pendingArtifacts `shouldBe` [pendingGeminiUnusedThoughtItem, pendingGeminiToolCallItem]
             blocked `shouldBe` Nothing
 
         it "normalizes unresolved pending Responses tool calls before switching into Gemini" $ do
@@ -494,6 +701,7 @@ runStorageReplayTest
          , Error RakeError
          , RakeStorage
          , Error ChatStorageError
+         , RakeMediaStorage
          , Time
          , Concurrent
          , IOE
@@ -504,11 +712,206 @@ runStorageReplayTest historyRef plannedRounds action =
     runEff
         . runConcurrent
         . runTime
+        . runRakeMediaStorageInMemory
         . runErrorNoCallStack
         . runRakeStorageInMemory
         $ do
             result <- runErrorNoCallStack @RakeError (Chat.runHistoryRecordedMockRake historyRef plannedRounds action)
             either (error . show) pure result
+
+data StoredMediaRenderCase = StoredMediaRenderCase
+    { caseName :: String
+    , providerFamily :: ProviderApiFamily
+    , captureStoredRequestBody :: [MediaProviderReference] -> [HistoryItem] -> IO Value
+    }
+
+storedMediaRenderCases :: [StoredMediaRenderCase]
+storedMediaRenderCases =
+    [ StoredMediaRenderCase
+        { caseName = "OpenAI"
+        , providerFamily = ProviderOpenAIResponses
+        , captureStoredRequestBody = captureStoredOpenAIRequestBody
+        }
+    , StoredMediaRenderCase
+        { caseName = "xAI"
+        , providerFamily = ProviderXAIResponses
+        , captureStoredRequestBody = captureStoredXAIRequestBody
+        }
+    , StoredMediaRenderCase
+        { caseName = "Gemini"
+        , providerFamily = ProviderGeminiInteractions
+        , captureStoredRequestBody = captureStoredGeminiRequestBody
+        }
+    ]
+
+captureStoredOpenAIRequestBody :: [MediaProviderReference] -> [HistoryItem] -> IO Value
+captureStoredOpenAIRequestBody mediaReferences history = do
+    requestRef <- IORef.newIORef Nothing
+    let OpenAIChatSettings
+            { apiKey = defaultApiKey
+            , model = defaultModel
+            , organizationId = defaultOrganizationId
+            , projectId = defaultProjectId
+            } = defaultOpenAIChatSettings "test-api-key"
+        settings =
+            OpenAIChatSettings
+                { apiKey = defaultApiKey
+                , model = defaultModel
+                , baseUrl = Render.unreachableBaseUrl
+                , organizationId = defaultOrganizationId
+                , projectId = defaultProjectId
+                , requestLogger = Render.recordRequest requestRef
+                }
+
+    result <-
+        runEff
+            . runConcurrent
+            . runTime
+            . runErrorNoCallStackWith @ChatStorageError (error . show)
+            . runRakeStorageInMemory
+            $ do
+                convId <- createConversation
+                appendItems convId history
+                runErrorNoCallStack @RakeError
+                    $ runRakeMediaStorageInMemory
+                    $ do
+                        saveMediaReferences mediaReferences
+                        runRakeOpenAIChat settings
+                            $ void
+                            $ withResumableChat defaultChatConfig convId
+
+    result `shouldSatisfy` isLeft
+    Render.readRequest requestRef
+
+captureStoredXAIRequestBody :: [MediaProviderReference] -> [HistoryItem] -> IO Value
+captureStoredXAIRequestBody mediaReferences history = do
+    requestRef <- IORef.newIORef Nothing
+    let XAIChatSettings
+            { apiKey = defaultApiKey
+            , model = defaultModel
+            } = defaultXAIChatSettings "test-api-key"
+        settings =
+            XAIChatSettings
+                { apiKey = defaultApiKey
+                , model = defaultModel
+                , baseUrl = Render.unreachableBaseUrl
+                , requestLogger = Render.recordRequest requestRef
+                }
+
+    result <-
+        runEff
+            . runConcurrent
+            . runTime
+            . runErrorNoCallStackWith @ChatStorageError (error . show)
+            . runRakeStorageInMemory
+            $ do
+                convId <- createConversation
+                appendItems convId history
+                runErrorNoCallStack @RakeError
+                    $ runRakeMediaStorageInMemory
+                    $ do
+                        saveMediaReferences mediaReferences
+                        runRakeXAIChat settings
+                            $ void
+                            $ withResumableChat defaultChatConfig convId
+
+    result `shouldSatisfy` isLeft
+    Render.readRequest requestRef
+
+captureStoredGeminiRequestBody :: [MediaProviderReference] -> [HistoryItem] -> IO Value
+captureStoredGeminiRequestBody mediaReferences history = do
+    requestRef <- IORef.newIORef Nothing
+    let GeminiChatSettings
+            { apiKey = defaultApiKey
+            , model = defaultModel
+            , providerTools = defaultProviderTools
+            , generationConfig = defaultGenerationConfig
+            } = defaultGeminiChatSettings "test-api-key"
+        settings =
+            GeminiChatSettings
+                { apiKey = defaultApiKey
+                , model = defaultModel
+                , baseUrl = Render.unreachableBaseUrl
+                , systemInstruction = Nothing
+                , providerTools = defaultProviderTools
+                , generationConfig = defaultGenerationConfig
+                , requestLogger = Render.recordRequest requestRef
+                }
+
+    result <-
+        runEff
+            . runConcurrent
+            . runTime
+            . runErrorNoCallStackWith @ChatStorageError (error . show)
+            . runRakeStorageInMemory
+            $ do
+                convId <- createConversation
+                appendItems convId history
+                runErrorNoCallStack @RakeError
+                    $ runRakeMediaStorageInMemory
+                    $ do
+                        saveMediaReferences mediaReferences
+                        runRakeGeminiChat settings
+                            $ void
+                            $ withResumableChat defaultChatConfig convId
+
+    result `shouldSatisfy` isLeft
+    Render.readRequest requestRef
+
+imageRequestPart :: ProviderApiFamily -> Value
+imageRequestPart = \case
+    ProviderOpenAIResponses ->
+        responsesImageRequestPart
+    ProviderXAIResponses ->
+        responsesImageRequestPart
+    ProviderGeminiInteractions ->
+        object
+            [ "type" .= ("image" :: Text)
+            , "uri"
+                .= ( "https://raw.githubusercontent.com/philschmid/gemini-samples/refs/heads/main/assets/cats-and-dogs.jpg"
+                        :: Text
+                   )
+            ]
+    ProviderApiFamily{} ->
+        error "Unexpected provider family in ReplaySpec imageRequestPart"
+  where
+    responsesImageRequestPart =
+        object
+            [ "type" .= ("input_image" :: Text)
+            , "image_url"
+                .= ( "https://raw.githubusercontent.com/philschmid/gemini-samples/refs/heads/main/assets/cats-and-dogs.jpg"
+                        :: Text
+                   )
+            ]
+
+audioRequestPart :: ProviderApiFamily -> Value
+audioRequestPart = \case
+    ProviderOpenAIResponses ->
+        responsesAudioRequestPart
+    ProviderXAIResponses ->
+        responsesAudioRequestPart
+    ProviderGeminiInteractions ->
+        geminiInlineMediaRequestPart "audio" "audio/wav" "UklGRg=="
+    ProviderApiFamily{} ->
+        error "Unexpected provider family in ReplaySpec audioRequestPart"
+  where
+    responsesAudioRequestPart =
+        object
+            [ "type" .= ("input_audio" :: Text)
+            , "input_audio"
+                .= object
+                    [ "data" .= ("UklGRg==" :: Text)
+                    , "format" .= ("wav" :: Text)
+                    ]
+            ]
+
+geminiInlineMediaRequestPart :: Text -> Text -> Text -> Value
+geminiInlineMediaRequestPart mediaType mimeType base64Data =
+    object
+        [ "type" .= mediaType
+        , "mime_type" .= mimeType
+        , "data" .= base64Data
+        ]
 
 pendingOpenAiToolCallItem :: HistoryItem
 pendingOpenAiToolCallItem =
@@ -545,14 +948,16 @@ pendingGeminiFunctionResultItem =
         (Just "tool-call-1")
         (Render.nativeGeminiToolResultPayload "hello")
 
-pendingGeminiThoughtItem :: HistoryItem
-pendingGeminiThoughtItem =
-    Render.nativeHistoryItem
-        ProviderGeminiInteractions
+pendingGeminiUnusedThoughtItem :: HistoryItem
+pendingGeminiUnusedThoughtItem =
+    nonPortableHistoryItem
         ItemPending
-        "interaction-gemini"
-        (Just "thought-1")
-        (Render.geminiThoughtPayload "thought-1")
+        ProviderItem
+            { apiFamily = ProviderGeminiInteractions
+            , exchangeId = Just "interaction-gemini"
+            , nativeItemId = Just "thought-1"
+            , payload = Render.geminiThoughtPayload "thought-1"
+            }
 
 pendingGeminiToolCallItem :: HistoryItem
 pendingGeminiToolCallItem =
@@ -562,6 +967,36 @@ pendingGeminiToolCallItem =
         "interaction-gemini"
         (Just "tool-call-1")
         (Render.geminiFunctionCallPayload "tool-call-1" "lookup" (object ["name" .= ("Ada" :: Text)]))
+
+pendingGeminiToolCallWithThoughtItem :: Text -> HistoryItem
+pendingGeminiToolCallWithThoughtItem contactName =
+    HistoryItem
+        { historyItemIdField = Nothing
+        , itemLifecycle = ItemPending
+        , genericItem =
+            GenericToolCall
+                { toolCall =
+                    ToolCall
+                        { toolCallId = "tool-call-1"
+                        , toolName = "lookup"
+                        , toolArgs = fromList [("name", String contactName)]
+                        , continuationAttachments =
+                            [ ToolCallContinuation
+                                { continuationProviderFamily = ProviderGeminiInteractions
+                                , continuationPayload = Render.geminiThoughtPayload "thought-1"
+                                }
+                            ]
+                        }
+                }
+        , providerItem =
+            Just
+                ProviderItem
+                    { apiFamily = ProviderGeminiInteractions
+                    , exchangeId = Just "interaction-gemini"
+                    , nativeItemId = Just "tool-call-1"
+                    , payload = Render.geminiFunctionCallPayload "tool-call-1" "lookup" (object ["name" .= contactName])
+                    }
+        }
 
 pendingResponsesToolCallPayload :: Text -> Text -> Text -> Value
 pendingResponsesToolCallPayload itemId callId toolName =
@@ -585,3 +1020,12 @@ itemIdOf historyItem =
     fromMaybe
         (error "Expected HistoryItem to have an embedded id in ReplaySpec")
         (historyItemId historyItem)
+
+withTempMediaDirectory :: (FilePath -> IO a) -> IO a
+withTempMediaDirectory action = do
+    tempRoot <- Directory.getTemporaryDirectory
+    uuid <- nextRandom
+    let mediaDirectory = tempRoot </> ("ai-rake-media-" <> show uuid)
+    Directory.createDirectoryIfMissing True mediaDirectory
+    action mediaDirectory
+        `finally` Directory.removePathForcibly mediaDirectory
