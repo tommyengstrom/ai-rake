@@ -146,13 +146,13 @@ test-suite ai-rake-test
   import: shared_opts
   main-is: Main.hs
   other-modules:
-      GenCliSupport
-      GenImageCLI
-      GenImageCLISpec
-      GenSpeechCLI
-      GenSpeechCLISpec
-      GenVideoCLI
-      GenVideoCLISpec
+      RakeCliSupport
+      RakeImageCLI
+      RakeImageCLISpec
+      RakeTTSCLI
+      RakeTTSCLISpec
+      RakeVideoCLI
+      RakeVideoCLISpec
       Rake.ChatSpec
       Rake.ErrorSpec
       Rake.PostgresLoggerSpec
@@ -203,10 +203,10 @@ executable minimal-example
 executable rake-image
   import: shared_opts
   hs-source-dirs: app
-  main-is: GenImage.hs
+  main-is: RakeImage.hs
   other-modules:
-      GenCliSupport
-      GenImageCLI
+      RakeCliSupport
+      RakeImageCLI
   build-depends:
       ai-rake
     , base64-bytestring
@@ -220,10 +220,10 @@ executable rake-image
 executable rake-tts
   import: shared_opts
   hs-source-dirs: app
-  main-is: GenSpeech.hs
+  main-is: RakeTTS.hs
   other-modules:
-      GenCliSupport
-      GenSpeechCLI
+      RakeCliSupport
+      RakeTTSCLI
   build-depends:
       ai-rake
     , base64-bytestring
@@ -237,10 +237,10 @@ executable rake-tts
 executable rake-video
   import: shared_opts
   hs-source-dirs: app
-  main-is: GenVideo.hs
+  main-is: RakeVideo.hs
   other-modules:
-      GenCliSupport
-      GenVideoCLI
+      RakeCliSupport
+      RakeVideoCLI
   build-depends:
       ai-rake
     , base64-bytestring

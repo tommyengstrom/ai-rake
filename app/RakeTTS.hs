@@ -1,6 +1,6 @@
 module Main where
 
-import GenSpeechCLI (runGenSpeechCli)
+import RakeTTSCLI (runGenSpeechCli)
 import Relude
 
 main :: IO ()

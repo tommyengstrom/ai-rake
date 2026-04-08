@@ -1,4 +1,4 @@
-module GenCliSupport
+module RakeCliSupport
     ( audioExtensionFromMimeType
     , buildOutputPaths
     , downloadBinary

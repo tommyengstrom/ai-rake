@@ -1,6 +1,6 @@
 module Main where
 
-import GenImageCLI (runGenImageCli)
+import RakeImageCLI (runGenImageCli)
 import Relude
 
 main :: IO ()

@@ -1,12 +1,12 @@
-module GenImageCLISpec where
+module RakeImageCLISpec where
 
-import GenImageCLI
+import RakeImageCLI
 import Data.Text qualified as T
 import Relude
 import Test.Hspec
 
 spec :: Spec
-spec = describe "GenImageCLI" $ do
+spec = describe "RakeImageCLI" $ do
     describe "parseGenImageArgs" $ do
         it "requires a model command" $ do
             parseGenImageArgs []

@@ -1,7 +1,7 @@
-module GenSpeechCLISpec where
+module RakeTTSCLISpec where
 
 import Data.Text qualified as T
-import GenSpeechCLI
+import RakeTTSCLI
 import Rake (Audio (..))
 import Rake.Providers.OpenAI.TTS
 import Rake.Providers.XAI.TTS
@@ -9,7 +9,7 @@ import Relude
 import Test.Hspec
 
 spec :: Spec
-spec = describe "GenSpeechCLI" $ do
+spec = describe "RakeTTSCLI" $ do
     describe "parseGenSpeechArgs" $ do
         it "requires a provider" $ do
             parseGenSpeechArgs []

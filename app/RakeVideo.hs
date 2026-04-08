@@ -1,6 +1,6 @@
 module Main where
 
-import GenVideoCLI (runGenVideoCli)
+import RakeVideoCLI (runGenVideoCli)
 import Relude
 
 main :: IO ()

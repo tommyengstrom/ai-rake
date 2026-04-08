@@ -1,4 +1,4 @@
-module GenImageCLI
+module RakeImageCLI
     ( GenImageProvider (..)
     , GenImageHelpTopic (..)
     , CommonGenImageOptions (..)
@@ -19,7 +19,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TextEncoding
 import Effectful
 import Effectful.Error.Static
-import GenCliSupport
+import RakeCliSupport
 import Rake
 import Rake.Providers.Gemini.Images
 import Rake.Providers.OpenAI.Images

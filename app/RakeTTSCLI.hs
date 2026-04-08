@@ -1,4 +1,4 @@
-module GenSpeechCLI
+module RakeTTSCLI
     ( GenSpeechProvider (..)
     , GenSpeechHelpTopic (..)
     , CommonGenSpeechOptions (..)
@@ -17,7 +17,7 @@ module GenSpeechCLI
 import Data.Text qualified as T
 import Effectful
 import Effectful.Error.Static
-import GenCliSupport
+import RakeCliSupport
 import Rake
 import Rake.Providers.OpenAI.TTS
 import Rake.Providers.XAI.TTS

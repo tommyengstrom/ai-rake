@@ -1,12 +1,12 @@
-module GenVideoCLISpec where
+module RakeVideoCLISpec where
 
 import Data.Text qualified as T
-import GenVideoCLI
+import RakeVideoCLI
 import Relude
 import Test.Hspec
 
 spec :: Spec
-spec = describe "GenVideoCLI" $ do
+spec = describe "RakeVideoCLI" $ do
     describe "parseGenVideoArgs" $ do
         it "requires a provider" $ do
             parseGenVideoArgs []

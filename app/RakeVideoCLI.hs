@@ -1,4 +1,4 @@
-module GenVideoCLI
+module RakeVideoCLI
     ( GenVideoProvider (..)
     , GenVideoHelpTopic (..)
     , CommonGenVideoOptions (..)
@@ -13,7 +13,7 @@ module GenVideoCLI
 import Data.ByteString qualified as BS
 import Effectful
 import Effectful.Error.Static
-import GenCliSupport
+import RakeCliSupport
 import Data.Text qualified as T
 import Rake
 import Rake.Providers.XAI.Imagine
