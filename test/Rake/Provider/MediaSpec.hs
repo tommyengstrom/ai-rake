@@ -7,7 +7,9 @@ import Rake.Error (RakeError (..))
 import Rake.Media
 import Rake.Providers.Gemini.Images
 import Rake.Providers.OpenAI.Images
+import Rake.Providers.OpenAI.TTS
 import Rake.Providers.XAI.Imagine
+import Rake.Providers.XAI.TTS
 import Relude
 import Test.Hspec
 
@@ -20,10 +22,10 @@ spec = describe "media providers" $ do
                         [ "created" .= (123 :: Int)
                         , "data"
                             .= ( [ object
-                                        [ "b64_json" .= ("YWJj" :: Text)
-                                        , "revised_prompt" .= ("A refined prompt" :: Text)
-                                        ]
-                                  ]
+                                    [ "b64_json" .= ("YWJj" :: Text)
+                                    , "revised_prompt" .= ("A refined prompt" :: Text)
+                                    ]
+                                 ]
                                     :: [Value]
                                )
                         ]
@@ -46,9 +48,9 @@ spec = describe "media providers" $ do
                     object
                         [ "data"
                             .= ( [ object
-                                        [ "url" .= ("https://example.com/image.png" :: Text)
-                                        ]
-                                  ]
+                                    [ "url" .= ("https://example.com/image.png" :: Text)
+                                    ]
+                                 ]
                                     :: [Value]
                                )
                         ]
@@ -71,22 +73,22 @@ spec = describe "media providers" $ do
                     object
                         [ "candidates"
                             .= ( [ object
-                                        [ "content"
-                                            .= object
-                                                [ "parts"
-                                                    .= ( [ object
-                                                                [ "inlineData"
-                                                                    .= object
-                                                                        [ "mimeType" .= ("image/jpeg" :: Text)
-                                                                        , "data" .= ("YWJj" :: Text)
-                                                                        ]
+                                    [ "content"
+                                        .= object
+                                            [ "parts"
+                                                .= ( [ object
+                                                        [ "inlineData"
+                                                            .= object
+                                                                [ "mimeType" .= ("image/jpeg" :: Text)
+                                                                , "data" .= ("YWJj" :: Text)
                                                                 ]
-                                                          ]
-                                                            :: [Value]
-                                                       )
-                                                ]
-                                        ]
-                                  ]
+                                                        ]
+                                                     ]
+                                                        :: [Value]
+                                                   )
+                                            ]
+                                    ]
+                                 ]
                                     :: [Value]
                                )
                         ]
@@ -109,23 +111,23 @@ spec = describe "media providers" $ do
                     object
                         [ "candidates"
                             .= ( [ object
-                                        [ "content"
-                                            .= object
-                                                [ "parts"
-                                                    .= ( [ object ["text" .= ("ignore me" :: Text)]
-                                                         , object
-                                                            [ "inlineData"
-                                                                .= object
-                                                                    [ "mimeType" .= ("image/png" :: Text)
-                                                                    , "data" .= ("YWJj" :: Text)
-                                                                    ]
-                                                            ]
-                                                         ]
-                                                            :: [Value]
-                                                       )
-                                                ]
-                                        ]
-                                  ]
+                                    [ "content"
+                                        .= object
+                                            [ "parts"
+                                                .= ( [ object ["text" .= ("ignore me" :: Text)]
+                                                     , object
+                                                        [ "inlineData"
+                                                            .= object
+                                                                [ "mimeType" .= ("image/png" :: Text)
+                                                                , "data" .= ("YWJj" :: Text)
+                                                                ]
+                                                        ]
+                                                     ]
+                                                        :: [Value]
+                                                   )
+                                            ]
+                                    ]
+                                 ]
                                     :: [Value]
                                )
                         ]
@@ -183,6 +185,18 @@ spec = describe "media providers" $ do
                         , model = Nothing
                         , video = Nothing
                         }
+
+        it "parses failed video responses" $ do
+            fromJSON (object ["status" .= ("failed" :: Text)])
+                `shouldBe` Success
+                    XAIVideoResponse
+                        { status = XAIVideoFailed
+                        , model = Nothing
+                        , video = Nothing
+                        }
+
+        it "encodes failed video statuses" $ do
+            toJSON XAIVideoFailed `shouldBe` String "failed"
 
     describe "request encoding" $ do
         it "encodes default OpenAI image requests for gpt-image-1.5" $ do
@@ -243,6 +257,50 @@ spec = describe "media providers" $ do
                     , "response_format" .= ("b64_json" :: Text)
                     ]
 
+        it "encodes OpenAI TTS options" $ do
+            let options =
+                    OpenAITTSOptions
+                        { model = OpenAITTSModelGPT4OMiniTTS
+                        , voice = OpenAIVoiceVerse
+                        , instructions = Just "Speak calmly and clearly"
+                        , responseFormat = Just OpenAIAudioFormatWav
+                        , speed = Just 1.25
+                        }
+
+            toJSON options
+                `shouldBe` object
+                    [ "model" .= ("gpt-4o-mini-tts" :: Text)
+                    , "voice" .= ("verse" :: Text)
+                    , "instructions" .= ("Speak calmly and clearly" :: Text)
+                    , "response_format" .= ("wav" :: Text)
+                    , "speed" .= (1.25 :: Double)
+                    ]
+
+        it "encodes xAI TTS options" $ do
+            let options =
+                    XAITTSOptions
+                        { voice = XAITTSVoiceAra
+                        , language = XAITTSLanguagePortugueseBrazil
+                        , outputFormat =
+                            Just
+                                XAIOutputFormatMp3
+                                    { sampleRate = Just XAISampleRate44100
+                                    , bitRate = Just XAIMP3BitRate192000
+                                    }
+                        }
+
+            toJSON options
+                `shouldBe` object
+                    [ "voice_id" .= ("ara" :: Text)
+                    , "language" .= ("pt-BR" :: Text)
+                    , "output_format"
+                        .= object
+                            [ "codec" .= ("mp3" :: Text)
+                            , "sample_rate" .= (44100 :: Int)
+                            , "bit_rate" .= (192000 :: Int)
+                            ]
+                    ]
+
         it "encodes xAI image edits with a single source image" $ do
             let request :: XAIImagineImageRequest
                 request =
@@ -289,14 +347,14 @@ spec = describe "media providers" $ do
                     , "prompt" .= ("combine these" :: Text)
                     , "images"
                         .= ( [ object
-                                    [ "url" .= ("https://example.com/one.png" :: Text)
-                                    , "type" .= ("image_url" :: Text)
-                                    ]
-                               , object
-                                    [ "url" .= ("https://example.com/two.png" :: Text)
-                                    , "type" .= ("image_url" :: Text)
-                                    ]
-                               ]
+                                [ "url" .= ("https://example.com/one.png" :: Text)
+                                , "type" .= ("image_url" :: Text)
+                                ]
+                             , object
+                                [ "url" .= ("https://example.com/two.png" :: Text)
+                                , "type" .= ("image_url" :: Text)
+                                ]
+                             ]
                                 :: [Value]
                            )
                     ]
@@ -316,14 +374,14 @@ spec = describe "media providers" $ do
                 `shouldBe` object
                     [ "contents"
                         .= ( [ object
-                                    [ "role" .= ("user" :: Text)
-                                    , "parts"
-                                        .= ( [ object ["text" .= ("mountain sunrise" :: Text)]
-                                             ]
-                                                :: [Value]
-                                           )
-                                    ]
-                              ]
+                                [ "role" .= ("user" :: Text)
+                                , "parts"
+                                    .= ( [ object ["text" .= ("mountain sunrise" :: Text)]
+                                         ]
+                                            :: [Value]
+                                       )
+                                ]
+                             ]
                                 :: [Value]
                            )
                     , "generationConfig"
@@ -358,21 +416,21 @@ spec = describe "media providers" $ do
                 `shouldBe` object
                     [ "contents"
                         .= ( [ object
-                                    [ "role" .= ("user" :: Text)
-                                    , "parts"
-                                        .= ( [ object ["text" .= ("turn this into watercolor" :: Text)]
-                                             , object
-                                                [ "inline_data"
-                                                    .= object
-                                                        [ "mime_type" .= ("image/png" :: Text)
-                                                        , "data" .= ("YWJj" :: Text)
-                                                        ]
-                                                ]
-                                             ]
-                                                :: [Value]
-                                           )
-                                    ]
-                              ]
+                                [ "role" .= ("user" :: Text)
+                                , "parts"
+                                    .= ( [ object ["text" .= ("turn this into watercolor" :: Text)]
+                                         , object
+                                            [ "inline_data"
+                                                .= object
+                                                    [ "mime_type" .= ("image/png" :: Text)
+                                                    , "data" .= ("YWJj" :: Text)
+                                                    ]
+                                            ]
+                                         ]
+                                            :: [Value]
+                                       )
+                                ]
+                             ]
                                 :: [Value]
                            )
                     , "generationConfig"
@@ -457,10 +515,11 @@ spec = describe "media providers" $ do
                         }
 
             result <-
-                runLlmError $
-                    generateOpenAIImage (defaultOpenAIImagesSettings "test-key") request
+                runLlmError
+                    $ generateOpenAIImage (defaultOpenAIImagesSettings "test-key") request
 
-            result `shouldBe` Left (LlmExpectationError "OpenAI image masks require at least one input image")
+            result
+                `shouldBe` Left (LlmExpectationError "OpenAI image masks require at least one input image")
 
         it "fails fast on OpenAI input fidelity without input images" $ do
             let request =
@@ -469,10 +528,36 @@ spec = describe "media providers" $ do
                         }
 
             result <-
-                runLlmError $
-                    generateOpenAIImage (defaultOpenAIImagesSettings "test-key") request
+                runLlmError
+                    $ generateOpenAIImage (defaultOpenAIImagesSettings "test-key") request
 
-            result `shouldBe` Left (LlmExpectationError "OpenAI inputFidelity requires at least one input image")
+            result
+                `shouldBe` Left (LlmExpectationError "OpenAI inputFidelity requires at least one input image")
+
+        it "fails fast on OpenAI TTS instructions for unsupported models" $ do
+            let settings :: OpenAITTSSettings '[Error RakeError, IOE]
+                settings =
+                    case defaultOpenAITTSSettings "test-key" of
+                        OpenAITTSSettings{apiKey, baseUrl, organizationId, projectId, requestLogger, options = _} ->
+                            OpenAITTSSettings
+                                { apiKey
+                                , baseUrl
+                                , organizationId
+                                , projectId
+                                , options =
+                                    defaultOpenAITTSOptions
+                                        { model = OpenAITTSModelTTS1
+                                        , instructions = Just "Speak gently"
+                                        }
+                                , requestLogger
+                                }
+
+            result <-
+                runLlmError
+                    $ generateOpenAISpeech settings "hello"
+
+            result
+                `shouldBe` Left (LlmExpectationError "OpenAI TTS instructions require gpt-4o-mini-tts")
 
         it "fails fast on xAI video edits with generation-only fields" $ do
             let request =
@@ -484,10 +569,14 @@ spec = describe "media providers" $ do
                         }
 
             result <-
-                runLlmError $
-                    startXAIVideo (defaultXAIImagineSettings "test-key") request
+                runLlmError
+                    $ startXAIVideo (defaultXAIImagineSettings "test-key") request
 
-            result `shouldBe` Left (LlmExpectationError "xAI video edit requests cannot set duration, aspectRatio, or resolution")
+            result
+                `shouldBe` Left
+                    ( LlmExpectationError
+                        "xAI video edit requests cannot set duration, aspectRatio, or resolution"
+                    )
 
         it "fails fast on xAI requests that set both image and video sources" $ do
             let request =
@@ -497,10 +586,11 @@ spec = describe "media providers" $ do
                         }
 
             result <-
-                runLlmError $
-                    startXAIVideo (defaultXAIImagineSettings "test-key") request
+                runLlmError
+                    $ startXAIVideo (defaultXAIImagineSettings "test-key") request
 
-            result `shouldBe` Left (LlmExpectationError "xAI video requests cannot set both imageUrl and videoUrl")
+            result
+                `shouldBe` Left (LlmExpectationError "xAI video requests cannot set both imageUrl and videoUrl")
 
 runLlmError :: Eff '[Error RakeError, IOE] a -> IO (Either RakeError a)
 runLlmError =

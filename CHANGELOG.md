@@ -16,7 +16,7 @@ and this project adheres to the
 - Historical unresolved tool calls now resume into a synthetic `"Tool not found"` result when the local tool is no longer configured, instead of being silently dropped.
 - Added broader shared loop tests plus deterministic OpenAI/xAI/Gemini decoder tests for completed, tool-handoff, paused, failed, and thought-only rounds.
 - Added provider-specific media generation helpers for OpenAI Images (`gpt-image-1.5` by default) and xAI Grok Imagine image/video generation.
-- Added a `gen-image` CLI for OpenAI and Grok image generation, plus a separate `gen-video` CLI for Grok video generation from an image, video edits, and local append-style `--extend` continuations.
+- Added a `rake-image` CLI for OpenAI and Grok image generation, a separate `rake-video` CLI for Grok video generation from an image, video edits, and local append-style `--extend` continuations, and a `rake-tts` CLI for OpenAI/xAI speech generation with local playback by default and optional `--output` saving.
 - Moved PostgreSQL response logging onto the same effectful `WithConnection` abstraction as the storage backend.
 - Replaced raw PostgreSQL table-name `Text` with validated `PgIdentifier` and `ConversationTables` configuration.
 - Added batched appends plus `modifyConversationAtomic` for short-lived concurrent storage mutations.

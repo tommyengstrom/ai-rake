@@ -1,5 +1,6 @@
 module Rake.Media
-    ( GeneratedImage (..)
+    ( Audio (..)
+    , GeneratedImage (..)
     , ImageGenerationResponse (..)
     , XAIVideoRequestId (..)
     , XAIVideoStatus (..)
@@ -11,6 +12,13 @@ module Rake.Media
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import Relude
+
+data Audio = Audio
+    { audioBytes :: ByteString
+    , mimeType :: Maybe Text
+    , fileName :: Maybe Text
+    }
+    deriving stock (Show, Eq, Generic)
 
 data GeneratedImage = GeneratedImage
     { url :: Maybe Text
@@ -26,12 +34,15 @@ instance FromJSON GeneratedImage where
         parseStandardImage standardObj = do
             let parsedImage =
                     GeneratedImage
-                        <$> standardObj .:? "url"
-                        <*> standardObj .:? "b64_json"
-                        <*> standardObj .:? "revised_prompt"
+                        <$> standardObj
+                        .:? "url"
+                        <*> standardObj
+                        .:? "b64_json"
+                        <*> standardObj
+                        .:? "revised_prompt"
             generatedImage@GeneratedImage{url, b64Json, revisedPrompt} <- parsedImage
-            when (isNothing url && isNothing b64Json && isNothing revisedPrompt) $
-                fail "Expected an OpenAI/xAI image payload"
+            when (isNothing url && isNothing b64Json && isNothing revisedPrompt)
+                $ fail "Expected an OpenAI/xAI image payload"
             pure generatedImage
 
         parseGeminiInlineImage geminiObj = do
@@ -57,8 +68,8 @@ instance FromJSON GeneratedImage where
 
 instance ToJSON GeneratedImage where
     toJSON GeneratedImage{url, b64Json, revisedPrompt} =
-        object $
-            catMaybes
+        object
+            $ catMaybes
                 [ ("url" .=) <$> url
                 , ("b64_json" .=) <$> b64Json
                 , ("revised_prompt" .=) <$> revisedPrompt
@@ -73,7 +84,8 @@ data ImageGenerationResponse = ImageGenerationResponse
 instance FromJSON ImageGenerationResponse where
     parseJSON = withObject "ImageGenerationResponse" $ \obj ->
         ImageGenerationResponse
-            <$> obj .:? "created"
+            <$> obj
+            .:? "created"
             <*> ( do
                     maybeImages <- obj .:? "data"
                     case maybeImages of
@@ -90,8 +102,8 @@ instance FromJSON ImageGenerationResponse where
 
 instance ToJSON ImageGenerationResponse where
     toJSON ImageGenerationResponse{created, images} =
-        object $
-            catMaybes
+        object
+            $ catMaybes
                 [ ("created" .=) <$> created
                 , Just ("data" .= images)
                 ]
@@ -101,8 +113,8 @@ parseGeminiCandidates =
     concatMap candidateImages
   where
     candidateImages candidateValue =
-        fromMaybe [] $
-            parseMaybe
+        fromMaybe []
+            $ parseMaybe
                 (withObject "GeminiCandidate" parseCandidate)
                 candidateValue
 
@@ -126,6 +138,7 @@ data XAIVideoStatus
     = XAIVideoPending
     | XAIVideoDone
     | XAIVideoExpired
+    | XAIVideoFailed
     | XAIVideoUnknown Text
     deriving stock (Show, Eq, Generic)
 
@@ -134,6 +147,7 @@ instance FromJSON XAIVideoStatus where
         "pending" -> pure XAIVideoPending
         "done" -> pure XAIVideoDone
         "expired" -> pure XAIVideoExpired
+        "failed" -> pure XAIVideoFailed
         other -> pure (XAIVideoUnknown other)
 
 instance ToJSON XAIVideoStatus where
@@ -144,6 +158,8 @@ instance ToJSON XAIVideoStatus where
             String "done"
         XAIVideoExpired ->
             String "expired"
+        XAIVideoFailed ->
+            String "failed"
         XAIVideoUnknown other ->
             String other
 
@@ -157,14 +173,17 @@ data GeneratedVideo = GeneratedVideo
 instance FromJSON GeneratedVideo where
     parseJSON = withObject "GeneratedVideo" $ \obj ->
         GeneratedVideo
-            <$> obj .:? "url"
-            <*> obj .:? "duration"
-            <*> obj .:? "respect_moderation"
+            <$> obj
+            .:? "url"
+            <*> obj
+            .:? "duration"
+            <*> obj
+            .:? "respect_moderation"
 
 instance ToJSON GeneratedVideo where
     toJSON GeneratedVideo{url, duration, respectModeration} =
-        object $
-            catMaybes
+        object
+            $ catMaybes
                 [ ("url" .=) <$> url
                 , ("duration" .=) <$> duration
                 , ("respect_moderation" .=) <$> respectModeration
@@ -193,15 +212,18 @@ data XAIVideoResponse = XAIVideoResponse
 instance FromJSON XAIVideoResponse where
     parseJSON = withObject "XAIVideoResponse" $ \obj ->
         XAIVideoResponse
-            <$> obj .: "status"
-            <*> obj .:? "model"
-            <*> obj .:? "video"
+            <$> obj
+            .: "status"
+            <*> obj
+            .:? "model"
+            <*> obj
+            .:? "video"
 
 instance ToJSON XAIVideoResponse where
     toJSON XAIVideoResponse{status, model, video} =
-        object $
-            ["status" .= status]
-                <> catMaybes
-                    [ ("model" .=) <$> model
-                    , ("video" .=) <$> video
-                    ]
+        object
+            $ ["status" .= status]
+            <> catMaybes
+                [ ("model" .=) <$> model
+                , ("video" .=) <$> video
+                ]

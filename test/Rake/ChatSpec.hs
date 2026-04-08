@@ -8,7 +8,7 @@ import Data.Map qualified as Map
 import Data.UUID qualified as UUID
 import Effectful
 import Effectful.Concurrent (Concurrent, runConcurrent)
-import Effectful.Dispatch.Dynamic (interpretWith)
+import Effectful.Dispatch.Dynamic (interpretWith, localSeqUnlift)
 import Effectful.Error.Static
 import Effectful.Time (Time, runTime)
 import Rake
@@ -16,6 +16,7 @@ import Rake.MediaStorage.InMemory (runRakeMediaStorageInMemory)
 import Rake.Storage.InMemory (runRakeStorageInMemory)
 import Relude
 import Test.Hspec
+import UnliftIO.Exception qualified as Exception
 
 spec :: Spec
 spec = describe "Rake" $ do
@@ -343,6 +344,122 @@ spec = describe "Rake" $ do
                     ]
             chatOutcomeAppendedItems failedOutcome
                 `shouldBe` [geminiThought, replayBarrierItem "bad round"]
+
+    describe "streamChatOutcome" $ do
+        it "emits assistant text deltas while only appending finalized history items" $ do
+            streamedTextRef <- IORef.newIORef ([] :: [Text])
+            emittedItemsRef <- IORef.newIORef ([] :: [HistoryItem])
+            let finalAssistant = responsesAssistantItem ItemCompleted "Hello world"
+
+            result <-
+                runMockStreamChatOutcome
+                    [ streamedProviderRound
+                        [ MockTextDelta "Hello "
+                        , MockTextDelta "world"
+                        ]
+                        (finalProviderRound [finalAssistant])
+                    ]
+                    ( streamChatOutcome
+                        defaultStreamCallbacks
+                            { onAssistantTextDelta = \deltaText -> liftIO (IORef.modifyIORef' streamedTextRef (<> [deltaText]))
+                            }
+                        defaultChatConfig
+                            { onItem = \historyItem -> liftIO (IORef.modifyIORef' emittedItemsRef (<> [historyItem]))
+                            }
+                        [user "start"]
+                    )
+
+            result
+                `shouldBe` Right
+                    ChatFinished
+                        { appendedItems = [finalAssistant]
+                        }
+            IORef.readIORef streamedTextRef `shouldReturn` ["Hello ", "world"]
+            emittedItems <- IORef.readIORef emittedItemsRef
+            stripHistoryItemIds emittedItems `shouldBe` [finalAssistant]
+
+        it "streams assistant text from later rounds after local tool execution" $ do
+            streamedTextRef <- IORef.newIORef ([] :: [Text])
+            let pendingCall = loopToolCall "loop-1"
+                pendingCallItem = responsesToolCallItem ItemPending pendingCall
+                finalAssistant = responsesAssistantItem ItemCompleted "{\"answer\":4}"
+
+            result <-
+                runMockStreamChatOutcome
+                    [ streamedProviderRound [] (toolProviderRound [pendingCallItem] [pendingCall])
+                    , streamedProviderRound
+                        [ MockTextDelta "{\"answer\":"
+                        , MockTextDelta "4}"
+                        ]
+                        (finalProviderRound [finalAssistant])
+                    ]
+                    ( streamChatOutcome
+                        defaultStreamCallbacks
+                            { onAssistantTextDelta = \deltaText -> liftIO (IORef.modifyIORef' streamedTextRef (<> [deltaText]))
+                            }
+                        defaultChatConfig
+                            { maxToolRounds = 1
+                            , tools = [loopTool]
+                            }
+                        [user "start"]
+                    )
+
+            result
+                `shouldBe` Right
+                    ChatFinished
+                        { appendedItems =
+                            [ pendingCallItem
+                            , toolResult "loop-1" "looped"
+                            , finalAssistant
+                            ]
+                        }
+            IORef.readIORef streamedTextRef `shouldReturn` ["{\"answer\":", "4}"]
+
+        it "returns OnAssistantTextDeltaFailed when a stream text callback throws synchronously" $ do
+            let finalAssistant = responsesAssistantItem ItemCompleted "Hello"
+
+            result <-
+                runMockStreamChatOutcome
+                    [ streamedProviderRound
+                        [MockTextDelta "Hello"]
+                        (finalProviderRound [finalAssistant])
+                    ]
+                    ( streamChatOutcome
+                        defaultStreamCallbacks
+                            { onAssistantTextDelta = \_ -> error "closed socket"
+                            }
+                        defaultChatConfig
+                        [user "start"]
+                    )
+
+            case result of
+                Left (StreamingInternalError (OnAssistantTextDeltaFailed message)) -> do
+                    message `shouldContain` "closed socket"
+                other ->
+                    expectationFailure ("Unexpected streaming callback failure result: " <> show other)
+
+        it "returns OnAssistantRefusalDeltaFailed when a stream refusal callback throws synchronously" $ do
+            let finalAssistant = responsesAssistantItem ItemCompleted "No"
+
+            result <-
+                runMockStreamChatOutcome
+                    [ streamedProviderRound
+                        [MockRefusalDelta "No"]
+                        (finalProviderRound [finalAssistant])
+                    ]
+                    ( streamChatOutcome
+                        defaultStreamCallbacks
+                            { onAssistantRefusalDelta = \_ -> error "closed refusal socket"
+                            }
+                        defaultChatConfig
+                        [user "start"]
+                    )
+
+            case result of
+                Left (StreamingInternalError (OnAssistantRefusalDeltaFailed message)) -> do
+                    message `shouldContain` "closed refusal socket"
+                other ->
+                    expectationFailure ("Unexpected streaming refusal callback failure result: " <> show other)
 
     describe "assistant helpers" $ do
         it "keeps lastAssistantTexts as a best-effort helper" $ do
@@ -801,6 +918,37 @@ spec = describe "Rake" $ do
                     , expectedStoredHistory
                     )
 
+        it "persists only finalized items from withResumableStreamingChat" $ do
+            streamedTextRef <- IORef.newIORef ([] :: [Text])
+            let finalAssistant = responsesAssistantItem ItemCompleted "Hello"
+            result <-
+                runStorageStreamOutcomeTest
+                    [ streamedProviderRound
+                        [ MockTextDelta "Hel"
+                        , MockTextDelta "lo"
+                        ]
+                        (finalProviderRound [finalAssistant])
+                    ]
+                    do
+                        convId <- createConversation
+                        appendItems convId [user "start"]
+                        outcome <-
+                            withResumableStreamingChat
+                                defaultStreamCallbacks
+                                    { onAssistantTextDelta = \deltaText -> liftIO (IORef.modifyIORef' streamedTextRef (<> [deltaText]))
+                                    }
+                                defaultChatConfig
+                                convId
+                        storedHistory <- getConversation convId
+                        pure (stripHistoryItemIdsFromOutcome outcome, stripHistoryItemIds storedHistory)
+
+            result
+                `shouldBe` Right
+                    ( ChatFinished{appendedItems = [finalAssistant]}
+                    , [user "start", finalAssistant]
+                    )
+            IORef.readIORef streamedTextRef `shouldReturn` ["Hel", "lo"]
+
 loopTool :: ToolDef es
 loopTool =
     defineToolNoArgument
@@ -826,6 +974,19 @@ countingToolCall toolCallId =
         , continuationAttachments = []
         }
 
+data MockStreamDelta
+    = MockTextDelta Text
+    | MockRefusalDelta Text
+
+data MockStreamingRound = MockStreamingRound
+    { streamDeltas :: [MockStreamDelta]
+    , streamRound :: ProviderRound
+    }
+
+streamedProviderRound :: [MockStreamDelta] -> ProviderRound -> MockStreamingRound
+streamedProviderRound streamDeltas streamRound =
+    MockStreamingRound{streamDeltas, streamRound}
+
 runMockChatOutcome
     :: [ProviderRound]
     -> Eff '[Rake, RakeMediaStorage, Error RakeError, IOE] ChatOutcome
@@ -836,6 +997,18 @@ runMockChatOutcome plannedRounds action =
             . runErrorNoCallStack
             . runRakeMediaStorageInMemory
             . runMockRake plannedRounds
+            $ action
+
+runMockStreamChatOutcome
+    :: [MockStreamingRound]
+    -> Eff '[Rake, RakeMediaStorage, Error RakeError, IOE] ChatOutcome
+    -> IO (Either RakeError ChatOutcome)
+runMockStreamChatOutcome plannedRounds action =
+    fmap (fmap stripHistoryItemIdsFromOutcome) $
+        runEff
+            . runErrorNoCallStack
+            . runRakeMediaStorageInMemory
+            . runMockStreamingRake plannedRounds
             $ action
 
 runRecordedMockChatOutcome
@@ -880,6 +1053,37 @@ runMockRake plannedRounds eff = do
                     pure response
                 [] ->
                     pure (failedProviderRound (FailureContract "Unexpected provider round request in test") [])
+        GetLlmResponseStream{} ->
+            pure (failedProviderRound (FailureContract "Unexpected streaming provider round request in non-streaming test") [])
+
+runMockStreamingRake
+    :: ( IOE :> es
+       , Error RakeError :> es
+       )
+    => [MockStreamingRound]
+    -> Eff (Rake ': es) a
+    -> Eff es a
+runMockStreamingRake plannedRounds eff = do
+    responsesRef <- liftIO (IORef.newIORef plannedRounds)
+    interpretWith eff \localEnv -> \case
+        GetLlmResponse{} ->
+            pure (failedProviderRound (FailureContract "Unexpected non-streaming provider round request in streaming test") [])
+        GetLlmResponseStream onAssistantTextDelta onAssistantRefusalDelta _ _ _ _ -> do
+            localSeqUnlift localEnv \unlift -> do
+                remainingResponses <- liftIO (IORef.readIORef responsesRef)
+                case remainingResponses of
+                    MockStreamingRound{streamDeltas, streamRound} : rest -> do
+                        liftIO (IORef.writeIORef responsesRef rest)
+                        let streamCallbacks =
+                                protectMockStreamCallbacks
+                                    StreamCallbacks
+                                        { onAssistantTextDelta = unlift . onAssistantTextDelta
+                                        , onAssistantRefusalDelta = unlift . onAssistantRefusalDelta
+                                        }
+                        traverse_ (emitMockStreamDelta streamCallbacks) streamDeltas
+                        pure streamRound
+                    [] ->
+                        pure (failedProviderRound (FailureContract "Unexpected streaming provider round request in test") [])
 
 runRecordedMockRake
     :: IOE :> es
@@ -899,6 +1103,8 @@ runRecordedMockRake samplingRef plannedRounds eff = do
                     pure response
                 [] ->
                     pure (failedProviderRound (FailureContract "Unexpected provider round request in test") [])
+        GetLlmResponseStream{} ->
+            pure (failedProviderRound (FailureContract "Unexpected streaming provider round request in non-streaming test") [])
 
 runHistoryRecordedMockRake
     :: IOE :> es
@@ -918,6 +1124,58 @@ runHistoryRecordedMockRake historyRef plannedRounds eff = do
                     pure response
                 [] ->
                     pure (failedProviderRound (FailureContract "Unexpected provider round request in test") [])
+        GetLlmResponseStream{} ->
+            pure (failedProviderRound (FailureContract "Unexpected streaming provider round request in non-streaming test") [])
+
+emitMockStreamDelta :: StreamCallbacks es -> MockStreamDelta -> Eff es ()
+emitMockStreamDelta StreamCallbacks{onAssistantTextDelta, onAssistantRefusalDelta} = \case
+    MockTextDelta deltaText ->
+        onAssistantTextDelta deltaText
+    MockRefusalDelta refusalText ->
+        onAssistantRefusalDelta refusalText
+
+protectMockStreamCallbacks
+    :: ( IOE :> es
+       , Error RakeError :> es
+       )
+    => StreamCallbacks es
+    -> StreamCallbacks es
+protectMockStreamCallbacks StreamCallbacks{onAssistantTextDelta, onAssistantRefusalDelta} =
+    StreamCallbacks
+        { onAssistantTextDelta =
+            \deltaText ->
+                protectMockStreamingInternalAction
+                    OnAssistantTextDeltaFailed
+                    (onAssistantTextDelta deltaText)
+        , onAssistantRefusalDelta =
+            \refusalText ->
+                protectMockStreamingInternalAction
+                    OnAssistantRefusalDeltaFailed
+                    (onAssistantRefusalDelta refusalText)
+        }
+
+protectMockStreamingInternalAction
+    :: ( IOE :> es
+       , Error RakeError :> es
+       )
+    => (String -> StreamingInternalIssue)
+    -> Eff es a
+    -> Eff es a
+protectMockStreamingInternalAction wrapIssue action = do
+    result <-
+        withEffToIO SeqUnlift \runInIO ->
+            Exception.tryAny $
+                runInIO
+                    ( (Right <$> action)
+                        `catchError` (\_ (rakeError :: RakeError) -> pure (Left rakeError))
+                    )
+    case result of
+        Left err ->
+            throwError (StreamingInternalError (wrapIssue (displayException err)))
+        Right (Left rakeError) ->
+            throwError @RakeError rakeError
+        Right (Right value) ->
+            pure value
 
 runStorageTest
     :: Eff
@@ -959,6 +1217,31 @@ runStorageOutcomeTest plannedRounds action =
         . runRakeStorageInMemory
         $ do
             result <- runErrorNoCallStack @RakeError (runMockRake plannedRounds action)
+            either (error . show) pure result
+
+runStorageStreamOutcomeTest
+    :: [MockStreamingRound]
+    -> Eff
+        '[ Rake
+         , Error RakeError
+         , RakeStorage
+         , Error ChatStorageError
+         , RakeMediaStorage
+         , Time
+         , Concurrent
+         , IOE
+         ]
+        a
+    -> IO (Either ChatStorageError a)
+runStorageStreamOutcomeTest plannedRounds action =
+    runEff
+        . runConcurrent
+        . runTime
+        . runRakeMediaStorageInMemory
+        . runErrorNoCallStack
+        . runRakeStorageInMemory
+        $ do
+            result <- runErrorNoCallStack @RakeError (runMockStreamingRake plannedRounds action)
             either (error . show) pure result
 
 finalProviderRound :: [HistoryItem] -> ProviderRound

@@ -19,6 +19,14 @@ data Rake :: Effect where
         -> SamplingOptions
         -> [HistoryItem]
         -> Rake m ProviderRound
+    GetLlmResponseStream
+        :: (Text -> m ())
+        -> (Text -> m ())
+        -> [ToolDeclaration]
+        -> ResponseFormat
+        -> SamplingOptions
+        -> [HistoryItem]
+        -> Rake m ProviderRound
 
 makeEffect ''Rake
 

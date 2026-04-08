@@ -42,6 +42,7 @@ main = do
 - Canonical conversations are `[HistoryItem]`
 - Generic chat entrypoint is `chatOutcome`
 - `withResumableChat` is the recommended durable wrapper for agent loops that need persistence
+- `streamChatOutcome` and `withResumableStreamingChat` add ephemeral shared streaming on top of the same durable history model
 - Supported chat providers are OpenAI Chat, xAI Chat, and Gemini Chat
 - Shared/local history items cover text messages, tool calls, and tool results
 - Provider-native history is preserved for OpenAI Responses, xAI Responses, and Gemini Interactions items
@@ -57,8 +58,10 @@ Notes:
 - Anything named `appendedItems` is the newly returned append-only suffix, not the full conversation history.
 - History items get stable `HistoryItemId`s before replay and persistence. When storage is used, the embedded item id matches the storage row id.
 - `chatOutcome` and `withResumableChat` require `IOE` because the library assigns `HistoryItemId`s before replay and persistence.
+- `streamChatOutcome` and `withResumableStreamingChat` also require `IOE`; they surface live assistant text/refusal deltas through `StreamCallbacks` but still only persist finalized `HistoryItem` suffixes.
 - `chatOutcome` returns an append-only canonical suffix plus explicit pause/failure state. Failed outcomes append a durable `ReplayBarrier` control item into the returned suffix.
 - `withResumableChat` is the recommended durable wrapper for append-only loops. It persists paused and failed suffixes through `chatOutcome`.
+- Shared streaming is text-first today. Provider-native reasoning deltas, partial tool arguments, and partial multimodal outputs stay out of the shared API.
 - Stored unresolved tool calls are resumed locally before the next provider request instead of being replayed back at the model.
 - Historical unresolved tool calls whose local tool no longer exists are resumed into a synthetic `"Tool not found"` result and the loop continues.
 - `chatOutcome` throws `ConversationBlocked` for blocked histories and includes the latest valid reset checkpoint when the supplied history already has stable item ids.
@@ -73,6 +76,7 @@ Notes:
 - Gemini-specific built-in Interactions tools are available through `GeminiChatSettings.providerTools`, while local function tools still flow through the shared chat loop.
 - Switching away from Gemini keeps generic unresolved tool state portable. Gemini-only pending `thought` metadata is reused only for same-provider Gemini continuation and is dropped when replaying into OpenAI/xAI.
 - Gemini image generation, OpenAI image generation, and xAI Grok Imagine image/video generation are available through provider-specific helper modules instead of the shared chat API.
+- Standalone TTS helpers are available for OpenAI and xAI through the shared `tts` and `ttsStreaming` entrypoints, plus provider-specific modules when you need provider-native settings.
 
 ## Persistence
 
@@ -192,40 +196,95 @@ Validation notes:
 - xAI `videoUrl` requests are edit operations and cannot be combined with `duration`, `aspectRatio`, or `resolution`.
 - xAI video requests may set `imageUrl` or `videoUrl`, but not both.
 
+## Text To Speech
+
+```haskell
+{-# LANGUAGE DataKinds #-}
+
+import Data.ByteString qualified as BS
+import Effectful
+import Effectful.Error.Static
+import Rake
+import Rake.Error (renderRakeError)
+import Rake.Providers.OpenAI.TTS
+import Relude
+import System.Environment (getEnv)
+
+main :: IO ()
+main = do
+  apiKey <- toText <$> getEnv "OPENAI_API_KEY"
+  runEff
+    . runErrorNoCallStackWith @RakeError (error . toString . renderRakeError)
+    $ do
+        audio <-
+          tts
+            (TTSOpenAI (defaultOpenAITTSSettings apiKey))
+            "Hello from ai-rake."
+
+        liftIO (BS.writeFile "hello.mp3" audioBytes)
+```
+
+Use `ttsStreaming` when you want chunk callbacks during generation and the final aggregated `Audio` value at the end:
+
+```haskell
+audio <-
+  ttsStreaming
+    TTSStreamCallbacks
+      { onAudioChunk = \chunk ->
+          liftIO (putStrLn ("received " <> show (BS.length chunk) <> " bytes"))
+      }
+    (TTSStreamingXAI (defaultXAITTSStreamingSettings xaiKey))
+    "Hello from ai-rake."
+```
+
 ## CLIs
 
 Build and run the image CLI with:
 
 ```bash
-cabal run gen-image -- imagine "a man riding a horse on the moon"
+cabal run rake-image -- xai "a man riding a horse on the moon"
 ```
 
 Build and run the video CLI with:
 
 ```bash
-cabal run gen-video -- grok "She walk away" --image girl.jpg
-cabal run gen-video -- grok --extend clip.mp4 "continue the scene for 5 more seconds"
+cabal run rake-video -- xai "She walk away" --image girl.jpg
+cabal run rake-video -- xai --extend clip.mp4 "continue the scene for 5 more seconds"
+```
+
+Build and run the speech CLI with:
+
+```bash
+cabal run rake-tts -- openai "Hello from ai-rake."
+cabal run rake-tts -- xai --codec=wav --sample-rate=24000 -o update.wav "A short status update"
 ```
 
 Defaults:
 
-- `gen-image gptimage ...` uses OpenAI `gpt-image-1.5`
-- `gen-image imagine ...` uses xAI Grok Imagine image generation
-- `gen-image banana2 ...` uses Gemini `gemini-2.5-flash-image`
-- `gen-video grok ...` uses xAI Grok Imagine video generation
+- `rake-image gptimage ...` uses OpenAI `gpt-image-1.5`
+- `rake-image xai ...` uses xAI Grok Imagine image generation
+- `rake-image banana2 ...` uses Gemini `gemini-2.5-flash-image`
+- `rake-video xai ...` uses xAI Grok Imagine video generation
+- `rake-tts openai ...` uses OpenAI TTS with default model `gpt-4o-mini-tts`
+- `rake-tts xai ...` uses xAI TTS with default voice `eve`
 - No `--output` writes to `./generated/<timestamp>-<slug>.png` for images
 - No `--output` writes to `./generated/<timestamp>-<slug>.mp4` for videos
-- `gen-video --extend ...` performs a true append by extracting the last frame locally, generating a continuation from that frame, and concatenating the clips; it requires local `ffmpeg` and `ffprobe`
+- No `--output` plays speech locally by default; local playback looks for `ffplay`, `mpv`, or `afplay`
+- `rake-tts --output PATH ...` saves speech to `PATH` instead of playing it
+- `rake-video --extend ...` performs a true append by extracting the last frame locally, generating a continuation from that frame, and concatenating the clips; it requires local `ffmpeg` and `ffprobe`
 
-The CLIs read `OPENAI_API_KEY` for `gptimage`, `XAI_API_KEY` for `imagine` and `gen-video`, and `GEMINI_API_KEY` for `banana2`.
+The CLIs read `OPENAI_API_KEY` for `gptimage` and `rake-tts openai`, `XAI_API_KEY` for `rake-image xai`, `rake-video xai`, and `rake-tts xai`, and `GEMINI_API_KEY` for `banana2`.
 
 Use provider-specific help to see all available controls:
 
 ```bash
-cabal run gen-image -- --help
-cabal run gen-image -- gptimage --help
-cabal run gen-image -- imagine --help
-cabal run gen-image -- banana2 --help
-cabal run gen-video -- --help
-cabal run gen-video -- grok --help
+cabal run rake-image -- --help
+cabal run rake-image -- gptimage --help
+cabal run rake-image -- xai --help
+cabal run rake-image -- banana2 --help
+cabal run rake-video -- --help
+cabal run rake-video -- xai --help
+cabal run rake-tts -- --help
+cabal run rake-tts -- openai --help
+cabal run rake-tts -- xai --help
 ```

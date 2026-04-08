@@ -24,16 +24,25 @@ module Rake.Providers.Gemini.Chat
 import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString qualified as BS
 import Data.Map qualified as Map
+import Data.Text.Encoding qualified as TextEncoding
 import Data.Vector qualified as Vector
 import Effectful
-import Effectful.Dispatch.Dynamic (interpretWith)
 import Effectful.Error.Static
+import Network.HTTP.Client qualified as HttpClient
 import Network.HTTP.Client.TLS (newTlsManager)
 import Rake.Effect
+import Rake.Internal.Sse
 import Rake.MediaStorage.Effect
 import Rake.Providers.Chat.Projection (classifyGeminiPayloads)
-import Rake.Providers.Internal (defaultWarningLogger, valueToCompactText)
+import Rake.Providers.Internal
+    ( defaultWarningLogger
+    , protectStreamingInternalAction
+    , runChatProvider
+    , runStreamingSseRequest
+    , valueToCompactText
+    )
 import Rake.Types
 import Relude
 import Servant.API (Header, JSON, Post, ReqBody)
@@ -285,8 +294,8 @@ runRakeGeminiChat settings@GeminiChatSettings{apiKey, baseUrl, requestLogger} ef
     let clientEnv = mkClientEnv manager parsedBaseUrl
         postInteraction = client geminiInteractionsApi
 
-    interpretWith eff \_ -> \case
-        GetLlmResponse tools responseFormat samplingOptions history -> do
+    runChatProvider
+        (\tools responseFormat samplingOptions history -> do
             requestBody <- buildGeminiRequestBody settings tools responseFormat samplingOptions history
             requestLogger (NativeMsgOut requestBody)
             responseValue <-
@@ -300,9 +309,124 @@ runRakeGeminiChat settings@GeminiChatSettings{apiKey, baseUrl, requestLogger} ef
                             pure response
             requestLogger (NativeMsgIn responseValue)
             either throwError pure (decodeGeminiResponse responseValue)
+        )
+        (\streamCallbacks tools responseFormat samplingOptions history -> do
+            requestBody <- buildGeminiRequestBody settings tools responseFormat samplingOptions history
+            let streamingRequestBody = enableStreamingRequestBody requestBody
+            requestLogger (NativeMsgOut streamingRequestBody)
+            streamingRequest <- liftIO (buildGeminiStreamingRequest baseUrl apiKey streamingRequestBody)
+            maybeFinalResponseValue <-
+                runStreamingSseRequest
+                    parsedBaseUrl
+                    manager
+                    streamingRequest
+                    (\clientErr -> requestLogger (NativeRequestFailure clientErr))
+                    (handleGeminiStreamEvent requestLogger streamCallbacks)
+            finalResponseValue <-
+                maybe
+                    (throwError (LlmExpectationError "Gemini stream ended without a terminal interaction event"))
+                    pure
+                    maybeFinalResponseValue
+            either throwError pure (decodeGeminiResponse finalResponseValue)
+        )
+        eff
   where
     invalidBaseUrl err =
         LlmExpectationError ("Invalid base URL: " <> show err)
+
+buildGeminiStreamingRequest :: Text -> Text -> Value -> IO HttpClient.Request
+buildGeminiStreamingRequest baseUrl apiKey requestBody = do
+    request <- HttpClient.parseRequest (toString baseUrl <> "/v1beta/interactions?alt=sse")
+    pure
+        request
+            { HttpClient.method = "POST"
+            , HttpClient.requestHeaders =
+                [ ("x-goog-api-key", TextEncoding.encodeUtf8 apiKey)
+                , ("Content-Type", "application/json")
+                , ("Accept", "text/event-stream")
+                ]
+            , HttpClient.requestBody = HttpClient.RequestBodyLBS (encode requestBody)
+            , HttpClient.responseTimeout = HttpClient.responseTimeoutNone
+            }
+
+enableStreamingRequestBody :: Value -> Value
+enableStreamingRequestBody = \case
+    Object requestObject ->
+        Object (KM.insert "stream" (Bool True) requestObject)
+    otherValue ->
+        otherValue
+
+handleGeminiStreamEvent
+    :: ( IOE :> es
+       , Error RakeError :> es
+       )
+    => (NativeMsgFormat -> Eff es ())
+    -> StreamCallbacks es
+    -> Maybe Text
+    -> BS.ByteString
+    -> Eff es (SseStep Value)
+handleGeminiStreamEvent requestLogger streamCallbacks _ payload
+    | payload == "[DONE]" =
+        pure SseStop
+    | otherwise =
+        case eitherDecodeStrict' payload of
+            Left err ->
+                throwError
+                    ( LlmExpectationError
+                        ( "Gemini stream event was not valid JSON: "
+                            <> err
+                        )
+                    )
+            Right eventValue -> do
+                protectStreamingInternalAction
+                    (RequestLoggerFailed . ("gemini: " <>))
+                    (requestLogger (NativeMsgIn eventValue))
+                emitGeminiStreamDelta streamCallbacks eventValue
+                pure $
+                    maybe
+                        SseContinue
+                        SseFinish
+                        (geminiTerminalInteraction eventValue)
+
+emitGeminiStreamDelta :: StreamCallbacks es -> Value -> Eff es ()
+emitGeminiStreamDelta StreamCallbacks{onAssistantTextDelta, onAssistantRefusalDelta} = \case
+    Object eventObject
+        | lookupText "event_type" eventObject == Just "content.delta"
+        , Just (Object deltaObject) <- KM.lookup "delta" eventObject ->
+            case lookupText "type" deltaObject of
+                Just "text"
+                    | Just deltaText <- lookupText "text" deltaObject ->
+                        onAssistantTextDelta deltaText
+                Just "refusal"
+                    | Just refusalText <- lookupText "refusal" deltaObject <|> lookupText "text" deltaObject ->
+                        onAssistantRefusalDelta refusalText
+                _ ->
+                    pure ()
+    _ ->
+        pure ()
+
+geminiTerminalInteraction :: Value -> Maybe Value
+geminiTerminalInteraction = \case
+    Object eventObject
+        | lookupText "event_type" eventObject == Just "interaction.complete" ->
+            KM.lookup "interaction" eventObject
+        | Just interactionValue@(Object interactionObject) <- KM.lookup "interaction" eventObject
+        , Just statusText <- lookupText "status" interactionObject
+        , any (== statusText) terminalStatuses ->
+            Just interactionValue
+    _ ->
+        Nothing
+  where
+    terminalStatuses :: [Text]
+    terminalStatuses =
+        [ "completed"
+        , "requires_action"
+        , "incomplete"
+        , "failed"
+        , "cancelled"
+        , "canceled"
+        , "expired"
+        ]
 
 buildGeminiRequestBody
     :: ( Error RakeError :> es
@@ -314,19 +438,16 @@ buildGeminiRequestBody
     -> SamplingOptions
     -> [HistoryItem]
     -> Eff es Value
-buildGeminiRequestBody GeminiChatSettings{model, providerTools, systemInstruction, generationConfig, requestLogger} tools responseFormat samplingOptions history = do
-    renderedHistory <- renderGeminiHistory requestLogger history
+buildGeminiRequestBody GeminiChatSettings{model, providerTools, systemInstruction, generationConfig, requestLogger = _requestLogger} tools responseFormat samplingOptions history = do
+    -- Gemini also gets one effective system instruction. We therefore collapse
+    -- GenericSystem to the latest snapshot for compatibility with the shared
+    -- portable semantics used across providers.
+    let (maybeSystemSnapshot, chronologicalHistory) = splitRenderableGeminiHistory history
+    renderedHistory <- renderGeminiHistory chronologicalHistory
+    renderedSystemInstruction <- traverse historyItemSystemInstruction maybeSystemSnapshot
     let RenderedGeminiHistory
-            { sawNonLeadingInstruction = hasNonLeadingInstruction
-            , renderedTurns = renderedTurnValues
+            { renderedTurns = renderedTurnValues
             } = renderedHistory
-    when
-        hasNonLeadingInstruction
-        ( requestLogger
-            ( NativeConversionNote
-                "Gemini moved non-leading system/developer messages into system_instruction"
-            )
-        )
     pure $
         object $
             [ "model" .= model
@@ -334,7 +455,7 @@ buildGeminiRequestBody GeminiChatSettings{model, providerTools, systemInstructio
             , "store" .= False
             ]
                 <> catMaybes
-                    [ ("system_instruction" .=) <$> combinedSystemInstruction systemInstruction renderedHistory
+                    [ ("system_instruction" .=) <$> combinedSystemInstruction systemInstruction renderedSystemInstruction
                     , if null allTools
                         then Nothing
                         else Just ("tools" .= allTools)
@@ -352,22 +473,20 @@ renderGeminiHistory
     :: ( Error RakeError :> es
        , RakeMediaStorage :> es
        )
-    => (NativeMsgFormat -> Eff es ())
-    -> [HistoryItem]
+    => [HistoryItem]
     -> Eff es RenderedGeminiHistory
-renderGeminiHistory requestLogger =
-    foldlM (renderGeminiHistoryItem requestLogger) initialRenderedGeminiHistory
+renderGeminiHistory =
+    foldlM renderGeminiHistoryItem initialRenderedGeminiHistory
 
 renderGeminiHistoryItem
     :: ( Error RakeError :> es
        , RakeMediaStorage :> es
        )
-    => (NativeMsgFormat -> Eff es ())
-    -> RenderedGeminiHistory
+    => RenderedGeminiHistory
     -> HistoryItem
     -> Eff es RenderedGeminiHistory
-renderGeminiHistoryItem requestLogger renderedHistory historyEntry =
-    renderGeminiCanonicalHistoryItem requestLogger renderedHistory historyEntry
+renderGeminiHistoryItem renderedHistory historyEntry =
+    renderGeminiCanonicalHistoryItem renderedHistory historyEntry
 
 appendGeminiTurn :: Text -> Value -> [Value] -> [Value]
 appendGeminiTurn role content = \case
@@ -398,10 +517,7 @@ turnValue role content =
         ]
 
 data RenderedGeminiHistory = RenderedGeminiHistory
-    { instructionBlocks :: [Text]
-    , sawConversationTurn :: Bool
-    , sawNonLeadingInstruction :: Bool
-    , renderedTurns :: [Value]
+    { renderedTurns :: [Value]
     , toolCallNames :: Map Text Text
     , openModelTurnHasFunctionCall :: Bool
     }
@@ -409,42 +525,32 @@ data RenderedGeminiHistory = RenderedGeminiHistory
 initialRenderedGeminiHistory :: RenderedGeminiHistory
 initialRenderedGeminiHistory =
     RenderedGeminiHistory
-        { instructionBlocks = []
-        , sawConversationTurn = False
-        , sawNonLeadingInstruction = False
-        , renderedTurns = []
+        { renderedTurns = []
         , toolCallNames = mempty
         , openModelTurnHasFunctionCall = False
         }
 
-combinedSystemInstruction :: Maybe Text -> RenderedGeminiHistory -> Maybe Text
-combinedSystemInstruction settingsInstruction RenderedGeminiHistory{instructionBlocks} =
+combinedSystemInstruction :: Maybe Text -> Maybe Text -> Maybe Text
+combinedSystemInstruction settingsInstruction historyInstruction =
     if null allBlocks
         then Nothing
         else Just (mconcat (intersperse "\n\n" allBlocks))
   where
-    allBlocks = catMaybes [settingsInstruction] <> instructionBlocks
+    allBlocks = catMaybes [settingsInstruction, historyInstruction]
 
 renderGeminiCanonicalHistoryItem
     :: ( Error RakeError :> es
        , RakeMediaStorage :> es
        )
-    => (NativeMsgFormat -> Eff es ())
-    -> RenderedGeminiHistory
+    => RenderedGeminiHistory
     -> HistoryItem
     -> Eff es RenderedGeminiHistory
-renderGeminiCanonicalHistoryItem _requestLogger renderedHistory HistoryItem
+renderGeminiCanonicalHistoryItem renderedHistory HistoryItem
     { itemLifecycle = lifecycle
     , genericItem = genericHistoryItem
     , providerItem = maybeProviderItem
     } =
     case genericHistoryItem of
-        GenericMessage{role = GenericSystem, parts} -> do
-            renderedText <- messagePartsToText parts
-            pure (appendGeminiInstruction GenericSystem renderedText renderedHistory)
-        GenericMessage{role = GenericDeveloper, parts} -> do
-            renderedText <- messagePartsToText parts
-            pure (appendGeminiInstruction GenericDeveloper renderedText renderedHistory)
         GenericMessage{role = GenericUser, parts} -> do
             renderedContentParts <- messagePartsToGeminiContentParts ProviderGeminiInteractions parts
             pure (appendGeminiTurnBlocks "user" renderedContentParts renderedHistory)
@@ -456,6 +562,8 @@ renderGeminiCanonicalHistoryItem _requestLogger renderedHistory HistoryItem
                     (annotatePendingAssistantContentParts lifecycle renderedContentParts)
                     renderedHistory
                 )
+        GenericMessage{role = GenericSystem} ->
+            pure renderedHistory
         GenericToolCall{toolCall = ToolCall{toolCallId = ToolCallId toolCallId, toolName, toolArgs, continuationAttachments}} ->
             let geminiContinuationPayloads =
                     [ continuationPayload
@@ -509,18 +617,10 @@ renderGeminiCanonicalHistoryItem _requestLogger renderedHistory HistoryItem
                     _ ->
                         renderedHistory
 
-appendGeminiInstruction :: GenericRole -> Text -> RenderedGeminiHistory -> RenderedGeminiHistory
-appendGeminiInstruction role text renderedHistory@RenderedGeminiHistory{instructionBlocks, sawConversationTurn, sawNonLeadingInstruction} =
-    renderedHistory
-        { instructionBlocks = instructionBlocks <> [instructionBlock role text]
-        , sawNonLeadingInstruction = sawNonLeadingInstruction || sawConversationTurn
-        }
-
 appendGeminiTurnBlock :: Text -> Value -> RenderedGeminiHistory -> RenderedGeminiHistory
 appendGeminiTurnBlock role content renderedHistory@RenderedGeminiHistory{renderedTurns, openModelTurnHasFunctionCall} =
     renderedHistory
-        { sawConversationTurn = True
-        , renderedTurns = appendGeminiTurn role content renderedTurns
+        { renderedTurns = appendGeminiTurn role content renderedTurns
         , openModelTurnHasFunctionCall =
             case role of
                 "model" ->
@@ -581,23 +681,34 @@ renderedTurnRole turnObject =
         _ ->
             Nothing
 
-instructionBlock :: GenericRole -> Text -> Text
-instructionBlock role content =
-    roleLabel role <> ":\n" <> content
-  where
-    roleLabel = \case
-        GenericSystem ->
-            "System"
-        GenericDeveloper ->
-            "Developer"
-        GenericUser ->
-            "User"
-        GenericAssistant ->
-            "Assistant"
-
 appendGeminiTurnBlocks :: Text -> [Value] -> RenderedGeminiHistory -> RenderedGeminiHistory
 appendGeminiTurnBlocks role contentParts history =
     foldl' (\accumulatedHistory content -> appendGeminiTurnBlock role content accumulatedHistory) history contentParts
+
+splitRenderableGeminiHistory :: [HistoryItem] -> (Maybe HistoryItem, [HistoryItem])
+splitRenderableGeminiHistory history =
+    ( latestGeminiSystemSnapshot history
+    , filter (not . isGeminiSystemHistoryItem) history
+    )
+
+latestGeminiSystemSnapshot :: [HistoryItem] -> Maybe HistoryItem
+latestGeminiSystemSnapshot =
+    viaNonEmpty last . filter isGeminiSystemHistoryItem
+
+isGeminiSystemHistoryItem :: HistoryItem -> Bool
+isGeminiSystemHistoryItem HistoryItem{genericItem = GenericMessage{role = GenericSystem}} =
+    True
+isGeminiSystemHistoryItem _ =
+    False
+
+historyItemSystemInstruction
+    :: Error RakeError :> es
+    => HistoryItem
+    -> Eff es Text
+historyItemSystemInstruction HistoryItem{genericItem = GenericMessage{role = GenericSystem, parts}} =
+    messagePartsToText parts
+historyItemSystemInstruction _ =
+    throwError (LlmExpectationError "Gemini system instruction can only be rendered from a system message")
 
 messagePartsToText
     :: Error RakeError :> es

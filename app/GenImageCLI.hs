@@ -3,7 +3,7 @@ module GenImageCLI
     , GenImageHelpTopic (..)
     , CommonGenImageOptions (..)
     , OpenAIGenImageOptions (..)
-    , GrokGenImageOptions (..)
+    , XAIGenImageOptions (..)
     , Banana2GenImageOptions (..)
     , GenImageOptions (..)
     , ParseGenImageArgsResult (..)
@@ -31,14 +31,14 @@ import System.IO qualified as IO
 
 data GenImageProvider
     = GenImageProviderOpenAI
-    | GenImageProviderGrok
+    | GenImageProviderXAI
     | GenImageProviderBanana2
     deriving stock (Show, Eq)
 
 data GenImageHelpTopic
     = GenImageHelpGeneral
     | GenImageHelpOpenAI
-    | GenImageHelpGrok
+    | GenImageHelpXAI
     | GenImageHelpBanana2
     deriving stock (Show, Eq)
 
@@ -67,13 +67,13 @@ data OpenAIGenImageOptions = OpenAIGenImageOptions
     }
     deriving stock (Show, Eq)
 
-data GrokGenImageOptions = GrokGenImageOptions
-    { grokCommonOptions :: CommonGenImageOptions
-    , grokModel :: Text
-    , grokInputImageSources :: [Text]
-    , grokAspectRatio :: Maybe Text
-    , grokResolution :: Maybe Text
-    , grokResponseFormat :: Text
+data XAIGenImageOptions = XAIGenImageOptions
+    { xaiCommonOptions :: CommonGenImageOptions
+    , xaiModel :: Text
+    , xaiInputImageSources :: [Text]
+    , xaiAspectRatio :: Maybe Text
+    , xaiResolution :: Maybe Text
+    , xaiResponseFormat :: Text
     }
     deriving stock (Show, Eq)
 
@@ -88,7 +88,7 @@ data Banana2GenImageOptions = Banana2GenImageOptions
 
 data GenImageOptions
     = GenImageOpenAI OpenAIGenImageOptions
-    | GenImageGrok GrokGenImageOptions
+    | GenImageXAI XAIGenImageOptions
     | GenImageBanana2 Banana2GenImageOptions
     deriving stock (Show, Eq)
 
@@ -136,20 +136,20 @@ defaultOpenAIGenImageOptions =
         , openAIInputFidelity = Nothing
         }
 
-defaultGrokGenImageOptions :: GrokGenImageOptions
-defaultGrokGenImageOptions =
-    GrokGenImageOptions
-        { grokCommonOptions =
+defaultXAIGenImageOptions :: XAIGenImageOptions
+defaultXAIGenImageOptions =
+    XAIGenImageOptions
+        { xaiCommonOptions =
             CommonGenImageOptions
                 { commonPromptText = ""
                 , commonOutputPath = Nothing
                 , commonImageCount = 1
                 }
-        , grokModel = "grok-imagine-image"
-        , grokInputImageSources = []
-        , grokAspectRatio = Nothing
-        , grokResolution = Nothing
-        , grokResponseFormat = "b64_json"
+        , xaiModel = "grok-imagine-image"
+        , xaiInputImageSources = []
+        , xaiAspectRatio = Nothing
+        , xaiResolution = Nothing
+        , xaiResponseFormat = "b64_json"
         }
 
 defaultBanana2GenImageOptions :: Banana2GenImageOptions
@@ -245,20 +245,20 @@ runGenImage = \case
                                                 }
                                     responseResult <- runProvider (generateOpenAIImage settings request)
                                     handleImageResponse commonOutputPath commonPromptText responseResult
-    GenImageGrok GrokGenImageOptions
-        { grokCommonOptions = CommonGenImageOptions{commonPromptText, commonOutputPath, commonImageCount}
-        , grokModel
-        , grokInputImageSources
-        , grokAspectRatio
-        , grokResolution
-        , grokResponseFormat
+    GenImageXAI XAIGenImageOptions
+        { xaiCommonOptions = CommonGenImageOptions{commonPromptText, commonOutputPath, commonImageCount}
+        , xaiModel
+        , xaiInputImageSources
+        , xaiAspectRatio
+        , xaiResolution
+        , xaiResponseFormat
         } -> do
             maybeApiKey <- lookupEnv "XAI_API_KEY"
             case maybeApiKey of
                 Nothing ->
-                    pure (Left "XAI_API_KEY is required for imagine image generation")
+                    pure (Left "XAI_API_KEY is required for xai image generation")
                 Just apiKey -> do
-                    resolvedInputImages <- traverse resolveMediaSource grokInputImageSources
+                    resolvedInputImages <- traverse resolveMediaSource xaiInputImageSources
                     case sequence resolvedInputImages of
                         Left err ->
                             pure (Left err)
@@ -267,13 +267,13 @@ runGenImage = \case
                                 request :: XAIImagineImageRequest
                                 request =
                                     XAIImagineImageRequest
-                                        { model = grokModel
+                                        { model = xaiModel
                                         , prompt = commonPromptText
                                         , inputImages = imageUrls
                                         , n = Just commonImageCount
-                                        , aspectRatio = grokAspectRatio
-                                        , resolution = grokResolution
-                                        , responseFormat = Just grokResponseFormat
+                                        , aspectRatio = xaiAspectRatio
+                                        , resolution = xaiResolution
+                                        , responseFormat = Just xaiResponseFormat
                                         }
                             responseResult <- runProvider (generateXAIImage settings request)
                             handleImageResponse commonOutputPath commonPromptText responseResult
@@ -330,19 +330,19 @@ runGenImage = \case
 parseGenImageArgs :: [Text] -> ParseGenImageArgsResult
 parseGenImageArgs = \case
     [] ->
-        ParseGenImageArgsError "A model is required. Use `gptimage`, `imagine`, or `banana2`." GenImageHelpGeneral
+        ParseGenImageArgsError "A model is required. Use `gptimage`, `xai`, or `banana2`." GenImageHelpGeneral
     "--help" : _ ->
         ParseGenImageArgsHelp GenImageHelpGeneral
     providerArg : rest ->
         case parseProvider providerArg of
             Nothing ->
                 ParseGenImageArgsError
-                    ("Unknown model: " <> providerArg <> ". Use `gptimage`, `imagine`, or `banana2`.")
+                    ("Unknown model: " <> providerArg <> ". Use `gptimage`, `xai`, or `banana2`.")
                     GenImageHelpGeneral
             Just GenImageProviderOpenAI ->
                 parseOpenAIArgs rest
-            Just GenImageProviderGrok ->
-                parseGrokArgs rest
+            Just GenImageProviderXAI ->
+                parseXAIArgs rest
             Just GenImageProviderBanana2 ->
                 parseBanana2Args rest
 
@@ -350,8 +350,8 @@ parseProvider :: Text -> Maybe GenImageProvider
 parseProvider = \case
     "gptimage" ->
         Just GenImageProviderOpenAI
-    "imagine" ->
-        Just GenImageProviderGrok
+    "xai" ->
+        Just GenImageProviderXAI
     "banana2" ->
         Just GenImageProviderBanana2
     _ ->
@@ -477,77 +477,77 @@ parseOpenAIArgs =
                                 }
                         }
 
-parseGrokArgs :: [Text] -> ParseGenImageArgsResult
-parseGrokArgs =
-    go defaultCommonParseState defaultGrokGenImageOptions
+parseXAIArgs :: [Text] -> ParseGenImageArgsResult
+parseXAIArgs =
+    go defaultCommonParseState defaultXAIGenImageOptions
   where
-    go commonState grokOptions = \case
+    go commonState xaiOptions = \case
         [] ->
-            finalize commonState grokOptions
+            finalize commonState xaiOptions
         "--help" : _ ->
-            ParseGenImageArgsHelp GenImageHelpGrok
+            ParseGenImageArgsHelp GenImageHelpXAI
         "--" : rest ->
             finalize
                 (appendPromptParts commonState rest)
-                grokOptions
+                xaiOptions
         "--output" : path : rest ->
-            go commonState{parseOutputPath = Just (toString path)} grokOptions rest
+            go commonState{parseOutputPath = Just (toString path)} xaiOptions rest
         "-o" : path : rest ->
-            go commonState{parseOutputPath = Just (toString path)} grokOptions rest
+            go commonState{parseOutputPath = Just (toString path)} xaiOptions rest
         "--count" : rawCount : rest ->
             case parsePositiveIntOption "--count" rawCount of
                 Left err ->
-                    ParseGenImageArgsError err GenImageHelpGrok
+                    ParseGenImageArgsError err GenImageHelpXAI
                 Right imageCount ->
-                    go commonState{parseImageCount = imageCount} grokOptions rest
+                    go commonState{parseImageCount = imageCount} xaiOptions rest
         "-n" : rawCount : rest ->
             case parsePositiveIntOption "--count" rawCount of
                 Left err ->
-                    ParseGenImageArgsError err GenImageHelpGrok
+                    ParseGenImageArgsError err GenImageHelpXAI
                 Right imageCount ->
-                    go commonState{parseImageCount = imageCount} grokOptions rest
+                    go commonState{parseImageCount = imageCount} xaiOptions rest
         "--model" : modelName : rest ->
-            go commonState grokOptions{grokModel = modelName} rest
+            go commonState xaiOptions{xaiModel = modelName} rest
         "--image" : imageSource : rest ->
-            go commonState (appendGrokInputImageSource grokOptions imageSource) rest
+            go commonState (appendXAIInputImageSource xaiOptions imageSource) rest
         "--aspect-ratio" : aspectRatioValue : rest ->
-            go commonState grokOptions{grokAspectRatio = Just aspectRatioValue} rest
+            go commonState xaiOptions{xaiAspectRatio = Just aspectRatioValue} rest
         "--resolution" : resolutionValue : rest ->
-            go commonState grokOptions{grokResolution = Just resolutionValue} rest
+            go commonState xaiOptions{xaiResolution = Just resolutionValue} rest
         "--response-format" : responseFormatValue : rest ->
-            go commonState grokOptions{grokResponseFormat = responseFormatValue} rest
+            go commonState xaiOptions{xaiResponseFormat = responseFormatValue} rest
         arg : rest
             | Just path <- T.stripPrefix "--output=" arg ->
-                go commonState{parseOutputPath = Just (toString path)} grokOptions rest
+                go commonState{parseOutputPath = Just (toString path)} xaiOptions rest
             | Just rawCount <- T.stripPrefix "--count=" arg ->
                 case parsePositiveIntOption "--count" rawCount of
                     Left err ->
-                        ParseGenImageArgsError err GenImageHelpGrok
+                        ParseGenImageArgsError err GenImageHelpXAI
                     Right imageCount ->
-                        go commonState{parseImageCount = imageCount} grokOptions rest
+                        go commonState{parseImageCount = imageCount} xaiOptions rest
             | Just modelName <- T.stripPrefix "--model=" arg ->
-                go commonState grokOptions{grokModel = modelName} rest
+                go commonState xaiOptions{xaiModel = modelName} rest
             | Just imageSource <- T.stripPrefix "--image=" arg ->
-                go commonState (appendGrokInputImageSource grokOptions imageSource) rest
+                go commonState (appendXAIInputImageSource xaiOptions imageSource) rest
             | Just aspectRatioValue <- T.stripPrefix "--aspect-ratio=" arg ->
-                go commonState grokOptions{grokAspectRatio = Just aspectRatioValue} rest
+                go commonState xaiOptions{xaiAspectRatio = Just aspectRatioValue} rest
             | Just resolutionValue <- T.stripPrefix "--resolution=" arg ->
-                go commonState grokOptions{grokResolution = Just resolutionValue} rest
+                go commonState xaiOptions{xaiResolution = Just resolutionValue} rest
             | Just responseFormatValue <- T.stripPrefix "--response-format=" arg ->
-                go commonState grokOptions{grokResponseFormat = responseFormatValue} rest
+                go commonState xaiOptions{xaiResponseFormat = responseFormatValue} rest
             | "-" `T.isPrefixOf` arg ->
-                ParseGenImageArgsError ("Unknown imagine option: " <> arg) GenImageHelpGrok
+                ParseGenImageArgsError ("Unknown xai option: " <> arg) GenImageHelpXAI
             | otherwise ->
-                go (appendPromptParts commonState [arg]) grokOptions rest
+                go (appendPromptParts commonState [arg]) xaiOptions rest
 
-    finalize CommonParseState{parseOutputPath, parseImageCount, parsePromptParts} grokOptions
+    finalize CommonParseState{parseOutputPath, parseImageCount, parsePromptParts} xaiOptions
         | null parsePromptParts =
-            ParseGenImageArgsError "A prompt is required." GenImageHelpGrok
+            ParseGenImageArgsError "A prompt is required." GenImageHelpXAI
         | otherwise =
             ParseGenImageArgsSuccess $
-                GenImageGrok
-                    grokOptions
-                        { grokCommonOptions =
+                GenImageXAI
+                    xaiOptions
+                        { xaiCommonOptions =
                             CommonGenImageOptions
                                 { commonPromptText = T.unwords parsePromptParts
                                 , commonOutputPath = parseOutputPath
@@ -651,9 +651,9 @@ appendOpenAIInputFileId :: OpenAIGenImageOptions -> Text -> OpenAIGenImageOption
 appendOpenAIInputFileId options@OpenAIGenImageOptions{openAIInputFileIds} fileId =
     options{openAIInputFileIds = openAIInputFileIds <> [fileId]}
 
-appendGrokInputImageSource :: GrokGenImageOptions -> Text -> GrokGenImageOptions
-appendGrokInputImageSource options@GrokGenImageOptions{grokInputImageSources} imageSource =
-    options{grokInputImageSources = grokInputImageSources <> [imageSource]}
+appendXAIInputImageSource :: XAIGenImageOptions -> Text -> XAIGenImageOptions
+appendXAIInputImageSource options@XAIGenImageOptions{xaiInputImageSources} imageSource =
+    options{xaiInputImageSources = xaiInputImageSources <> [imageSource]}
 
 appendBanana2InputImageSource :: Banana2GenImageOptions -> Text -> Banana2GenImageOptions
 appendBanana2InputImageSource options@Banana2GenImageOptions{banana2InputImageSources} imageSource =
@@ -669,12 +669,12 @@ renderGenImageHelp progName = \case
         T.unlines $
             [ "Usage:"
             , "  " <> toText progName <> " gptimage [OPTIONS] PROMPT"
-            , "  " <> toText progName <> " imagine [OPTIONS] PROMPT"
+            , "  " <> toText progName <> " xai [OPTIONS] PROMPT"
             , "  " <> toText progName <> " banana2 [OPTIONS] PROMPT"
             , ""
             , "Commands:"
             , "  gptimage  Generate images with OpenAI. Default model: gpt-image-1.5"
-            , "  imagine   Generate images with xAI Grok Imagine. Default model: grok-imagine-image"
+            , "  xai       Generate images with xAI Grok Imagine. Default model: grok-imagine-image"
             , "  banana2   Generate images with Gemini Nano Banana 2. Default model: gemini-2.5-flash-image"
             , ""
             , "Common options:"
@@ -686,10 +686,10 @@ renderGenImageHelp progName = \case
                 <> countOptionLines
                 <> openAIOptionLines
                 <> [ ""
-                   , "imagine options:"
+                   , "xai options:"
                    ]
                 <> countOptionLines
-                <> grokOptionLines
+                <> xaiOptionLines
                 <> [ ""
                    , "banana2 options:"
                    ]
@@ -697,13 +697,13 @@ renderGenImageHelp progName = \case
                 <> [ ""
                    , "Notes:"
                    , "  SOURCE can be a URL, a data URL, or a local image path."
-                   , "  Use `" <> toText progName <> " gptimage --help`, `" <> toText progName <> " imagine --help`, or `" <> toText progName <> " banana2 --help` for focused help."
+                   , "  Use `" <> toText progName <> " gptimage --help`, `" <> toText progName <> " xai --help`, or `" <> toText progName <> " banana2 --help` for focused help."
                    , "  OPENAI_API_KEY is required for `gptimage`."
-                   , "  XAI_API_KEY is required for `imagine`."
+                   , "  XAI_API_KEY is required for `xai`."
                    , "  GEMINI_API_KEY is required for `banana2`."
                    , ""
                    , "Examples:"
-                   , "  " <> toText progName <> " imagine \"a man riding a horse on the moon\""
+                   , "  " <> toText progName <> " xai \"a man riding a horse on the moon\""
                    , "  " <> toText progName <> " gptimage --size=1536x1024 --quality=high \"a glass terrarium city\""
                    , "  " <> toText progName <> " banana2 --aspect-ratio=1:1 \"a tiny blue square on white background\""
                    ]
@@ -733,10 +733,10 @@ renderGenImageHelp progName = \case
                    , "  " <> toText progName <> " gptimage --size=1536x1024 --quality=high \"a brutalist library in fog\""
                    , "  " <> toText progName <> " gptimage --image=base.png --mask=mask.png \"add a moon\""
                    ]
-    GenImageHelpGrok ->
+    GenImageHelpXAI ->
         T.unlines $
             [ "Usage:"
-            , "  " <> toText progName <> " imagine [OPTIONS] PROMPT"
+            , "  " <> toText progName <> " xai [OPTIONS] PROMPT"
             , ""
             , "Default model: grok-imagine-image"
             , ""
@@ -744,19 +744,19 @@ renderGenImageHelp progName = \case
             ]
                 <> baseCommonOptionLines
                 <> [ ""
-                   , "imagine options:"
+                   , "xai options:"
                    ]
                 <> countOptionLines
-                <> grokOptionLines
+                <> xaiOptionLines
                 <> [ ""
                    , "Notes:"
                    , "  SOURCE can be a URL, a data URL, or a local image path."
                    , "  XAI_API_KEY is required."
                    , ""
                    , "Examples:"
-                   , "  " <> toText progName <> " imagine \"a man riding a horse on the moon\""
-                   , "  " <> toText progName <> " imagine --aspect-ratio=16:9 --resolution=2k \"a floating city at sunrise\""
-                   , "  " <> toText progName <> " imagine --image=base.png \"turn this into a watercolor postcard\""
+                   , "  " <> toText progName <> " xai \"a man riding a horse on the moon\""
+                   , "  " <> toText progName <> " xai --aspect-ratio=16:9 --resolution=2k \"a floating city at sunrise\""
+                   , "  " <> toText progName <> " xai --image=base.png \"turn this into a watercolor postcard\""
                    ]
     GenImageHelpBanana2 ->
         T.unlines $
@@ -808,8 +808,8 @@ renderGenImageHelp progName = \case
         , "  --input-fidelity LEVEL       Fidelity mode for edit inputs."
         ]
 
-    grokOptionLines =
-        [ "  --model MODEL                Override the Grok image model."
+    xaiOptionLines =
+        [ "  --model MODEL                Override the xAI image model."
         , "  --image SOURCE               Repeatable. Add input image URLs or local files."
         , "  --aspect-ratio RATIO         Aspect ratio, for example 16:9."
         , "  --resolution RESOLUTION      Resolution hint, for example 2k."

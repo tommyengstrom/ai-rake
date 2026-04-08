@@ -9,11 +9,12 @@ import Control.Concurrent (threadDelay)
 import Data.Aeson
 import Effectful
 import Effectful.Error.Static
+import Network.HTTP.Client (managerResponseTimeout, responseTimeoutMicro)
+import Network.HTTP.Client.TLS (newTlsManagerWith, tlsManagerSettings)
+import Network.HTTP.Types.Status (statusCode)
 import Rake.Effect
 import Rake.Media
 import Rake.Providers.XAI.Imagine.Types
-import Network.HTTP.Client (managerResponseTimeout, responseTimeoutMicro)
-import Network.HTTP.Client.TLS (newTlsManagerWith, tlsManagerSettings)
 import Relude
 import Servant.API (Capture, Get, Header, JSON, Post, ReqBody)
 import Servant.API qualified as Servant
@@ -168,11 +169,25 @@ runVideoStatusRequest
     -> Value
     -> Text
     -> Eff es Value
-runVideoStatusRequest settings@XAIImagineSettings{apiKey} requestEnvelope requestId = do
+runVideoStatusRequest settings@XAIImagineSettings{apiKey, requestLogger} requestEnvelope requestId = do
     let _ Servant.:<|> (_ Servant.:<|> _ Servant.:<|> getVideoStatus) = client xaiImagineApi
         clientCall =
             getVideoStatus requestId (Just ("Bearer " <> apiKey))
-    runClientCall settings requestEnvelope clientCall
+    runClientCallResult settings requestEnvelope clientCall >>= \case
+        Left err@(FailureResponse _ response)
+            | statusCode (responseStatusCode response) == 202
+            , Just responseValue <- decode (responseBody response) -> do
+                requestLogger (NativeMsgIn responseValue)
+                pure responseValue
+            | otherwise -> do
+                requestLogger (NativeRequestFailure err)
+                throwError (LlmClientError err)
+        Left err -> do
+            requestLogger (NativeRequestFailure err)
+            throwError (LlmClientError err)
+        Right responseValue -> do
+            requestLogger (NativeMsgIn responseValue)
+            pure responseValue
 
 runClientCall
     :: forall es
@@ -183,19 +198,31 @@ runClientCall
     -> Value
     -> ClientM Value
     -> Eff es Value
-runClientCall XAIImagineSettings{apiKey = _, baseUrl, requestLogger, pollIntervalMilliseconds = _, maxPollAttempts = _} requestEnvelope clientCall = do
-    manager <- liftIO $ newTlsManagerWith tlsManagerSettings{managerResponseTimeout = responseTimeoutMicro 180_000_000}
-    parsedBaseUrl <- either (throwError . invalidBaseUrl) pure $ parseBaseUrl (toString baseUrl)
-    let clientEnv = mkClientEnv manager parsedBaseUrl
-
-    requestLogger (NativeMsgOut requestEnvelope)
-    liftIO (runClientM clientCall clientEnv) >>= \case
+runClientCall settings@XAIImagineSettings{requestLogger} requestEnvelope clientCall =
+    runClientCallResult settings requestEnvelope clientCall >>= \case
         Left err -> do
             requestLogger (NativeRequestFailure err)
             throwError (LlmClientError err)
         Right responseValue -> do
             requestLogger (NativeMsgIn responseValue)
             pure responseValue
+
+runClientCallResult
+    :: forall es
+     . ( IOE :> es
+       , Error RakeError :> es
+       )
+    => XAIImagineSettings es
+    -> Value
+    -> ClientM Value
+    -> Eff es (Either ClientError Value)
+runClientCallResult XAIImagineSettings{apiKey = _, baseUrl, requestLogger, pollIntervalMilliseconds = _, maxPollAttempts = _} requestEnvelope clientCall = do
+    manager <- liftIO $ newTlsManagerWith tlsManagerSettings{managerResponseTimeout = responseTimeoutMicro 180_000_000}
+    parsedBaseUrl <- either (throwError . invalidBaseUrl) pure $ parseBaseUrl (toString baseUrl)
+    let clientEnv = mkClientEnv manager parsedBaseUrl
+
+    requestLogger (NativeMsgOut requestEnvelope)
+    liftIO (runClientM clientCall clientEnv)
   where
     invalidBaseUrl err =
         LlmExpectationError ("Invalid base URL: " <> show err)
@@ -220,6 +247,8 @@ isTerminalStatus = \case
     XAIVideoDone ->
         True
     XAIVideoExpired ->
+        True
+    XAIVideoFailed ->
         True
     XAIVideoPending ->
         False

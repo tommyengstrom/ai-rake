@@ -161,6 +161,34 @@ spec = describe "Rake.Replay" $ do
             latestValidCheckpoint history `shouldBe` Just (ResetToItem (itemIdOf start))
             resetToLatestValidCheckpoint history `shouldBe` Just (resetTo (itemIdOf start))
 
+    describe "system snapshots" $ do
+        it "uses the latest replayed system snapshot and drops all system messages from chronology" $ do
+            let history =
+                    [ system "old system"
+                    , user "hello"
+                    , system "new system"
+                    , assistantText "done"
+                    ]
+                (maybeSystemSnapshot, chronology) = renderableReplayHistory history
+
+            effectiveSystemSnapshot history `shouldBe` Just (system "new system")
+            maybeSystemSnapshot `shouldBe` Just (system "new system")
+            chronology `shouldBe` [user "hello", assistantText "done"]
+
+        it "takes the latest system snapshot from the active replay branch after resets" $ do
+            let staleSystem = withHistoryId 1 (system "stale system")
+                freshSystem = withHistoryId 2 (system "fresh system")
+                history =
+                    [ staleSystem
+                    , user "before reset"
+                    , resetToStart
+                    , freshSystem
+                    , user "after reset"
+                    ]
+
+            effectiveSystemSnapshot history `shouldBe` Just freshSystem
+            snd (renderableReplayHistory history) `shouldBe` [user "after reset"]
+
     describe "reset checkpoints" $ do
         it "reports the stable active prefixes and the latest reset point" $ do
             let start = withHistoryId 1 (user "start")

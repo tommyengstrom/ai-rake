@@ -341,7 +341,7 @@ roleTextToGenericRole = \case
     "system" ->
         Just GenericSystem
     "developer" ->
-        Just GenericDeveloper
+        Just GenericSystem
     "user" ->
         Just GenericUser
     "assistant" ->

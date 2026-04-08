@@ -51,6 +51,8 @@ module Rake.Types
     , ChatPauseReason (..)
     , ChatFailureReason (..)
     , ChatOutcome (..)
+    , StreamCallbacks (..)
+    , defaultStreamCallbacks
     , SamplingOptions (..)
     , defaultSamplingOptions
     , ChatConfig (..)
@@ -58,9 +60,6 @@ module Rake.Types
     , system
     , systemText
     , systemParts
-    , developer
-    , developerText
-    , developerParts
     , user
     , userText
     , userParts
@@ -232,8 +231,7 @@ filePart :: MediaBlobId -> Maybe Text -> Maybe Text -> MessagePart
 filePart = PartFile
 
 data GenericRole
-    = GenericSystem
-    | GenericDeveloper
+    = GenericSystem -- ^ Only the latest system message is sent as the effective leading instruction for provider compatibility.
     | GenericUser
     | GenericAssistant
     deriving stock (Show, Eq, Generic)
@@ -403,6 +401,18 @@ data ChatOutcome
         }
     deriving stock (Show, Eq, Generic)
 
+data StreamCallbacks es = StreamCallbacks
+    { onAssistantTextDelta :: Text -> Eff es ()
+    , onAssistantRefusalDelta :: Text -> Eff es ()
+    }
+
+defaultStreamCallbacks :: StreamCallbacks es
+defaultStreamCallbacks =
+    StreamCallbacks
+        { onAssistantTextDelta = \_ -> pure ()
+        , onAssistantRefusalDelta = \_ -> pure ()
+        }
+
 data SamplingOptions = SamplingOptions
     { temperature :: Maybe Double
     , topP :: Maybe Double
@@ -442,15 +452,6 @@ systemText content = systemParts [textPart content]
 
 systemParts :: [MessagePart] -> HistoryItem
 systemParts = localMessage GenericSystem
-
-developer :: Text -> HistoryItem
-developer = developerText
-
-developerText :: Text -> HistoryItem
-developerText content = developerParts [textPart content]
-
-developerParts :: [MessagePart] -> HistoryItem
-developerParts = localMessage GenericDeveloper
 
 user :: Text -> HistoryItem
 user = userText

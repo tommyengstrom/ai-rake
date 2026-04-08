@@ -1,5 +1,6 @@
 module GenCliSupport
-    ( buildOutputPaths
+    ( audioExtensionFromMimeType
+    , buildOutputPaths
     , downloadBinary
     , resolveInlineImageSource
     , resolveMediaSource
@@ -131,6 +132,29 @@ urlExtension sourceUrl =
             Nothing
         ext ->
             Just ext
+
+audioExtensionFromMimeType :: Text -> Maybe String
+audioExtensionFromMimeType = \case
+    "audio/mpeg" ->
+        Just ".mp3"
+    "audio/mp3" ->
+        Just ".mp3"
+    "audio/opus" ->
+        Just ".opus"
+    "audio/aac" ->
+        Just ".aac"
+    "audio/flac" ->
+        Just ".flac"
+    "audio/wav" ->
+        Just ".wav"
+    "audio/x-wav" ->
+        Just ".wav"
+    "audio/pcm" ->
+        Just ".pcm"
+    "audio/basic" ->
+        Nothing
+    _ ->
+        Nothing
 
 isRemoteOrDataSource :: Text -> Bool
 isRemoteOrDataSource source =

@@ -10,13 +10,17 @@ import Data.Text.IO qualified as TIO
 import Effectful
 import Effectful.Error.Static
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
+import Network.HTTP.Types.Status (accepted202)
+import Network.HTTP.Types.Version (http11)
 import Rake
 import Rake.MediaStorage.InMemory
 import Rake.Providers.Gemini.Chat
 import Rake.Providers.OpenAI.Chat
 import Rake.Providers.XAI.Chat
+import Rake.Providers.XAI.Imagine
 import Relude
-import Servant.Client (ClientError (ConnectionError))
+import Servant.Client (BaseUrl (..), ClientError (..), ResponseF (..), Scheme (..))
+import Servant.Client.Core.Request (RequestF (..))
 import System.Directory (removeFile)
 import System.IO qualified as IO
 import Test.Hspec
@@ -155,6 +159,35 @@ spec = describe "Responses request rendering" $ do
                     [openAiNativeItem nativeResponsesAssistantPayload]
 
             lookupPath ["input"] requestBody `shouldBe` Just (toJSON ([projectedAssistantMessage] :: [Value]))
+
+        it "projects native developer messages into the effective system snapshot" $ do
+            let nativeDeveloperPayload =
+                    object
+                        [ "role" .= ("developer" :: Text)
+                        , "content" .= ("authoritative state" :: Text)
+                        ]
+            requestBody <-
+                captureXAIRequestBody
+                    defaultChatConfig
+                    [ openAiNativeItem nativeDeveloperPayload
+                    , user "hello"
+                    ]
+
+            lookupPath ["input"] requestBody
+                `shouldBe` Just
+                    ( toJSON
+                        ( [ object
+                                [ "role" .= ("system" :: Text)
+                                , "content" .= ("authoritative state" :: Text)
+                                ]
+                          , object
+                                [ "role" .= ("user" :: Text)
+                                , "content" .= ("hello" :: Text)
+                                ]
+                          ]
+                            :: [Value]
+                        )
+                    )
 
         it "replays completed OpenAI non-portable items verbatim for later OpenAI requests" $ do
             requestBody <-
@@ -684,13 +717,96 @@ spec = describe "Responses request rendering" $ do
             lookupPath ["system_instruction"] requestBody `shouldBe` Just (String sharedGeminiSystemInstruction)
             lookupPath ["input"] requestBody `shouldBe` Just (toJSON sharedGeminiHistoryRequest)
 
-        it "warns when Gemini must move non-leading instructions into system_instruction" $ do
-            (_requestBody, notes) <-
+        it "renders only the latest system snapshot for OpenAI requests" $ do
+            requestBody <-
+                captureOpenAIRequestBody
+                    defaultChatConfig
+                    [ system "old system snapshot"
+                    , user "hello"
+                    , assistantText "working"
+                    , system "new system snapshot"
+                    ]
+
+            lookupPath ["input"] requestBody
+                `shouldBe` Just
+                    ( toJSON
+                        ( [ object
+                                [ "role" .= ("system" :: Text)
+                                , "content" .= ("new system snapshot" :: Text)
+                                ]
+                          , object
+                                [ "role" .= ("user" :: Text)
+                                , "content" .= ("hello" :: Text)
+                                ]
+                          , object
+                                [ "role" .= ("assistant" :: Text)
+                                , "content" .= ("working" :: Text)
+                                ]
+                          ]
+                            :: [Value]
+                        )
+                    )
+            countSystemRoleMessages requestBody `shouldBe` Just 1
+
+        it "renders only the latest system snapshot for xAI requests" $ do
+            requestBody <-
+                captureXAIRequestBody
+                    defaultChatConfig
+                    [ system "old system snapshot"
+                    , user "hello"
+                    , assistantText "working"
+                    , system "new system snapshot"
+                    ]
+
+            lookupPath ["input"] requestBody
+                `shouldBe` Just
+                    ( toJSON
+                        ( [ object
+                                [ "role" .= ("system" :: Text)
+                                , "content" .= ("new system snapshot" :: Text)
+                                ]
+                          , object
+                                [ "role" .= ("user" :: Text)
+                                , "content" .= ("hello" :: Text)
+                                ]
+                          , object
+                                [ "role" .= ("assistant" :: Text)
+                                , "content" .= ("working" :: Text)
+                                ]
+                          ]
+                            :: [Value]
+                        )
+                    )
+
+        it "renders only the latest system snapshot for Gemini requests" $ do
+            (requestBody, notes) <-
                 captureGeminiRender
                     defaultChatConfig
-                    [user "hello", system "late system message"]
+                    [ system "old system snapshot"
+                    , user "hello"
+                    , system "new system snapshot"
+                    ]
 
-            notes `shouldBe` ["Gemini moved non-leading system/developer messages into system_instruction"]
+            notes `shouldBe` []
+            lookupPath ["system_instruction"] requestBody `shouldBe` Just (String "new system snapshot")
+            lookupPath ["input"] requestBody
+                `shouldBe` Just
+                    ( toJSON
+                        ( [ object
+                                [ "role" .= ("user" :: Text)
+                                , "content"
+                                    .= ( [ object
+                                                [ "type" .= ("text" :: Text)
+                                                , "text" .= ("hello" :: Text)
+                                                ]
+                                           ]
+                                            :: [Value]
+                                       )
+                                ]
+                          ]
+                            :: [Value]
+                        )
+                    )
 
         it "renders JSON tool results as JSON text for completed tool exchanges" $ do
             requestBody <-
@@ -1377,7 +1493,7 @@ spec = describe "Responses request rendering" $ do
                         logger (NativeRequestFailure (ConnectionError (toException (ErrorCall "boom"))))
 
             output `shouldSatisfy` T.isInfixOf "[ai-rake:openai.chat] Dropped unsupported item"
-            output `shouldSatisfy` T.isInfixOf "[ai-rake:openai.chat] Provider request failed:"
+            output `shouldSatisfy` T.isInfixOf "[ai-rake:openai.chat] Provider connection failed:"
 
         it "warns on xAI conversion notes" $ do
             output <-
@@ -1389,6 +1505,18 @@ spec = describe "Responses request rendering" $ do
                         logger (NativeConversionNote "Dropped unsupported item")
 
             output `shouldSatisfy` T.isInfixOf "[ai-rake:xai.chat] Dropped unsupported item"
+
+        it "renders xAI Imagine request failures tersely" $ do
+            output <-
+                captureStderrText do
+                    let settings :: XAIImagineSettings '[IOE]
+                        settings = defaultXAIImagineSettings "test-api-key"
+                        XAIImagineSettings{requestLogger = logger} = settings
+                    runEff $
+                        logger (NativeRequestFailure pendingVideoFailureResponse)
+
+            T.strip output
+                `shouldBe` "[ai-rake:xai.imagine] Provider request failed (HTTP 202 Accepted): status=pending, progress=1"
 
         it "keeps raw request and response bodies silent by default" $ do
             output <-
@@ -1953,10 +2081,19 @@ lookupPath (fieldName : rest) value = case value of
     _ ->
         Nothing
 
+countSystemRoleMessages :: Value -> Maybe Int
+countSystemRoleMessages requestBody = do
+    Array inputItems <- lookupPath ["input"] requestBody
+    pure $
+        length
+            [ ()
+            | Object itemObject <- toList inputItems
+            , KM.lookup "role" itemObject == Just (String "system")
+            ]
+
 sharedHistory :: [HistoryItem]
 sharedHistory =
     [ systemParts [textPart "sys", textPart "tem"]
-    , developerText "dev"
     , userText "hello"
     , assistantParts [textPart "partial ", textPart "answer"]
     , toolCall "tool-call-1" "lookup" (fromList [("name", String "John Snow")])
@@ -1979,10 +2116,6 @@ sharedHistoryRequest =
                    ]
                     :: [Value]
                )
-        ]
-    , object
-        [ "role" .= ("developer" :: Text)
-        , "content" .= ("dev" :: Text)
         ]
     , object
         [ "role" .= ("user" :: Text)
@@ -2018,7 +2151,7 @@ sharedHistoryRequest =
 
 sharedGeminiSystemInstruction :: Text
 sharedGeminiSystemInstruction =
-    "System:\nsystem\n\nDeveloper:\ndev"
+    "system"
 
 sharedGeminiHistoryRequest :: [Value]
 sharedGeminiHistoryRequest =
@@ -2109,3 +2242,28 @@ scalarAndCompositeJsonCases =
     , "[1,2]"
     , "{\"answer\":4}"
     ]
+
+pendingVideoFailureResponse :: ClientError
+pendingVideoFailureResponse =
+    FailureResponse pendingVideoRequest pendingVideoResponse
+
+pendingVideoRequest :: RequestF () (BaseUrl, ByteString)
+pendingVideoRequest =
+    Request
+        { requestPath = (BaseUrl Https "example.test" 443 "", "/v1/videos")
+        , requestQueryString = mempty
+        , requestBody = Nothing
+        , requestAccept = mempty
+        , requestHeaders = mempty
+        , requestHttpVersion = http11
+        , requestMethod = "POST"
+        }
+
+pendingVideoResponse :: ResponseF LByteString
+pendingVideoResponse =
+    Response
+        { responseStatusCode = accepted202
+        , responseHeaders = mempty
+        , responseHttpVersion = http11
+        , responseBody = encode (object ["status" .= ("pending" :: Text), "progress" .= (1 :: Int)])
+        }

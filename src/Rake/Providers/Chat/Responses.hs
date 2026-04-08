@@ -10,16 +10,25 @@ module Rake.Providers.Chat.Responses
 import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString qualified as BS
 import Data.Map qualified as Map
+import Data.Text.Encoding qualified as TextEncoding
 import Data.Vector qualified as Vector
 import Effectful
 import Effectful.Error.Static
+import Network.HTTP.Client qualified as HttpClient
 import Network.HTTP.Client.TLS (newTlsManager)
 import Rake.Effect
+import Rake.Internal.Sse
 import Rake.Internal.Schema (normalizeStructuredOutputSchema)
 import Rake.MediaStorage.Effect
 import Rake.Providers.Chat.Projection (classifyResponsesPayload)
-import Rake.Providers.Internal (runChatProvider, valueToCompactText)
+import Rake.Providers.Internal
+    ( protectStreamingInternalAction
+    , runChatProvider
+    , runStreamingSseRequest
+    , valueToCompactText
+    )
 import Rake.Types
 import Relude
 import Servant.API (Header, JSON, Post, ReqBody)
@@ -68,7 +77,8 @@ runResponsesChatProvider config@ResponsesProviderConfig{..} eff = do
     let clientEnv = mkClientEnv manager parsedBaseUrl
         postResponse = client responsesApi
 
-    runChatProvider (\tools responseFormat samplingOptions history -> do
+    runChatProvider
+        ( \tools responseFormat samplingOptions history -> do
             requestBody <- buildResponsesRequestBody config tools responseFormat samplingOptions history
             requestLogger (NativeMsgOut requestBody)
             responseValue <-
@@ -90,7 +100,27 @@ runResponsesChatProvider config@ResponsesProviderConfig{..} eff = do
                             pure response
             requestLogger (NativeMsgIn responseValue)
             either throwError pure (decodeResponsesResponse providerTag responseValue)
-        ) eff
+        )
+        ( \streamCallbacks tools responseFormat samplingOptions history -> do
+            requestBody <- buildResponsesRequestBody config tools responseFormat samplingOptions history
+            let streamingRequestBody = enableStreamingRequestBody requestBody
+            requestLogger (NativeMsgOut streamingRequestBody)
+            streamingRequest <- liftIO (buildResponsesStreamingRequest config streamingRequestBody)
+            maybeFinalResponseValue <-
+                runStreamingSseRequest
+                    parsedBaseUrl
+                    manager
+                    streamingRequest
+                    (\clientErr -> requestLogger (NativeRequestFailure clientErr))
+                    (handleResponsesStreamEvent requestLogger streamCallbacks)
+            finalResponseValue <-
+                maybe
+                    (throwError (LlmExpectationError "Responses stream ended without a terminal response event"))
+                    pure
+                    maybeFinalResponseValue
+            either throwError pure (decodeResponsesResponse providerTag finalResponseValue)
+        )
+        eff
   where
     invalidBaseUrl err =
         LlmExpectationError ("Invalid base URL: " <> show err)
@@ -106,7 +136,21 @@ buildResponsesRequestBody
     -> [HistoryItem]
     -> Eff es Value
 buildResponsesRequestBody ResponsesProviderConfig{providerTag, requestLogger, model} tools responseFormat samplingOptions history = do
-    input <- fmap concat $ traverse (renderHistoryItemForResponses providerTag requestLogger) history
+    -- OpenAI and xAI share this Responses renderer. We collapse GenericSystem
+    -- to the latest snapshot and send it once as the leading instruction for
+    -- provider compatibility, instead of replaying historical system messages.
+    let (maybeSystemSnapshot, chronologicalHistory) = splitRenderableResponsesHistory history
+    leadingSystemInput <-
+        fmap concat $
+            traverse
+                (renderHistoryItemForResponses providerTag requestLogger)
+                (maybeToList maybeSystemSnapshot)
+    chronologicalInput <-
+        fmap concat $
+            traverse
+                (renderHistoryItemForResponses providerTag requestLogger)
+                chronologicalHistory
+    let input = leadingSystemInput <> chronologicalInput
     pure $
         object $
             [ "model" .= model
@@ -133,6 +177,95 @@ buildResponsesRequestBody ResponsesProviderConfig{providerTag, requestLogger, mo
         maybe [] (\formatValue -> ["text" .= object ["format" .= formatValue]]) $
             responseFormatToValue responseFormat
 
+buildResponsesStreamingRequest :: ResponsesProviderConfig es -> Value -> IO HttpClient.Request
+buildResponsesStreamingRequest ResponsesProviderConfig{apiKey, baseUrl, organizationId, projectId} requestBody = do
+    request <- HttpClient.parseRequest (toString baseUrl <> "/v1/responses")
+    pure
+        request
+            { HttpClient.method = "POST"
+            , HttpClient.requestHeaders =
+                catMaybes
+                    [ Just ("Authorization", TextEncoding.encodeUtf8 ("Bearer " <> apiKey))
+                    , ("OpenAI-Organization",) . TextEncoding.encodeUtf8 <$> organizationId
+                    , ("OpenAI-Project",) . TextEncoding.encodeUtf8 <$> projectId
+                    , Just ("Content-Type", "application/json")
+                    , Just ("Accept", "text/event-stream")
+                    ]
+            , HttpClient.requestBody = HttpClient.RequestBodyLBS (encode requestBody)
+            , HttpClient.responseTimeout = HttpClient.responseTimeoutNone
+            }
+
+enableStreamingRequestBody :: Value -> Value
+enableStreamingRequestBody = \case
+    Object requestObject ->
+        Object (KM.insert "stream" (Bool True) requestObject)
+    otherValue ->
+        otherValue
+
+handleResponsesStreamEvent
+    :: ( IOE :> es
+       , Error RakeError :> es
+       )
+    => (NativeMsgFormat -> Eff es ())
+    -> StreamCallbacks es
+    -> Maybe Text
+    -> BS.ByteString
+    -> Eff es (SseStep Value)
+handleResponsesStreamEvent requestLogger streamCallbacks _ payload
+    | payload == "[DONE]" =
+        pure SseStop
+    | otherwise =
+        case eitherDecodeStrict' payload of
+            Left err ->
+                throwError
+                    ( LlmExpectationError
+                        ( "Responses stream event was not valid JSON: "
+                            <> err
+                        )
+                    )
+            Right eventValue -> do
+                protectStreamingInternalAction
+                    (RequestLoggerFailed . ("responses: " <>))
+                    (requestLogger (NativeMsgIn eventValue))
+                emitResponsesStreamDelta streamCallbacks eventValue
+                pure $
+                    maybe
+                        SseContinue
+                        SseFinish
+                        (responsesTerminalResponse eventValue)
+
+emitResponsesStreamDelta :: StreamCallbacks es -> Value -> Eff es ()
+emitResponsesStreamDelta StreamCallbacks{onAssistantTextDelta, onAssistantRefusalDelta} = \case
+    Object eventObject
+        | lookupText "type" eventObject == Just "response.output_text.delta"
+        , Just deltaText <- lookupText "delta" eventObject ->
+            onAssistantTextDelta deltaText
+        | lookupText "type" eventObject == Just "response.refusal.delta"
+        , Just refusalText <- lookupText "delta" eventObject ->
+            onAssistantRefusalDelta refusalText
+    _ ->
+        pure ()
+
+responsesTerminalResponse :: Value -> Maybe Value
+responsesTerminalResponse = \case
+    Object eventObject -> do
+        responseValue@(Object responseObject) <- KM.lookup "response" eventObject
+        statusText <- lookupText "status" responseObject
+        guard (any (== statusText) terminalStatuses)
+        pure responseValue
+    _ ->
+        Nothing
+  where
+    terminalStatuses :: [Text]
+    terminalStatuses =
+        [ "completed"
+        , "incomplete"
+        , "failed"
+        , "cancelled"
+        , "canceled"
+        , "expired"
+        ]
+
 renderHistoryItemForResponses
     :: ( Error RakeError :> es
        , RakeMediaStorage :> es
@@ -143,6 +276,25 @@ renderHistoryItemForResponses
     -> Eff es [Value]
 renderHistoryItemForResponses providerTag requestLogger =
     renderCanonicalHistoryItemForResponses providerTag requestLogger
+
+splitRenderableResponsesHistory :: [HistoryItem] -> (Maybe HistoryItem, [HistoryItem])
+splitRenderableResponsesHistory history =
+    ( latestSystemSnapshot history
+    , filter (not . isSystemHistoryItem) history
+    )
+
+latestSystemSnapshot :: [HistoryItem] -> Maybe HistoryItem
+latestSystemSnapshot =
+    -- Responses providers get one effective system message. Keeping only the
+    -- latest snapshot matches our portable GenericSystem semantics and avoids
+    -- sending stale system instructions for compatibility reasons.
+    viaNonEmpty last . filter isSystemHistoryItem
+
+isSystemHistoryItem :: HistoryItem -> Bool
+isSystemHistoryItem HistoryItem{genericItem = GenericMessage{role = GenericSystem}} =
+    True
+isSystemHistoryItem _ =
+    False
 
 responsesProviderApiFamily :: ResponsesProviderTag -> ProviderApiFamily
 responsesProviderApiFamily = \case
@@ -331,8 +483,6 @@ messageTextPartType = \case
         "output_text"
     GenericSystem ->
         "input_text"
-    GenericDeveloper ->
-        "input_text"
     GenericUser ->
         "input_text"
 
@@ -370,7 +520,6 @@ toolResponseWireOutput = \case
 genericRoleToText :: GenericRole -> Text
 genericRoleToText = \case
     GenericSystem -> "system"
-    GenericDeveloper -> "developer"
     GenericUser -> "user"
     GenericAssistant -> "assistant"
 

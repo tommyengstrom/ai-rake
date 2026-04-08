@@ -2,7 +2,7 @@ module GenVideoCLI
     ( GenVideoProvider (..)
     , GenVideoHelpTopic (..)
     , CommonGenVideoOptions (..)
-    , GrokGenVideoOptions (..)
+    , XAIGenVideoOptions (..)
     , GenVideoOptions (..)
     , ParseGenVideoArgsResult (..)
     , parseGenVideoArgs
@@ -25,12 +25,12 @@ import System.IO qualified as IO
 import System.Process (readProcessWithExitCode)
 
 data GenVideoProvider
-    = GenVideoProviderGrok
+    = GenVideoProviderXAI
     deriving stock (Show, Eq)
 
 data GenVideoHelpTopic
     = GenVideoHelpGeneral
-    | GenVideoHelpGrok
+    | GenVideoHelpXAI
     deriving stock (Show, Eq)
 
 data CommonGenVideoOptions = CommonGenVideoOptions
@@ -39,22 +39,22 @@ data CommonGenVideoOptions = CommonGenVideoOptions
     }
     deriving stock (Show, Eq)
 
-data GrokGenVideoOptions = GrokGenVideoOptions
-    { grokVideoCommonOptions :: CommonGenVideoOptions
-    , grokVideoModel :: Text
-    , grokVideoImageSource :: Maybe Text
-    , grokVideoEditSource :: Maybe Text
-    , grokVideoExtendSource :: Maybe Text
-    , grokVideoDuration :: Maybe Int
-    , grokVideoAspectRatio :: Maybe Text
-    , grokVideoResolution :: Maybe Text
-    , grokVideoPollIntervalMilliseconds :: Int
-    , grokVideoMaxPollAttempts :: Int
+data XAIGenVideoOptions = XAIGenVideoOptions
+    { xaiVideoCommonOptions :: CommonGenVideoOptions
+    , xaiVideoModel :: Text
+    , xaiVideoImageSource :: Maybe Text
+    , xaiVideoEditSource :: Maybe Text
+    , xaiVideoExtendSource :: Maybe Text
+    , xaiVideoDuration :: Maybe Int
+    , xaiVideoAspectRatio :: Maybe Text
+    , xaiVideoResolution :: Maybe Text
+    , xaiVideoPollIntervalMilliseconds :: Int
+    , xaiVideoMaxPollAttempts :: Int
     }
     deriving stock (Show, Eq)
 
 data GenVideoOptions
-    = GenVideoGrok GrokGenVideoOptions
+    = GenVideoXAI XAIGenVideoOptions
     deriving stock (Show, Eq)
 
 data ParseGenVideoArgsResult
@@ -75,23 +75,23 @@ defaultCommonParseState =
         , parsePromptParts = []
         }
 
-defaultGrokGenVideoOptions :: GrokGenVideoOptions
-defaultGrokGenVideoOptions =
-    GrokGenVideoOptions
-        { grokVideoCommonOptions =
+defaultXAIGenVideoOptions :: XAIGenVideoOptions
+defaultXAIGenVideoOptions =
+    XAIGenVideoOptions
+        { xaiVideoCommonOptions =
             CommonGenVideoOptions
                 { commonVideoPromptText = ""
                 , commonVideoOutputPath = Nothing
                 }
-        , grokVideoModel = "grok-imagine-video"
-        , grokVideoImageSource = Nothing
-        , grokVideoEditSource = Nothing
-        , grokVideoExtendSource = Nothing
-        , grokVideoDuration = Nothing
-        , grokVideoAspectRatio = Nothing
-        , grokVideoResolution = Nothing
-        , grokVideoPollIntervalMilliseconds = 5000
-        , grokVideoMaxPollAttempts = 120
+        , xaiVideoModel = "grok-imagine-video"
+        , xaiVideoImageSource = Nothing
+        , xaiVideoEditSource = Nothing
+        , xaiVideoExtendSource = Nothing
+        , xaiVideoDuration = Nothing
+        , xaiVideoAspectRatio = Nothing
+        , xaiVideoResolution = Nothing
+        , xaiVideoPollIntervalMilliseconds = 5000
+        , xaiVideoMaxPollAttempts = 120
         }
 
 runGenVideoCli :: IO ()
@@ -116,45 +116,62 @@ runGenVideoCli = do
 
 runGenVideo :: GenVideoOptions -> IO (Either Text [FilePath])
 runGenVideo = \case
-    GenVideoGrok GrokGenVideoOptions
-        { grokVideoCommonOptions = CommonGenVideoOptions{commonVideoPromptText, commonVideoOutputPath}
-        , grokVideoModel
-        , grokVideoImageSource
-        , grokVideoEditSource
-        , grokVideoExtendSource
-        , grokVideoDuration
-        , grokVideoAspectRatio
-        , grokVideoResolution
-        , grokVideoPollIntervalMilliseconds
-        , grokVideoMaxPollAttempts
+    GenVideoXAI XAIGenVideoOptions
+        { xaiVideoCommonOptions = CommonGenVideoOptions{commonVideoPromptText, commonVideoOutputPath}
+        , xaiVideoModel
+        , xaiVideoImageSource
+        , xaiVideoEditSource
+        , xaiVideoExtendSource
+        , xaiVideoDuration
+        , xaiVideoAspectRatio
+        , xaiVideoResolution
+        , xaiVideoPollIntervalMilliseconds
+        , xaiVideoMaxPollAttempts
         } -> do
             maybeApiKey <- lookupEnv "XAI_API_KEY"
             case maybeApiKey of
                 Nothing ->
-                    pure (Left "XAI_API_KEY is required for Grok video generation")
+                    pure (Left "XAI_API_KEY is required for xai video generation")
                 Just apiKey -> do
-                    resolvedImageSource <- traverse resolveMediaSource grokVideoImageSource
-                    resolvedEditSource <- traverse resolveMediaSource grokVideoEditSource
+                    resolvedImageSource <- traverse resolveMediaSource xaiVideoImageSource
+                    resolvedEditSource <- traverse resolveMediaSource xaiVideoEditSource
                     case (sequence resolvedImageSource, sequence resolvedEditSource) of
                         (Left err, _) ->
                             pure (Left err)
                         (_, Left err) ->
                             pure (Left err)
                         (Right maybeImageSource, Right maybeEditSource) ->
-                            case (maybeImageSource, maybeEditSource, grokVideoExtendSource) of
+                            case (maybeImageSource, maybeEditSource, xaiVideoExtendSource) of
+                                (Nothing, Nothing, Nothing) -> do
+                                    responseResult <-
+                                        runProvider
+                                            ( generateXAIVideo
+                                                (videoSettings (toText apiKey) xaiVideoPollIntervalMilliseconds xaiVideoMaxPollAttempts)
+                                                ( XAIImagineVideoRequest
+                                                    { model = xaiVideoModel
+                                                    , prompt = commonVideoPromptText
+                                                    , imageUrl = Nothing
+                                                    , videoUrl = Nothing
+                                                    , duration = xaiVideoDuration
+                                                    , aspectRatio = xaiVideoAspectRatio
+                                                    , resolution = xaiVideoResolution
+                                                    }
+                                                )
+                                            )
+                                    handleVideoResponse commonVideoOutputPath commonVideoPromptText responseResult
                                 (Just imageSource, Nothing, Nothing) -> do
                                     responseResult <-
                                         runProvider
                                             ( generateXAIVideo
-                                                (videoSettings (toText apiKey) grokVideoPollIntervalMilliseconds grokVideoMaxPollAttempts)
+                                                (videoSettings (toText apiKey) xaiVideoPollIntervalMilliseconds xaiVideoMaxPollAttempts)
                                                 ( XAIImagineVideoRequest
-                                                    { model = grokVideoModel
+                                                    { model = xaiVideoModel
                                                     , prompt = commonVideoPromptText
                                                     , imageUrl = Just imageSource
                                                     , videoUrl = Nothing
-                                                    , duration = grokVideoDuration
-                                                    , aspectRatio = grokVideoAspectRatio
-                                                    , resolution = grokVideoResolution
+                                                    , duration = xaiVideoDuration
+                                                    , aspectRatio = xaiVideoAspectRatio
+                                                    , resolution = xaiVideoResolution
                                                     }
                                                 )
                                             )
@@ -163,15 +180,15 @@ runGenVideo = \case
                                     responseResult <-
                                         runProvider
                                             ( generateXAIVideo
-                                                (videoSettings (toText apiKey) grokVideoPollIntervalMilliseconds grokVideoMaxPollAttempts)
+                                                (videoSettings (toText apiKey) xaiVideoPollIntervalMilliseconds xaiVideoMaxPollAttempts)
                                                 ( XAIImagineVideoRequest
-                                                    { model = grokVideoModel
+                                                    { model = xaiVideoModel
                                                     , prompt = commonVideoPromptText
                                                     , imageUrl = Nothing
                                                     , videoUrl = Just editSource
-                                                    , duration = grokVideoDuration
-                                                    , aspectRatio = grokVideoAspectRatio
-                                                    , resolution = grokVideoResolution
+                                                    , duration = xaiVideoDuration
+                                                    , aspectRatio = xaiVideoAspectRatio
+                                                    , resolution = xaiVideoResolution
                                                     }
                                                 )
                                             )
@@ -179,17 +196,17 @@ runGenVideo = \case
                                 (Nothing, Nothing, Just extendSource) ->
                                     extendVideoFromEnd
                                         (toText apiKey)
-                                        grokVideoPollIntervalMilliseconds
-                                        grokVideoMaxPollAttempts
-                                        grokVideoModel
+                                        xaiVideoPollIntervalMilliseconds
+                                        xaiVideoMaxPollAttempts
+                                        xaiVideoModel
                                         commonVideoPromptText
                                         commonVideoOutputPath
                                         extendSource
-                                        grokVideoDuration
-                                        grokVideoAspectRatio
-                                        grokVideoResolution
+                                        xaiVideoDuration
+                                        xaiVideoAspectRatio
+                                        xaiVideoResolution
                                 _ ->
-                                    pure (Left "Exactly one of --image, --edit/--video, or --extend must be provided.")
+                                    pure (Left "Use at most one of --image, --edit/--video, or --extend.")
   where
     videoSettings apiKey pollIntervalMilliseconds' maxPollAttempts' =
         (defaultXAIImagineSettings apiKey)
@@ -257,6 +274,7 @@ runGenVideo = \case
                                                 Left err ->
                                                     pure (Left err)
                                                 Right XAIVideoResponse{status = XAIVideoDone, video = Just generatedVideo} -> do
+                                                    announceGeneratedVideoUrl "Provider continuation URL" generatedVideo
                                                     downloadedVideo <- downloadGeneratedVideo generatedVideo
                                                     case downloadedVideo of
                                                         Left err ->
@@ -286,126 +304,124 @@ runGenVideo = \case
 parseGenVideoArgs :: [Text] -> ParseGenVideoArgsResult
 parseGenVideoArgs = \case
     [] ->
-        ParseGenVideoArgsError "A provider is required. Use `grok`." GenVideoHelpGeneral
+        ParseGenVideoArgsError "A provider is required. Use `xai`." GenVideoHelpGeneral
     "--help" : _ ->
         ParseGenVideoArgsHelp GenVideoHelpGeneral
     providerArg : rest ->
         case parseProvider providerArg of
             Nothing ->
                 ParseGenVideoArgsError
-                    ("Unknown provider: " <> providerArg <> ". Use `grok`.")
+                    ("Unknown provider: " <> providerArg <> ". Use `xai`.")
                     GenVideoHelpGeneral
-            Just GenVideoProviderGrok ->
-                parseGrokArgs rest
+            Just GenVideoProviderXAI ->
+                parseXAIArgs rest
 
 parseProvider :: Text -> Maybe GenVideoProvider
 parseProvider = \case
-    "grok" ->
-        Just GenVideoProviderGrok
+    "xai" ->
+        Just GenVideoProviderXAI
     _ ->
         Nothing
 
-parseGrokArgs :: [Text] -> ParseGenVideoArgsResult
-parseGrokArgs =
-    go defaultCommonParseState defaultGrokGenVideoOptions
+parseXAIArgs :: [Text] -> ParseGenVideoArgsResult
+parseXAIArgs =
+    go defaultCommonParseState defaultXAIGenVideoOptions
   where
-    go commonState grokOptions = \case
+    go commonState xaiOptions = \case
         [] ->
-            finalize commonState grokOptions
+            finalize commonState xaiOptions
         "--help" : _ ->
-            ParseGenVideoArgsHelp GenVideoHelpGrok
+            ParseGenVideoArgsHelp GenVideoHelpXAI
         "--" : rest ->
             finalize
                 (appendPromptParts commonState rest)
-                grokOptions
+                xaiOptions
         "--output" : path : rest ->
-            go commonState{parseOutputPath = Just (toString path)} grokOptions rest
+            go commonState{parseOutputPath = Just (toString path)} xaiOptions rest
         "-o" : path : rest ->
-            go commonState{parseOutputPath = Just (toString path)} grokOptions rest
+            go commonState{parseOutputPath = Just (toString path)} xaiOptions rest
         "--model" : modelName : rest ->
-            go commonState grokOptions{grokVideoModel = modelName} rest
+            go commonState xaiOptions{xaiVideoModel = modelName} rest
         "--image" : imageSource : rest ->
-            go commonState grokOptions{grokVideoImageSource = Just imageSource} rest
+            go commonState xaiOptions{xaiVideoImageSource = Just imageSource} rest
         "--edit" : videoSource : rest ->
-            go commonState grokOptions{grokVideoEditSource = Just videoSource} rest
+            go commonState xaiOptions{xaiVideoEditSource = Just videoSource} rest
         "--extend" : videoSource : rest ->
-            go commonState grokOptions{grokVideoExtendSource = Just videoSource} rest
+            go commonState xaiOptions{xaiVideoExtendSource = Just videoSource} rest
         "--video" : videoSource : rest ->
-            go commonState grokOptions{grokVideoEditSource = Just videoSource} rest
+            go commonState xaiOptions{xaiVideoEditSource = Just videoSource} rest
         "--duration" : rawDuration : rest ->
             case parsePositiveIntOption "--duration" rawDuration of
                 Left err ->
-                    ParseGenVideoArgsError err GenVideoHelpGrok
+                    ParseGenVideoArgsError err GenVideoHelpXAI
                 Right durationSeconds ->
-                    go commonState grokOptions{grokVideoDuration = Just durationSeconds} rest
+                    go commonState xaiOptions{xaiVideoDuration = Just durationSeconds} rest
         "--aspect-ratio" : aspectRatioValue : rest ->
-            go commonState grokOptions{grokVideoAspectRatio = Just aspectRatioValue} rest
+            go commonState xaiOptions{xaiVideoAspectRatio = Just aspectRatioValue} rest
         "--resolution" : resolutionValue : rest ->
-            go commonState grokOptions{grokVideoResolution = Just resolutionValue} rest
+            go commonState xaiOptions{xaiVideoResolution = Just resolutionValue} rest
         "--poll-interval-ms" : rawPollInterval : rest ->
             case parsePositiveIntOption "--poll-interval-ms" rawPollInterval of
                 Left err ->
-                    ParseGenVideoArgsError err GenVideoHelpGrok
+                    ParseGenVideoArgsError err GenVideoHelpXAI
                 Right pollIntervalMilliseconds ->
-                    go commonState grokOptions{grokVideoPollIntervalMilliseconds = pollIntervalMilliseconds} rest
+                    go commonState xaiOptions{xaiVideoPollIntervalMilliseconds = pollIntervalMilliseconds} rest
         "--max-poll-attempts" : rawMaxPollAttempts : rest ->
             case parsePositiveIntOption "--max-poll-attempts" rawMaxPollAttempts of
                 Left err ->
-                    ParseGenVideoArgsError err GenVideoHelpGrok
+                    ParseGenVideoArgsError err GenVideoHelpXAI
                 Right maxPollAttempts ->
-                    go commonState grokOptions{grokVideoMaxPollAttempts = maxPollAttempts} rest
+                    go commonState xaiOptions{xaiVideoMaxPollAttempts = maxPollAttempts} rest
         arg : rest
             | Just path <- T.stripPrefix "--output=" arg ->
-                go commonState{parseOutputPath = Just (toString path)} grokOptions rest
+                go commonState{parseOutputPath = Just (toString path)} xaiOptions rest
             | Just modelName <- T.stripPrefix "--model=" arg ->
-                go commonState grokOptions{grokVideoModel = modelName} rest
+                go commonState xaiOptions{xaiVideoModel = modelName} rest
             | Just imageSource <- T.stripPrefix "--image=" arg ->
-                go commonState grokOptions{grokVideoImageSource = Just imageSource} rest
+                go commonState xaiOptions{xaiVideoImageSource = Just imageSource} rest
             | Just videoSource <- T.stripPrefix "--edit=" arg ->
-                go commonState grokOptions{grokVideoEditSource = Just videoSource} rest
+                go commonState xaiOptions{xaiVideoEditSource = Just videoSource} rest
             | Just videoSource <- T.stripPrefix "--extend=" arg ->
-                go commonState grokOptions{grokVideoExtendSource = Just videoSource} rest
+                go commonState xaiOptions{xaiVideoExtendSource = Just videoSource} rest
             | Just videoSource <- T.stripPrefix "--video=" arg ->
-                go commonState grokOptions{grokVideoEditSource = Just videoSource} rest
+                go commonState xaiOptions{xaiVideoEditSource = Just videoSource} rest
             | Just rawDuration <- T.stripPrefix "--duration=" arg ->
                 case parsePositiveIntOption "--duration" rawDuration of
                     Left err ->
-                        ParseGenVideoArgsError err GenVideoHelpGrok
+                        ParseGenVideoArgsError err GenVideoHelpXAI
                     Right durationSeconds ->
-                        go commonState grokOptions{grokVideoDuration = Just durationSeconds} rest
+                        go commonState xaiOptions{xaiVideoDuration = Just durationSeconds} rest
             | Just aspectRatioValue <- T.stripPrefix "--aspect-ratio=" arg ->
-                go commonState grokOptions{grokVideoAspectRatio = Just aspectRatioValue} rest
+                go commonState xaiOptions{xaiVideoAspectRatio = Just aspectRatioValue} rest
             | Just resolutionValue <- T.stripPrefix "--resolution=" arg ->
-                go commonState grokOptions{grokVideoResolution = Just resolutionValue} rest
+                go commonState xaiOptions{xaiVideoResolution = Just resolutionValue} rest
             | Just rawPollInterval <- T.stripPrefix "--poll-interval-ms=" arg ->
                 case parsePositiveIntOption "--poll-interval-ms" rawPollInterval of
                     Left err ->
-                        ParseGenVideoArgsError err GenVideoHelpGrok
+                        ParseGenVideoArgsError err GenVideoHelpXAI
                     Right pollIntervalMilliseconds ->
-                        go commonState grokOptions{grokVideoPollIntervalMilliseconds = pollIntervalMilliseconds} rest
+                        go commonState xaiOptions{xaiVideoPollIntervalMilliseconds = pollIntervalMilliseconds} rest
             | Just rawMaxPollAttempts <- T.stripPrefix "--max-poll-attempts=" arg ->
                 case parsePositiveIntOption "--max-poll-attempts" rawMaxPollAttempts of
                     Left err ->
-                        ParseGenVideoArgsError err GenVideoHelpGrok
+                        ParseGenVideoArgsError err GenVideoHelpXAI
                     Right maxPollAttempts ->
-                        go commonState grokOptions{grokVideoMaxPollAttempts = maxPollAttempts} rest
+                        go commonState xaiOptions{xaiVideoMaxPollAttempts = maxPollAttempts} rest
             | "-" `T.isPrefixOf` arg ->
-                ParseGenVideoArgsError ("Unknown Grok option: " <> arg) GenVideoHelpGrok
+                ParseGenVideoArgsError ("Unknown xai option: " <> arg) GenVideoHelpXAI
             | otherwise ->
-                go (appendPromptParts commonState [arg]) grokOptions rest
+                go (appendPromptParts commonState [arg]) xaiOptions rest
 
-    finalize CommonParseState{parseOutputPath, parsePromptParts} grokOptions
+    finalize CommonParseState{parseOutputPath, parsePromptParts} xaiOptions
         | null parsePromptParts =
-            ParseGenVideoArgsError "A prompt is required." GenVideoHelpGrok
-        | hasGrokVideoSourceConflict grokOptions =
-            ParseGenVideoArgsError "Use exactly one of --image, --edit/--video, or --extend." GenVideoHelpGrok
-        | missingGrokVideoSource grokOptions =
-            ParseGenVideoArgsError "Use --image SOURCE for image-to-video generation, --edit SOURCE to update an existing video, or --extend SOURCE to append a continuation." GenVideoHelpGrok
+            ParseGenVideoArgsError "A prompt is required." GenVideoHelpXAI
+        | hasXAIVideoSourceConflict xaiOptions =
+            ParseGenVideoArgsError "Use exactly one of --image, --edit/--video, or --extend." GenVideoHelpXAI
         | otherwise =
             ParseGenVideoArgsSuccess $
-                GenVideoGrok
-                    grokOptions
-                        { grokVideoCommonOptions =
+                GenVideoXAI
+                    xaiOptions
+                        { xaiVideoCommonOptions =
                             CommonGenVideoOptions
                                 { commonVideoPromptText = T.unwords parsePromptParts
                                 , commonVideoOutputPath = parseOutputPath
@@ -427,56 +443,52 @@ appendPromptParts :: CommonParseState -> [Text] -> CommonParseState
 appendPromptParts commonState@CommonParseState{parsePromptParts} extraPromptParts =
     commonState{parsePromptParts = parsePromptParts <> extraPromptParts}
 
-hasGrokVideoSourceConflict :: GrokGenVideoOptions -> Bool
-hasGrokVideoSourceConflict GrokGenVideoOptions{grokVideoImageSource, grokVideoEditSource, grokVideoExtendSource} =
-    length (catMaybes [grokVideoImageSource, grokVideoEditSource, grokVideoExtendSource]) > 1
-
-missingGrokVideoSource :: GrokGenVideoOptions -> Bool
-missingGrokVideoSource GrokGenVideoOptions{grokVideoImageSource, grokVideoEditSource, grokVideoExtendSource} =
-    isNothing grokVideoImageSource
-        && isNothing grokVideoEditSource
-        && isNothing grokVideoExtendSource
+hasXAIVideoSourceConflict :: XAIGenVideoOptions -> Bool
+hasXAIVideoSourceConflict XAIGenVideoOptions{xaiVideoImageSource, xaiVideoEditSource, xaiVideoExtendSource} =
+    length (catMaybes [xaiVideoImageSource, xaiVideoEditSource, xaiVideoExtendSource]) > 1
 
 renderGenVideoHelp :: String -> GenVideoHelpTopic -> Text
 renderGenVideoHelp progName = \case
     GenVideoHelpGeneral ->
         T.unlines $
             [ "Usage:"
-            , "  " <> toText progName <> " grok [OPTIONS] PROMPT"
+            , "  " <> toText progName <> " xai [OPTIONS] PROMPT"
             , ""
             , "Providers:"
-            , "  grok    Generate videos with xAI Grok Imagine. Default model: grok-imagine-video"
+            , "  xai     Generate videos with xAI Grok Imagine. Default model: grok-imagine-video"
             , ""
             , "Common options:"
             ]
                 <> commonOptionLines
                 <> [ ""
-                   , "Grok options:"
+                   , "xai options:"
                    ]
-                <> grokOptionLines
+                <> xaiOptionLines
                 <> [ ""
                    , "Notes:"
                    , "  SOURCE can be a URL, a data URL, or a local file path."
-                   , "  Use `" <> toText progName <> " grok --help` for focused help."
+                   , "  Use `" <> toText progName <> " xai --help` for focused help."
+                   , "  With no source option, the CLI sends a text-to-video request."
                    , "  Use `--image SOURCE` for image-to-video generation."
                    , "  Use `--edit SOURCE` to update an existing video."
                    , "  Use `--extend SOURCE` to append a continuation to the end of a video."
                    , "  `--video SOURCE` is kept as a compatible alias for `--edit`."
-                   , "  `--duration`, `--aspect-ratio`, and `--resolution` apply to image-to-video and extend."
+                   , "  `--duration`, `--aspect-ratio`, and `--resolution` apply to text-to-video, image-to-video, and extend."
                    , "  `--extend` requires local `ffmpeg` and `ffprobe`."
                    , "  `--extend` currently supports local files and URLs, not data URLs."
                    , "  XAI_API_KEY is required."
                    , ""
                    , "Examples:"
-                   , "  " <> toText progName <> " grok \"She walk away\" --image girl.jpg"
-                   , "  " <> toText progName <> " grok --image=girl.jpg --duration=8 \"She walk away\""
-                   , "  " <> toText progName <> " grok --edit=clip.mp4 \"make the lighting moodier\""
-                   , "  " <> toText progName <> " grok --extend=clip.mp4 \"continue the scene for 5 more seconds\""
+                   , "  " <> toText progName <> " xai \"A paper crane unfolds into a bird and flies away\""
+                   , "  " <> toText progName <> " xai \"She walk away\" --image girl.jpg"
+                   , "  " <> toText progName <> " xai --image=girl.jpg --duration=8 \"She walk away\""
+                   , "  " <> toText progName <> " xai --edit=clip.mp4 \"make the lighting moodier\""
+                   , "  " <> toText progName <> " xai --extend=clip.mp4 \"continue the scene for 5 more seconds\""
                    ]
-    GenVideoHelpGrok ->
+    GenVideoHelpXAI ->
         T.unlines $
             [ "Usage:"
-            , "  " <> toText progName <> " grok [OPTIONS] PROMPT"
+            , "  " <> toText progName <> " xai [OPTIONS] PROMPT"
             , ""
             , "Default model: grok-imagine-video"
             , ""
@@ -484,26 +496,28 @@ renderGenVideoHelp progName = \case
             ]
                 <> commonOptionLines
                 <> [ ""
-                   , "Grok options:"
+                   , "xai options:"
                    ]
-                <> grokOptionLines
+                <> xaiOptionLines
                 <> [ ""
                    , "Notes:"
                    , "  SOURCE can be a URL, a data URL, or a local file path."
+                   , "  With no source option, the CLI sends a text-to-video request."
                    , "  Use `--image SOURCE` for image-to-video generation."
                    , "  Use `--edit SOURCE` to update an existing video."
                    , "  Use `--extend SOURCE` to append a continuation to the end of a video."
                    , "  `--video SOURCE` is kept as a compatible alias for `--edit`."
-                   , "  `--duration`, `--aspect-ratio`, and `--resolution` apply to image-to-video and extend."
+                   , "  `--duration`, `--aspect-ratio`, and `--resolution` apply to text-to-video, image-to-video, and extend."
                    , "  `--extend` requires local `ffmpeg` and `ffprobe`."
                    , "  `--extend` currently supports local files and URLs, not data URLs."
                    , "  XAI_API_KEY is required."
                    , ""
                    , "Examples:"
-                   , "  " <> toText progName <> " grok \"She walk away\" --image girl.jpg"
-                   , "  " <> toText progName <> " grok --image=girl.jpg --duration=8 \"She walk away\""
-                   , "  " <> toText progName <> " grok --edit=clip.mp4 \"make the lighting moodier\""
-                   , "  " <> toText progName <> " grok --extend=clip.mp4 \"continue the scene for 5 more seconds\""
+                   , "  " <> toText progName <> " xai \"A paper crane unfolds into a bird and flies away\""
+                   , "  " <> toText progName <> " xai \"She walk away\" --image girl.jpg"
+                   , "  " <> toText progName <> " xai --image=girl.jpg --duration=8 \"She walk away\""
+                   , "  " <> toText progName <> " xai --edit=clip.mp4 \"make the lighting moodier\""
+                   , "  " <> toText progName <> " xai --extend=clip.mp4 \"continue the scene for 5 more seconds\""
                    ]
   where
     commonOptionLines =
@@ -511,8 +525,8 @@ renderGenVideoHelp progName = \case
         , "  --help                       Show help."
         ]
 
-    grokOptionLines =
-        [ "  --model MODEL                Override the Grok video model."
+    xaiOptionLines =
+        [ "  --model MODEL                Override the xAI video model."
         , "  --image SOURCE               Input still image URL or local file."
         , "  --edit SOURCE                Update an existing video URL or local file."
         , "  --extend SOURCE              Append a continuation to the end of a video."
@@ -530,6 +544,7 @@ saveGeneratedVideo maybeOutput promptText GeneratedVideo{url = maybeUrl} =
         Nothing ->
             pure (Left "Video payload has no url")
         Just videoUrl -> do
+            putTextLn ("Provider video URL: " <> videoUrl)
             downloadResult <- downloadBinary videoUrl
             case downloadResult of
                 Left err ->
@@ -553,6 +568,10 @@ downloadGeneratedVideo GeneratedVideo{url = maybeUrl} =
             pure (Left "Video payload has no url")
         Just videoUrl ->
             downloadBinary videoUrl
+
+announceGeneratedVideoUrl :: Text -> GeneratedVideo -> IO ()
+announceGeneratedVideoUrl label GeneratedVideo{url = maybeUrl} =
+    traverse_ (\videoUrl -> putTextLn (label <> ": " <> videoUrl)) maybeUrl
 
 requireExecutable :: FilePath -> IO (Either Text FilePath)
 requireExecutable executableName =
@@ -804,5 +823,7 @@ renderVideoStatus = \case
         "done"
     XAIVideoExpired ->
         "expired"
+    XAIVideoFailed ->
+        "failed"
     XAIVideoUnknown other ->
         other

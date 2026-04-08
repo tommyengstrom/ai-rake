@@ -11,7 +11,7 @@ spec = describe "GenImageCLI" $ do
         it "requires a model command" $ do
             parseGenImageArgs []
                 `shouldBe` ParseGenImageArgsError
-                    "A model is required. Use `gptimage`, `imagine`, or `banana2`."
+                    "A model is required. Use `gptimage`, `xai`, or `banana2`."
                     GenImageHelpGeneral
 
         it "parses a minimal gptimage command" $ do
@@ -41,22 +41,22 @@ spec = describe "GenImageCLI" $ do
                             }
                     )
 
-        it "parses a minimal imagine command" $ do
-            parseGenImageArgs ["imagine", "a man riding a horse on the moon"]
+        it "parses a minimal xai command" $ do
+            parseGenImageArgs ["xai", "a man riding a horse on the moon"]
                 `shouldBe` ParseGenImageArgsSuccess
-                    ( GenImageGrok
-                        GrokGenImageOptions
-                            { grokCommonOptions =
+                    ( GenImageXAI
+                        XAIGenImageOptions
+                            { xaiCommonOptions =
                                 CommonGenImageOptions
                                     { commonPromptText = "a man riding a horse on the moon"
                                     , commonOutputPath = Nothing
                                     , commonImageCount = 1
                                     }
-                            , grokModel = "grok-imagine-image"
-                            , grokInputImageSources = []
-                            , grokAspectRatio = Nothing
-                            , grokResolution = Nothing
-                            , grokResponseFormat = "b64_json"
+                            , xaiModel = "grok-imagine-image"
+                            , xaiInputImageSources = []
+                            , xaiAspectRatio = Nothing
+                            , xaiResolution = Nothing
+                            , xaiResponseFormat = "b64_json"
                             }
                     )
 
@@ -78,9 +78,9 @@ spec = describe "GenImageCLI" $ do
                             }
                     )
 
-        it "parses imagine-specific options" $ do
+        it "parses xai-specific options" $ do
             parseGenImageArgs
-                [ "imagine"
+                [ "xai"
                 , "--count=2"
                 , "--aspect-ratio=16:9"
                 , "--resolution=2k"
@@ -90,19 +90,19 @@ spec = describe "GenImageCLI" $ do
                 , "horse"
                 ]
                 `shouldBe` ParseGenImageArgsSuccess
-                    ( GenImageGrok
-                        GrokGenImageOptions
-                            { grokCommonOptions =
+                    ( GenImageXAI
+                        XAIGenImageOptions
+                            { xaiCommonOptions =
                                 CommonGenImageOptions
                                     { commonPromptText = "moon horse"
                                     , commonOutputPath = Nothing
                                     , commonImageCount = 2
                                     }
-                            , grokModel = "grok-imagine-image"
-                            , grokInputImageSources = ["base.png"]
-                            , grokAspectRatio = Just "16:9"
-                            , grokResolution = Just "2k"
-                            , grokResponseFormat = "url"
+                            , xaiModel = "grok-imagine-image"
+                            , xaiInputImageSources = ["base.png"]
+                            , xaiAspectRatio = Just "16:9"
+                            , xaiResolution = Just "2k"
+                            , xaiResponseFormat = "url"
                             }
                     )
 
@@ -190,8 +190,8 @@ spec = describe "GenImageCLI" $ do
                 `shouldBe` ParseGenImageArgsHelp GenImageHelpGeneral
 
         it "shows model-specific help" $ do
-            parseGenImageArgs ["imagine", "--help"]
-                `shouldBe` ParseGenImageArgsHelp GenImageHelpGrok
+            parseGenImageArgs ["xai", "--help"]
+                `shouldBe` ParseGenImageArgsHelp GenImageHelpXAI
             parseGenImageArgs ["gptimage", "--help"]
                 `shouldBe` ParseGenImageArgsHelp GenImageHelpOpenAI
             parseGenImageArgs ["banana2", "--help"]
@@ -200,38 +200,42 @@ spec = describe "GenImageCLI" $ do
         it "errors on removed provider names" $ do
             parseGenImageArgs ["openai", "horse"]
                 `shouldBe` ParseGenImageArgsError
-                    "Unknown model: openai. Use `gptimage`, `imagine`, or `banana2`."
+                    "Unknown model: openai. Use `gptimage`, `xai`, or `banana2`."
+                    GenImageHelpGeneral
+            parseGenImageArgs ["imagine", "horse"]
+                `shouldBe` ParseGenImageArgsError
+                    "Unknown model: imagine. Use `gptimage`, `xai`, or `banana2`."
                     GenImageHelpGeneral
             parseGenImageArgs ["grok", "horse"]
                 `shouldBe` ParseGenImageArgsError
-                    "Unknown model: grok. Use `gptimage`, `imagine`, or `banana2`."
+                    "Unknown model: grok. Use `gptimage`, `xai`, or `banana2`."
                     GenImageHelpGeneral
 
     describe "renderGenImageHelp" $ do
         it "general help lists all command option sets" $ do
-            let helpText = renderGenImageHelp "gen-image" GenImageHelpGeneral
+            let helpText = renderGenImageHelp "rake-image" GenImageHelpGeneral
             helpText `shouldSatisfy` T.isInfixOf "--image-file-id FILE_ID"
             helpText `shouldSatisfy` T.isInfixOf "--response-format FORMAT"
             helpText `shouldSatisfy` T.isInfixOf "--image-size SIZE"
-            helpText `shouldSatisfy` T.isInfixOf "gen-image gptimage --help"
-            helpText `shouldSatisfy` T.isInfixOf "gen-image imagine --help"
-            helpText `shouldSatisfy` T.isInfixOf "gen-image banana2 --help"
+            helpText `shouldSatisfy` T.isInfixOf "rake-image gptimage --help"
+            helpText `shouldSatisfy` T.isInfixOf "rake-image xai --help"
+            helpText `shouldSatisfy` T.isInfixOf "rake-image banana2 --help"
 
-        it "imagine help focuses on imagine options" $ do
-            let helpText = renderGenImageHelp "gen-image" GenImageHelpGrok
+        it "xai help focuses on xai options" $ do
+            let helpText = renderGenImageHelp "rake-image" GenImageHelpXAI
             helpText `shouldSatisfy` T.isInfixOf "--aspect-ratio RATIO"
             helpText `shouldSatisfy` T.isInfixOf "--response-format FORMAT"
             helpText `shouldNotSatisfy` T.isInfixOf "--mask-file-id FILE_ID"
             helpText `shouldNotSatisfy` T.isInfixOf "--image-size SIZE"
 
         it "gptimage help focuses on gptimage options" $ do
-            let helpText = renderGenImageHelp "gen-image" GenImageHelpOpenAI
+            let helpText = renderGenImageHelp "rake-image" GenImageHelpOpenAI
             helpText `shouldSatisfy` T.isInfixOf "--mask-file-id FILE_ID"
             helpText `shouldSatisfy` T.isInfixOf "--output-compression N"
             helpText `shouldNotSatisfy` T.isInfixOf "--aspect-ratio RATIO"
 
         it "banana2 help focuses on banana2 options" $ do
-            let helpText = renderGenImageHelp "gen-image" GenImageHelpBanana2
+            let helpText = renderGenImageHelp "rake-image" GenImageHelpBanana2
             helpText `shouldSatisfy` T.isInfixOf "--image-size SIZE"
             helpText `shouldSatisfy` T.isInfixOf "GEMINI_API_KEY"
             helpText `shouldNotSatisfy` T.isInfixOf "--count N"

@@ -83,6 +83,7 @@ common shared_opts
     , monad-time-effectful
     , openapi3
     , servant-client
+    , servant-client-core
     , postgresql-simple
     , relude
     , text
@@ -103,13 +104,16 @@ library
       Rake.MediaStorage.Effect
       Rake.MediaStorage.Directory
       Rake.MediaStorage.InMemory
+      Rake.TTS
       Rake.Providers.Gemini.Chat
       Rake.Providers.Gemini.Images
       Rake.PostgresLogger
       Rake.Providers.OpenAI.Chat
       Rake.Providers.OpenAI.Images
+      Rake.Providers.OpenAI.TTS
       Rake.Providers.XAI.Imagine
       Rake.Providers.XAI.Chat
+      Rake.Providers.XAI.TTS
       Rake.Storage.Effect
       Rake.Storage.InMemory
       Rake.Storage.Postgres
@@ -117,12 +121,15 @@ library
       Rake.Types
   other-modules:
       Rake.Postgres.Internal
+      Rake.Internal.Sse
       Rake.Internal.Schema
       Rake.Providers.Chat.Projection
       Rake.Providers.Chat.Responses
       Rake.Providers.Internal
+      Rake.Providers.TTS.Internal
       Rake.Providers.XAI.Imagine.Client
       Rake.Providers.XAI.Imagine.Types
+      Rake.TTS.Types
   hs-source-dirs: src
   build-depends:
     , directory
@@ -142,6 +149,8 @@ test-suite ai-rake-test
       GenCliSupport
       GenImageCLI
       GenImageCLISpec
+      GenSpeechCLI
+      GenSpeechCLISpec
       GenVideoCLI
       GenVideoCLISpec
       Rake.ChatSpec
@@ -191,7 +200,7 @@ executable minimal-example
       ai-rake
     , stm
 
-executable gen-image
+executable rake-image
   import: shared_opts
   hs-source-dirs: app
   main-is: GenImage.hs
@@ -208,7 +217,24 @@ executable gen-image
     , http-client-tls
     , process
 
-executable gen-video
+executable rake-tts
+  import: shared_opts
+  hs-source-dirs: app
+  main-is: GenSpeech.hs
+  other-modules:
+      GenCliSupport
+      GenSpeechCLI
+  build-depends:
+      ai-rake
+    , base64-bytestring
+    , bytestring
+    , directory
+    , filepath
+    , http-client
+    , http-client-tls
+    , process
+
+executable rake-video
   import: shared_opts
   hs-source-dirs: app
   main-is: GenVideo.hs

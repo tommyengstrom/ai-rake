@@ -1,30 +1,29 @@
 # Message Streaming
 
-Status: not implemented in the shared API yet.
+Status: implemented in the shared API as a text-first ephemeral layer.
 
 ## Current Behavior
 
-- `chat` returns append-only `[HistoryItem]` suffixes.
-- Provider adapters normalize finished responses after the HTTP request completes.
+- `chatOutcome` returns append-only `[HistoryItem]` suffixes.
+- `streamChatOutcome` and `withResumableStreamingChat` emit live assistant text/refusal deltas through `StreamCallbacks`.
+- Provider adapters still normalize only finished responses into stable `HistoryItem` values.
 - Tool handling also operates on stable history items, but those items may be marked pending before the overall loop reaches a completed boundary.
 - Media helper modules return decoded final responses instead of streaming events.
+- Storage persists only finalized history items. Mid-stream crashes or disconnects do not write partial output.
 
-This is deliberate. The current generic model is strong for append-only text messages, tool calls, and tool results, but it is not yet rich enough to represent every provider-specific streaming delta without losing information.
+This remains deliberate. The current generic model is strong for append-only text messages, tool calls, and tool results, but it is still not rich enough to represent every provider-specific streaming delta without losing information.
 
-## Why There Is No Shared Streaming Layer Yet
+## Shared Streaming Boundary
 
-- OpenAI Responses and xAI Responses expose different native event shapes.
+- OpenAI Responses, xAI Responses, and Gemini Interactions expose different native event shapes.
 - Some provider-native content remains richer than the current generic `HistoryItem` representation.
 - Persisting transport-level streaming deltas would blur the boundary between stable history items and ephemeral wire events.
 
-## Likely Future Seam
-
-If streaming is added, it should preserve provider-native detail until an event can be promoted into a stable `HistoryItem`.
-
-The intended shape is:
+## Current Shape
 
 - provider-specific streaming events stay native while the stream is live
-- promotable message/tool items are emitted as `HistoryItem` with explicit pending/completed lifecycle
+- the shared API exposes only assistant text/refusal deltas
+- finalized provider rounds are decoded with the same code path as non-streaming requests
 - storage persists append-only history items, not raw transport deltas
 
-That keeps the existing `chat`/`withStorage` contract stable while leaving room for a future streaming API that can be more explicit about partial deltas, tool-call starts, tool-call argument chunks, and completion boundaries.
+That keeps the existing `chatOutcome`/`withStorage` contract stable while leaving room for a future streaming API that can be more explicit about provider-native deltas, tool-call starts, tool-call argument chunks, and completion boundaries.

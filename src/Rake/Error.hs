@@ -7,18 +7,29 @@ module Rake.Error where
 import Data.Aeson (Value (..), decode)
 import Data.Aeson.Key (fromText)
 import Data.Aeson.KeyMap qualified as KM
+import Data.Aeson.Text qualified as AesonText
 import Data.ByteString.Lazy qualified as LBS
-import Data.Text qualified as T
-import Network.HTTP.Types.Status (statusCode)
 import Data.Generics.Labels ()
+import Data.Text qualified as T
+import Data.Text.Encoding qualified as TextEncoding
+import Data.Text.Lazy qualified as TL
+import Network.HTTP.Types.Status (Status, statusCode, statusMessage)
 import Rake.Types (ReplayBlockReason (..), ResetCheckpoint (..))
-import Servant.Client (ClientError (..), ResponseF (..))
 import Relude
+import Servant.Client (ClientError (..), ResponseF (..))
 
 data RakeError
     = LlmClientError ClientError
     | LlmExpectationError String
+    | StreamingInternalError StreamingInternalIssue
     | ConversationBlocked ReplayBlockReason (Maybe ResetCheckpoint)
+    deriving stock (Show, Eq, Generic)
+
+data StreamingInternalIssue
+    = OnAssistantTextDeltaFailed String
+    | OnAssistantRefusalDeltaFailed String
+    | OnAudioChunkFailed String
+    | RequestLoggerFailed String
     deriving stock (Show, Eq, Generic)
 
 renderRakeError :: RakeError -> Text
@@ -27,8 +38,21 @@ renderRakeError = \case
         renderClientError clientError
     LlmExpectationError err ->
         toText err
+    StreamingInternalError issue ->
+        renderStreamingInternalIssue issue
     ConversationBlocked blockedReason maybeCheckpoint ->
         renderBlockedConversation blockedReason maybeCheckpoint
+
+renderStreamingInternalIssue :: StreamingInternalIssue -> Text
+renderStreamingInternalIssue = \case
+    OnAssistantTextDeltaFailed err ->
+        "Streaming assistant text callback failed: " <> toText err
+    OnAssistantRefusalDeltaFailed err ->
+        "Streaming assistant refusal callback failed: " <> toText err
+    OnAudioChunkFailed err ->
+        "Streaming audio chunk callback failed: " <> toText err
+    RequestLoggerFailed err ->
+        "Streaming request logger failed: " <> toText err
 
 renderBlockedConversation :: ReplayBlockReason -> Maybe ResetCheckpoint -> Text
 renderBlockedConversation blockedReason maybeCheckpoint =
@@ -58,22 +82,22 @@ renderClientError :: ClientError -> Text
 renderClientError = \case
     FailureResponse _ response ->
         "Provider request failed (HTTP "
-            <> show (statusCode (responseStatusCode response))
+            <> renderStatus (responseStatusCode response)
             <> ")"
             <> renderResponseDetail response
     DecodeFailure err response ->
         "Provider returned an unreadable response (HTTP "
-            <> show (statusCode (responseStatusCode response))
+            <> renderStatus (responseStatusCode response)
             <> "): "
             <> err
     UnsupportedContentType mediaType response ->
         "Provider returned an unsupported content type (HTTP "
-            <> show (statusCode (responseStatusCode response))
+            <> renderStatus (responseStatusCode response)
             <> "): "
             <> show mediaType
     InvalidContentTypeHeader response ->
         "Provider returned an invalid content-type header (HTTP "
-            <> show (statusCode (responseStatusCode response))
+            <> renderStatus (responseStatusCode response)
             <> ")"
     ConnectionError err ->
         "Provider connection failed: " <> toText (displayException err)
@@ -95,6 +119,7 @@ extractJsonErrorDetail = \case
                 <|> lookupTextField "message" obj
                 <|> lookupNestedTextField "error" "message" obj
             )
+            <|> renderStatusDetail obj
     String textValue ->
         Just textValue
     _ ->
@@ -116,6 +141,21 @@ lookupNestedTextField outerField innerField obj =
         _ ->
             Nothing
 
+lookupRenderableField :: Text -> KM.KeyMap Value -> Maybe Text
+lookupRenderableField fieldName obj =
+    KM.lookup (fromText fieldName) obj >>= renderScalarValue
+
+renderScalarValue :: Value -> Maybe Text
+renderScalarValue = \case
+    String textValue ->
+        Just textValue
+    Number numberValue ->
+        Just (TL.toStrict (AesonText.encodeToLazyText numberValue))
+    Bool boolValue ->
+        Just (if boolValue then "true" else "false")
+    _ ->
+        Nothing
+
 combineCodeAndMessage :: Maybe Text -> Maybe Text -> Maybe Text
 combineCodeAndMessage maybeCode maybeMessage =
     case (maybeCode, maybeMessage) of
@@ -130,6 +170,27 @@ combineCodeAndMessage maybeCode maybeMessage =
             Just message
         (Nothing, Nothing) ->
             Nothing
+
+renderStatusDetail :: KM.KeyMap Value -> Maybe Text
+renderStatusDetail obj = do
+    statusText <- lookupRenderableField "status" obj
+    let detailFields =
+            [ "status=" <> statusText
+            ]
+                <> maybe
+                    []
+                    (\progressValue -> ["progress=" <> progressValue])
+                    (lookupRenderableField "progress" obj)
+    pure (T.intercalate ", " detailFields)
+
+renderStatus :: Status -> Text
+renderStatus status =
+    show (statusCode status)
+        <> case T.strip (TextEncoding.decodeUtf8 (statusMessage status)) of
+            "" ->
+                ""
+            reasonPhrase ->
+                " " <> reasonPhrase
 
 stripTrailingPeriod :: Text -> Text
 stripTrailingPeriod textValue =
