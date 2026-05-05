@@ -47,13 +47,6 @@
             pkgs.postgresql
             pkgs.zlib
           ];
-
-          shellHook = ''
-            export SHELL="${pkgs.fish}/bin/fish"
-            export PKG_CONFIG_PATH="${pkgs.libpq.dev}/lib/pkgconfig:${pkgs.zlib.dev}/lib/pkgconfig:''${PKG_CONFIG_PATH:-}"
-            export LD_LIBRARY_PATH="${libraryPath}:''${LD_LIBRARY_PATH:-}"
-            exec "${pkgs.fish}/bin/fish"
-          '';
         };
       });
 }
