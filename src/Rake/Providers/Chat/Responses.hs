@@ -579,6 +579,7 @@ decodeResponsesResponse providerTag responseValue = do
                             , exchangeId = responseId
                             , nativeItemId
                             , payload
+                            , availableLocalTools = []
                             }
                 }
     pure ProviderRound{roundItems, mediaReferences = roundMediaReferences, action = roundAction}

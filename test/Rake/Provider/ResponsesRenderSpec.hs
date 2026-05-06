@@ -922,6 +922,7 @@ spec = describe "Responses request rendering" $ do
                                     , exchangeId = Just "response-openai"
                                     , nativeItemId = Just "item-openai-image"
                                     , payload
+                                    , availableLocalTools = []
                                     }
                         }
 
@@ -971,6 +972,7 @@ spec = describe "Responses request rendering" $ do
                                     , exchangeId = Just "response-openai"
                                     , nativeItemId = Just "item-openai-audio"
                                     , payload
+                                    , availableLocalTools = []
                                     }
                         }
 
@@ -1021,6 +1023,7 @@ spec = describe "Responses request rendering" $ do
                                     , exchangeId = Just "response-xai"
                                     , nativeItemId = Just "item-xai-file"
                                     , payload
+                                    , availableLocalTools = []
                                     }
                         }
 
@@ -1067,6 +1070,7 @@ spec = describe "Responses request rendering" $ do
                                     , exchangeId = Just "response-xai"
                                     , nativeItemId = Just "item-xai-audio"
                                     , payload
+                                    , availableLocalTools = []
                                     }
                         }
 
@@ -1111,6 +1115,7 @@ spec = describe "Responses request rendering" $ do
                                     , exchangeId = Just "response-openai"
                                     , nativeItemId = Just "item-openai-untyped-image"
                                     , payload
+                                    , availableLocalTools = []
                                     }
                         }
 
@@ -1155,6 +1160,7 @@ spec = describe "Responses request rendering" $ do
                                     , exchangeId = Just "response-xai"
                                     , nativeItemId = Just "item-xai-untyped-file"
                                     , payload
+                                    , availableLocalTools = []
                                     }
                         }
 
@@ -1217,6 +1223,7 @@ spec = describe "Responses request rendering" $ do
                                     , exchangeId = Just "response-openai"
                                     , nativeItemId = Just "item-openai-mixed-audio"
                                     , payload
+                                    , availableLocalTools = []
                                     }
                         }
 
@@ -1284,6 +1291,7 @@ spec = describe "Responses request rendering" $ do
                                     , exchangeId = Just "response-openai"
                                     , nativeItemId = Just "item-openai-mixed"
                                     , payload
+                                    , availableLocalTools = []
                                     }
                         }
 
@@ -1929,6 +1937,7 @@ pendingGeminiToolCallWithThoughtItemAndExchangeId contactName exchangeId toolCal
                     , exchangeId = Just exchangeId
                     , nativeItemId = Just toolCallId
                     , payload = geminiFunctionCallPayload toolCallId "lookup" (object ["name" .= contactName])
+                    , availableLocalTools = []
                     }
         }
 
@@ -1945,6 +1954,7 @@ nativeHistoryItem apiFamily lifecycle exchangeId nativeItemId payload =
                     , exchangeId = Just exchangeId
                     , nativeItemId
                     , payload
+                    , availableLocalTools = []
                     }
         }
   where

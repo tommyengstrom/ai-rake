@@ -137,6 +137,26 @@ spec = describe "Rake.Types" $ do
                             , exchangeId = Nothing
                             , nativeItemId = Just "native-thought"
                             , payload = object ["type" .= ("thought" :: Text)]
+                            , availableLocalTools = []
+                            }
+            fromJSON (toJSON item) `shouldBe` Success item
+
+        it "round-trips provider item available local tools" $ do
+            let item =
+                    nonPortableHistoryItem
+                        ItemPending
+                        ProviderItem
+                            { apiFamily = ProviderOpenAIResponses
+                            , exchangeId = Just "response-openai"
+                            , nativeItemId = Just "native-tool-call"
+                            , payload = object ["type" .= ("function_call" :: Text)]
+                            , availableLocalTools =
+                                [ ToolDeclaration
+                                    { name = "lookup"
+                                    , description = "lookup tool"
+                                    , parameterSchema = Just (object ["type" .= ("object" :: Text)])
+                                    }
+                                ]
                             }
             fromJSON (toJSON item) `shouldBe` Success item
 

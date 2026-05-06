@@ -57,6 +57,7 @@ Notes:
 - Canonical conversations are append-only agent logs. Provider-native items can be marked `ItemPending` or `ItemCompleted` inside persisted history.
 - Anything named `appendedItems` is the newly returned append-only suffix, not the full conversation history.
 - History items get stable `HistoryItemId`s before replay and persistence. When storage is used, the embedded item id matches the storage row id.
+- Provider-backed history items store the local `ToolDeclaration`s that were available to the model for the request that produced the provider item. This is debug/provenance data only; replay and tool execution still use the current `ChatConfig.tools`.
 - `chatOutcome` and `withResumableChat` require `IOE` because the library assigns `HistoryItemId`s before replay and persistence.
 - `streamChatOutcome` and `withResumableStreamingChat` also require `IOE`; they surface live assistant text/refusal deltas through `StreamCallbacks` but still only persist finalized `HistoryItem` suffixes.
 - `chatOutcome` returns an append-only canonical suffix plus explicit pause/failure state. Failed outcomes append a durable `ReplayBarrier` control item into the returned suffix.
@@ -74,6 +75,7 @@ Notes:
 - Provider-switch conversion warnings are logged to stderr by default when native items lose information during projection.
 - OpenAI and xAI chat adapters target the Responses API; Gemini chat targets the Interactions API.
 - Gemini-specific built-in Interactions tools are available through `GeminiChatSettings.providerTools`, while local function tools still flow through the shared chat loop.
+- Stored provider item tool provenance covers local Rake tools only; Gemini provider-native `providerTools` are not included in `availableLocalTools`.
 - Switching away from Gemini keeps generic unresolved tool state portable. Gemini-only pending `thought` metadata is reused only for same-provider Gemini continuation and is dropped when replaying into OpenAI/xAI.
 - Gemini image generation, OpenAI image generation, and xAI Grok Imagine image/video generation are available through provider-specific helper modules instead of the shared chat API.
 - Standalone TTS helpers are available for OpenAI and xAI through the shared `tts` and `ttsStreaming` entrypoints, plus provider-specific modules when you need provider-native settings.

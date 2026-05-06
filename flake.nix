@@ -39,6 +39,7 @@
             haskellPackages.cabal-install
             haskellPackages.ghcid
             haskellPackages.haskell-language-server
+            haskellPackages.hspec-discover
             haskellPackages.implicit-hie
             pkgs.fish
             pkgs.fourmolu

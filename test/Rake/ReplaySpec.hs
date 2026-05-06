@@ -276,7 +276,7 @@ spec = describe "Rake.Replay" $ do
                 `shouldBe`
                     [ [user "start"]
                     , [ user "start"
-                      , pendingCallItem
+                      , Chat.withAvailableLocalTools [Chat.loopTool] pendingCallItem
                       , toolResult "loop-1" "looped"
                       ]
                     ]
@@ -985,6 +985,7 @@ pendingGeminiUnusedThoughtItem =
             , exchangeId = Just "interaction-gemini"
             , nativeItemId = Just "thought-1"
             , payload = Render.geminiThoughtPayload "thought-1"
+            , availableLocalTools = []
             }
 
 pendingGeminiToolCallItem :: HistoryItem
@@ -1023,6 +1024,7 @@ pendingGeminiToolCallWithThoughtItem contactName =
                     , exchangeId = Just "interaction-gemini"
                     , nativeItemId = Just "tool-call-1"
                     , payload = Render.geminiFunctionCallPayload "tool-call-1" "lookup" (object ["name" .= contactName])
+                    , availableLocalTools = []
                     }
         }
 

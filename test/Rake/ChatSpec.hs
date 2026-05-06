@@ -40,11 +40,45 @@ spec = describe "Rake" $ do
                 `shouldBe` Right
                     ChatFinished
                         { appendedItems =
-                            [ responsesToolCallItem ItemPending pendingCall
+                            [ withAvailableLocalTools [loopTool] (responsesToolCallItem ItemPending pendingCall)
                             , toolResult "loop-1" "looped"
-                            , responsesAssistantItem ItemCompleted "{\"answer\":4}"
+                            , withAvailableLocalTools [loopTool] (responsesAssistantItem ItemCompleted "{\"answer\":4}")
                             ]
                         }
+
+        it "stores available local tools on provider-returned tool calls and assistant messages" $ do
+            let pendingCall = loopToolCall "loop-1"
+            result <-
+                runMockChatOutcome
+                    [ toolProviderRound [responsesToolCallItem ItemPending pendingCall] [pendingCall]
+                    , finalProviderRound [responsesAssistantItem ItemCompleted "done"]
+                    ]
+                    ( chatOutcome
+                        defaultChatConfig
+                            { maxToolRounds = 1
+                            , tools = [loopTool]
+                            }
+                        [user "start"]
+                    )
+
+            case result of
+                Right ChatFinished{appendedItems = [toolCallItem, HistoryItem{genericItem = GenericToolResult{}}, assistantItem]} -> do
+                    providerItemAvailableLocalTools toolCallItem `shouldBe` Just (toolDeclaration <$> [loopTool])
+                    providerItemAvailableLocalTools assistantItem `shouldBe` Just (toolDeclaration <$> [loopTool])
+                other ->
+                    expectationFailure ("Unexpected chat outcome: " <> show other)
+
+        it "stores an empty local tool list on provider items when no tools are configured" $ do
+            result <-
+                runMockChatOutcome
+                    [finalProviderRound [responsesAssistantItem ItemCompleted "done"]]
+                    (chatOutcome defaultChatConfig [user "start"])
+
+            case result of
+                Right ChatFinished{appendedItems = [assistantItem]} ->
+                    providerItemAvailableLocalTools assistantItem `shouldBe` Just []
+                other ->
+                    expectationFailure ("Unexpected chat outcome: " <> show other)
 
         it "returns ConversationBlocked without a reset hint for id-less blocked histories" $ do
             let barrierMessage = "Responses response status was failed"
@@ -105,9 +139,9 @@ spec = describe "Rake" $ do
                 `shouldBe` Right
                     ChatFinished
                         { appendedItems =
-                            [ responsesToolCallItem ItemPending pendingCall
+                            [ withAvailableLocalTools [loopTool] (responsesToolCallItem ItemPending pendingCall)
                             , toolResult "loop-1" "looped"
-                            , responsesAssistantItem ItemCompleted "{\"answer\":4}"
+                            , withAvailableLocalTools [loopTool] (responsesAssistantItem ItemCompleted "{\"answer\":4}")
                             ]
                         }
             recordedSampling <- IORef.readIORef samplingRef
@@ -155,8 +189,8 @@ spec = describe "Rake" $ do
                 `shouldBe` Right
                     ChatPaused
                         { appendedItems =
-                            [ pendingAssistant
-                            , responsesToolCallItem ItemPending pendingCall
+                            [ withAvailableLocalTools [loopTool] pendingAssistant
+                            , withAvailableLocalTools [loopTool] (responsesToolCallItem ItemPending pendingCall)
                             , toolResult "loop-1" "looped"
                             ]
                         , pauseReason = PauseProviderWaiting "Gemini interaction status was in_progress"
@@ -182,9 +216,9 @@ spec = describe "Rake" $ do
                 `shouldBe` Right
                     ChatPaused
                         { appendedItems =
-                            [ responsesToolCallItem ItemPending firstCall
+                            [ withAvailableLocalTools [loopTool] (responsesToolCallItem ItemPending firstCall)
                             , toolResult "loop-1" "looped"
-                            , responsesToolCallItem ItemPending secondCall
+                            , withAvailableLocalTools [loopTool] (responsesToolCallItem ItemPending secondCall)
                             ]
                         , pauseReason = PauseToolLoopLimit 1
                         }
@@ -254,8 +288,8 @@ spec = describe "Rake" $ do
                 `shouldBe` Right
                     ChatFailed
                         { appendedItems =
-                            [ duplicatedCallItem
-                            , duplicatedCallItem
+                            [ withAvailableLocalToolDeclarations [countingToolDeclaration] duplicatedCallItem
+                            , withAvailableLocalToolDeclarations [countingToolDeclaration] duplicatedCallItem
                             , replayBarrierItem failureMessage
                             ]
                         , failureReason = FailureContract failureMessage
@@ -284,7 +318,7 @@ spec = describe "Rake" $ do
                 `shouldBe` Right
                     ChatFailed
                         { appendedItems =
-                            [ historyCallItem
+                            [ withAvailableLocalToolDeclarations [countingToolDeclaration] historyCallItem
                             , replayBarrierItem toolCallProjectionMismatchFailureMessage
                             ]
                         , failureReason = FailureContract toolCallProjectionMismatchFailureMessage
@@ -315,9 +349,9 @@ spec = describe "Rake" $ do
                 `shouldBe` Right
                     ChatFinished
                         { appendedItems =
-                            [ repeatedCallItem
+                            [ withAvailableLocalToolDeclarations [countingToolDeclaration] repeatedCallItem
                             , toolResult "reused-1" "counted"
-                            , finalAssistant
+                            , withAvailableLocalToolDeclarations [countingToolDeclaration] finalAssistant
                             ]
                         }
             IORef.readIORef executionsRef `shouldReturn` 1
@@ -408,9 +442,9 @@ spec = describe "Rake" $ do
                 `shouldBe` Right
                     ChatFinished
                         { appendedItems =
-                            [ pendingCallItem
+                            [ withAvailableLocalTools [loopTool] pendingCallItem
                             , toolResult "loop-1" "looped"
-                            , finalAssistant
+                            , withAvailableLocalTools [loopTool] finalAssistant
                             ]
                         }
             IORef.readIORef streamedTextRef `shouldReturn` ["{\"answer\":", "4}"]
@@ -542,6 +576,7 @@ spec = describe "Rake" $ do
                             , exchangeId = Just "interaction-gemini"
                             , nativeItemId = Just "thought-1"
                             , payload = object ["type" .= ("thought" :: Text)]
+                            , availableLocalTools = []
                             }
                 history = [assistantText "{\"answer\":4}", completedGeminiThought]
 
@@ -569,6 +604,7 @@ spec = describe "Rake" $ do
                                     , exchangeId = Just "response-openai"
                                     , nativeItemId = Just "item-openai"
                                     , payload = object ["type" .= ("message" :: Text)]
+                                    , availableLocalTools = []
                                     }
                         }
                     ]
@@ -801,16 +837,16 @@ spec = describe "Rake" $ do
                 `shouldBe` Right
                     ( ChatPaused
                         { appendedItems =
-                            [ pendingCallItem
+                            [ withAvailableLocalTools [loopTool] pendingCallItem
                             , toolResult "loop-1" "looped"
-                            , unresolvedCallItem
+                            , withAvailableLocalTools [loopTool] unresolvedCallItem
                             ]
                         , pauseReason = PauseToolLoopLimit 1
                         }
                     , [ user "start"
-                      , pendingCallItem
+                      , withAvailableLocalTools [loopTool] pendingCallItem
                       , toolResult "loop-1" "looped"
-                      , unresolvedCallItem
+                      , withAvailableLocalTools [loopTool] unresolvedCallItem
                       ]
                     )
 
@@ -862,7 +898,7 @@ spec = describe "Rake" $ do
                     ChatFinished
                         { appendedItems =
                             [ toolResult "loop-1" "looped"
-                            , finalAssistant
+                            , withAvailableLocalTools [loopTool] finalAssistant
                             ]
                         }
             recordedHistories <- IORef.readIORef historyRef
@@ -972,6 +1008,14 @@ countingToolCall toolCallId =
         , toolName = "counting_tool"
         , toolArgs = mempty
         , continuationAttachments = []
+        }
+
+countingToolDeclaration :: ToolDeclaration
+countingToolDeclaration =
+    ToolDeclaration
+        { name = "counting_tool"
+        , description = "Counts executions"
+        , parameterSchema = Nothing
         }
 
 data MockStreamDelta
@@ -1311,6 +1355,7 @@ responsesAssistantItem lifecycle textValue =
                                         :: [Value]
                                    )
                             ]
+                    , availableLocalTools = []
                     }
         }
 
@@ -1343,8 +1388,33 @@ responsesToolCallItem lifecycle ToolCall{toolCallId = ToolCallId toolCallId, too
                             , "name" .= toolName
                             , "arguments" .= Object (KM.fromMap (Map.mapKeys fromText toolArgs))
                             ]
+                    , availableLocalTools = []
                     }
         }
+
+withAvailableLocalTools :: [ToolDef es] -> HistoryItem -> HistoryItem
+withAvailableLocalTools toolDefs =
+    withAvailableLocalToolDeclarations (toolDeclaration <$> toolDefs)
+
+withAvailableLocalToolDeclarations :: [ToolDeclaration] -> HistoryItem -> HistoryItem
+withAvailableLocalToolDeclarations availableLocalTools historyItem@HistoryItem{providerItem = maybeProviderItem} =
+    historyItem
+        { providerItem =
+            ( \providerMetadata ->
+                providerMetadata{availableLocalTools}
+            )
+                <$> maybeProviderItem
+        }
+
+providerItemAvailableLocalTools :: HistoryItem -> Maybe [ToolDeclaration]
+providerItemAvailableLocalTools HistoryItem{providerItem = Just ProviderItem{availableLocalTools}} =
+    Just availableLocalTools
+providerItemAvailableLocalTools _ =
+    Nothing
+
+toolDeclaration :: ToolDef es -> ToolDeclaration
+toolDeclaration ToolDef{name, description, parameterSchema} =
+    ToolDeclaration{name, description, parameterSchema}
 
 lifecycleSuffix :: ItemLifecycle -> Text
 lifecycleSuffix = \case
@@ -1362,6 +1432,7 @@ geminiThought =
             , exchangeId = Just "interaction-gemini"
             , nativeItemId = Just "thought-1"
             , payload = object ["type" .= ("thought" :: Text)]
+            , availableLocalTools = []
             }
 
 replayBarrierItem :: Text -> HistoryItem

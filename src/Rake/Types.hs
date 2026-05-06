@@ -287,6 +287,7 @@ data ProviderItem = ProviderItem
     , exchangeId :: Maybe Text
     , nativeItemId :: Maybe Text
     , payload :: Value
+    , availableLocalTools :: [ToolDeclaration]
     }
     deriving stock (Show, Eq, Generic)
     deriving anyclass (FromJSON, ToJSON)

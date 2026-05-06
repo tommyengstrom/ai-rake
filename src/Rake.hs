@@ -486,6 +486,7 @@ handleToolLoop
     -> Int
     -> Eff es ChatOutcome
 handleToolLoop requestProviderRound tools responseFormat samplingOptions onItem maxRounds checkpointHistory conversation accumulated completedRounds = do
+    let availableLocalTools = toToolDeclaration <$> tools
     let fullHistory = conversation <> accumulated
     throwIfReplayBlocked fullHistory checkpointHistory
     let ReplayState{resumableToolCalls = pendingToolCalls} = conversationReplayState fullHistory
@@ -501,14 +502,15 @@ handleToolLoop requestProviderRound tools responseFormat samplingOptions onItem 
         , action = roundAction
         } <-
         requestProviderRound
-            (toToolDeclaration <$> tools)
+            availableLocalTools
             responseFormat
             samplingOptions
             ( let ReplayState{replayHistory} = conversationReplayState fullHistoryAfterResume
                in replayHistory
             )
     saveMediaReferences roundMediaReferences
-    roundHistoryItems <- ensureHistoryItemIds roundHistoryItemsRaw
+    roundHistoryItems <-
+        ensureHistoryItemIds (recordAvailableLocalTools availableLocalTools <$> roundHistoryItemsRaw)
     traverse_ onItem roundHistoryItems
 
     let accumulatedHistory = accumulatedAfterResume <> roundHistoryItems
@@ -571,6 +573,15 @@ handleToolLoop requestProviderRound tools responseFormat samplingOptions onItem 
   where
     toToolDeclaration ToolDef{name, description, parameterSchema} =
         ToolDeclaration{name, description, parameterSchema}
+
+    recordAvailableLocalTools availableLocalTools historyItem@HistoryItem{providerItem = maybeProviderItem} =
+        historyItem
+            { providerItem =
+                ( \providerMetadata ->
+                    providerMetadata{availableLocalTools}
+                )
+                    <$> maybeProviderItem
+            }
 
     emitFailedOutcome historyItems failureReason = do
         replayBarrier <- ensureHistoryItemId (failureBarrier failureReason)

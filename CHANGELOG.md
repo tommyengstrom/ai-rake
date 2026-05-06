@@ -11,6 +11,7 @@ and this project adheres to the
 - Changed canonical conversation storage to an append-only agent log. Provider-native items now carry `ItemPending` or `ItemCompleted`, and unresolved tool calls or incomplete assistant output are persisted as ordinary history instead of being hidden in transient loop state.
 - Replaced `chatOutcomeFinalizedItems` with `chatOutcomeItems` as the low-level storage extractor for resumable `chatOutcome` flows.
 - Added embedded `HistoryItemId`s plus `ResetCheckpoint`-based recovery helpers for append-only replay, including `validResetCheckpoints`, `latestValidCheckpoint`, `resetToLatestValidCheckpoint`, `resetTo`, and `resetToStart`.
+- Provider-backed history items now store the local `ToolDeclaration`s that were available to the model for the request that produced the provider item.
 - `chat` and `chatOutcome` now require `IOE` so the library can assign `HistoryItemId`s before replay and persistence.
 - Added durable replay barriers for failed `chatOutcome` runs, and a typed `ConversationBlocked` error for strict `chat` callers.
 - Historical unresolved tool calls now resume into a synthetic `"Tool not found"` result when the local tool is no longer configured, instead of being silently dropped.

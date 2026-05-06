@@ -896,6 +896,7 @@ decodeGeminiResponse responseValue = do
                             _ ->
                                 Nothing
                     , payload
+                    , availableLocalTools = []
                     }
         pure $
             case canonicalItem of
