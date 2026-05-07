@@ -105,6 +105,7 @@ spec = do
         Just apiKey ->
             describe "Rake Provider - xAI" $ do
                 specWithProvider imageFixture (runEffectStack (T.pack apiKey))
+                specWithManyToolProvider (runEffectStackResult (T.pack apiKey))
                 specWithStructuredSchemaProvider
                     allStructuredSchemasAccepted
                     (runEffectStackResult (T.pack apiKey))

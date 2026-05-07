@@ -95,6 +95,19 @@ spec = describe "Responses request rendering" $ do
 
             firstToolParameters requestBody `shouldBe` Just (object [])
 
+        forM_ ([2, excessiveToolCount] :: [Int]) $ \toolCountToRender ->
+            it (toString ("renders " <> show toolCountToRender <> " tools for OpenAI, xAI, and Gemini" :: Text)) $ do
+                let chatConfig =
+                        withTools (generatedTools toolCountToRender) defaultChatConfig
+
+                openAIRequestBody <- captureOpenAIRequestBody chatConfig [user "hello"]
+                xaiRequestBody <- captureXAIRequestBody chatConfig [user "hello"]
+                geminiRequestBody <- captureGeminiRequestBody chatConfig [user "hello"]
+
+                toolCount openAIRequestBody `shouldBe` Just toolCountToRender
+                toolCount xaiRequestBody `shouldBe` Just toolCountToRender
+                toolCount geminiRequestBody `shouldBe` Just toolCountToRender
+
         it "renders Gemini structured response schemas as response_format only" $ do
             requestBody <-
                 captureGeminiRequestBody
@@ -1405,6 +1418,31 @@ spec = describe "Responses request rendering" $ do
                 `shouldBe` Right
                     (providerRound [] [] (ProviderRoundFailed (FailureProvider "Responses response status was failed")))
 
+        it "propagates top-level Responses failure details" $ do
+            let response =
+                    object
+                        [ "id" .= ("response-openai" :: Text)
+                        , "status" .= ("failed" :: Text)
+                        , "error"
+                            .= object
+                                [ "code" .= ("too_many_tools" :: Text)
+                                , "message" .= ("The request contains too many tools." :: Text)
+                                ]
+                        , "output" .= ([] :: [Value])
+                        ]
+
+            decodeOpenAIResponse response
+                `shouldBe` Right
+                    ( providerRound
+                        []
+                        []
+                        ( ProviderRoundFailed
+                            ( FailureProvider
+                                "Responses response status was failed: too_many_tools: The request contains too many tools."
+                            )
+                        )
+                    )
+
         it "fails mixed Responses rounds when any item has terminal failure status, even if a tool call is present" $ do
             let toolPayload =
                     responsesToolCallPayload
@@ -1427,6 +1465,31 @@ spec = describe "Responses request rendering" $ do
                         ]
                         []
                         (ProviderRoundFailed (FailureProvider "Responses output item status was failed"))
+                    )
+
+        it "propagates Responses output item failure details" $ do
+            let failedPayload =
+                    object
+                        [ "id" .= ("item-openai-message" :: Text)
+                        , "type" .= ("message" :: Text)
+                        , "status" .= ("failed" :: Text)
+                        , "error"
+                            .= object
+                                [ "code" .= ("tool_schema_invalid" :: Text)
+                                , "message" .= ("Tool schema is invalid." :: Text)
+                                ]
+                        ]
+
+            decodeOpenAIResponse (responsesResponse "response-openai" "completed" [failedPayload])
+                `shouldBe` Right
+                    ( providerRound
+                        [nativeHistoryItem ProviderOpenAIResponses ItemPending "response-openai" (Just "item-openai-message") failedPayload]
+                        []
+                        ( ProviderRoundFailed
+                            ( FailureProvider
+                                "Responses output item status was failed: tool_schema_invalid: Tool schema is invalid."
+                            )
+                        )
                     )
 
         it "decodes completed Gemini assistant responses as completed rounds" $ do
@@ -1502,6 +1565,31 @@ spec = describe "Responses request rendering" $ do
             decodeGeminiResponse (geminiResponse "interaction-gemini" "failed" [])
                 `shouldBe` Right
                     (providerRound [] [] (ProviderRoundFailed (FailureProvider "Gemini interaction status was failed")))
+
+        it "propagates Gemini failure details" $ do
+            let response =
+                    object
+                        [ "id" .= ("interaction-gemini" :: Text)
+                        , "status" .= ("failed" :: Text)
+                        , "error"
+                            .= object
+                                [ "code" .= ("too_many_tools" :: Text)
+                                , "message" .= ("Too many function declarations." :: Text)
+                                ]
+                        , "outputs" .= ([] :: [Value])
+                        ]
+
+            decodeGeminiResponse response
+                `shouldBe` Right
+                    ( providerRound
+                        []
+                        []
+                        ( ProviderRoundFailed
+                            ( FailureProvider
+                                "Gemini interaction status was failed: too_many_tools: Too many function declarations."
+                            )
+                        )
+                    )
 
         it "fails completed Gemini thought-only rounds as contract errors" $ do
             let payload = geminiThoughtPayload "thought-1"
@@ -1591,6 +1679,18 @@ withTemperature temperature SamplingOptions{topP} =
 withTopP :: Maybe Double -> SamplingOptions -> SamplingOptions
 withTopP topP SamplingOptions{temperature} =
     SamplingOptions{temperature, topP}
+
+excessiveToolCount :: Int
+excessiveToolCount = 5000
+
+generatedTools :: Int -> [ToolDef es]
+generatedTools count =
+    [ defineToolNoArgument
+        ("generated_tool_" <> show toolIndex)
+        ("Generated no-op tool " <> show toolIndex)
+        (pure (Right "ok"))
+    | toolIndex <- [1 .. count]
+    ]
 
 captureOpenAIRequestBody
     :: ChatConfig '[Rake, RakeMediaStorage, Error RakeError, IOE]
@@ -2111,6 +2211,11 @@ firstToolParameters requestBody = do
     Array tools <- lookupPath ["tools"] requestBody
     toolValue <- viaNonEmpty head (toList tools)
     lookupPath ["parameters"] toolValue
+
+toolCount :: Value -> Maybe Int
+toolCount requestBody = do
+    Array tools <- lookupPath ["tools"] requestBody
+    pure (length tools)
 
 lookupPath :: [Text] -> Value -> Maybe Value
 lookupPath [] value = Just value

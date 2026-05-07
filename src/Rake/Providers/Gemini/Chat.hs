@@ -1048,6 +1048,7 @@ decodeGeminiResponse :: Value -> Either RakeError ProviderRound
 decodeGeminiResponse responseValue = do
     responseObject <- expectObject "interaction" responseValue
     let interactionStatus = lookupText "status" responseObject
+        interactionFailureDetail = providerFailureDetail responseObject
     outputs <- case KM.lookup "outputs" responseObject of
         Just outputsValue ->
             expectArray "interaction.outputs" outputsValue
@@ -1069,6 +1070,7 @@ decodeGeminiResponse responseValue = do
         roundAction =
             geminiRoundAction
                 interactionStatus
+                interactionFailureDetail
                 projectedItems
                 toolCalls
                 projectionNotes
@@ -1102,12 +1104,13 @@ decodeGeminiResponse responseValue = do
 
 geminiRoundAction
     :: Maybe Text
+    -> Maybe Text
     -> [GenericItem]
     -> [ToolCall]
     -> [Text]
     -> ProviderRoundAction
-geminiRoundAction interactionStatus projectedItems toolCalls projectionNotes
-    | Just failureAction <- interactionStatus >>= geminiTerminalAction =
+geminiRoundAction interactionStatus interactionFailureDetail projectedItems toolCalls projectionNotes
+    | Just failureAction <- interactionStatus >>= (`geminiTerminalAction` interactionFailureDetail) =
         failureAction
     | not (null toolCalls) =
         ProviderRoundNeedsLocalTools toolCalls
@@ -1128,16 +1131,16 @@ geminiRoundAction interactionStatus projectedItems toolCalls projectionNotes
                     "Gemini interaction completed without tool calls or assistant message"
                     projectionNotes
 
-geminiTerminalAction :: Text -> Maybe ProviderRoundAction
-geminiTerminalAction interactionStatus = case interactionStatus of
+geminiTerminalAction :: Text -> Maybe Text -> Maybe ProviderRoundAction
+geminiTerminalAction interactionStatus maybeDetail = case interactionStatus of
     "failed" ->
-        Just (ProviderRoundFailed (FailureProvider ("Gemini interaction status was " <> interactionStatus)))
+        Just (ProviderRoundFailed (FailureProvider (appendProviderFailureDetail ("Gemini interaction status was " <> interactionStatus) maybeDetail)))
     "cancelled" ->
-        Just (ProviderRoundFailed (FailureProvider ("Gemini interaction status was " <> interactionStatus)))
+        Just (ProviderRoundFailed (FailureProvider (appendProviderFailureDetail ("Gemini interaction status was " <> interactionStatus) maybeDetail)))
     "canceled" ->
-        Just (ProviderRoundFailed (FailureProvider ("Gemini interaction status was " <> interactionStatus)))
+        Just (ProviderRoundFailed (FailureProvider (appendProviderFailureDetail ("Gemini interaction status was " <> interactionStatus) maybeDetail)))
     "expired" ->
-        Just (ProviderRoundFailed (FailureProvider ("Gemini interaction status was " <> interactionStatus)))
+        Just (ProviderRoundFailed (FailureProvider (appendProviderFailureDetail ("Gemini interaction status was " <> interactionStatus) maybeDetail)))
     _ ->
         Nothing
 
@@ -1198,6 +1201,40 @@ appendProjectionNotes base notes =
     if null notes
         then base
         else base <> ". Projection notes: " <> mconcat (intersperse "; " notes)
+
+appendProviderFailureDetail :: Text -> Maybe Text -> Text
+appendProviderFailureDetail base maybeDetail =
+    maybe base ((base <> ": ") <>) maybeDetail
+
+providerFailureDetail :: Object -> Maybe Text
+providerFailureDetail objectValue =
+    (KM.lookup "error" objectValue >>= providerErrorValueDetail)
+        <|> lookupText "message" objectValue
+        <|> lookupText "failure_reason" objectValue
+
+providerErrorValueDetail :: Value -> Maybe Text
+providerErrorValueDetail = \case
+    Object errorObject ->
+        combineErrorCodeAndMessage
+            (lookupText "code" errorObject)
+            (lookupText "message" errorObject)
+            <|> Just (valueToCompactText (Object errorObject))
+    String errorText ->
+        Just errorText
+    otherValue ->
+        Just (valueToCompactText otherValue)
+
+combineErrorCodeAndMessage :: Maybe Text -> Maybe Text -> Maybe Text
+combineErrorCodeAndMessage maybeCode maybeMessage =
+    case (maybeCode, maybeMessage) of
+        (Just code, Just message) ->
+            Just (code <> ": " <> message)
+        (Just code, Nothing) ->
+            Just code
+        (Nothing, Just message) ->
+            Just message
+        (Nothing, Nothing) ->
+            Nothing
 
 geminiNativeItemId :: Object -> Maybe Text
 geminiNativeItemId payloadObject =

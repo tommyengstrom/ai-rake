@@ -116,6 +116,7 @@ spec = do
         Just apiKey ->
             describe "Rake Provider - OpenAI" $ do
                 specWithProvider imageFixture (runEffectStack (T.pack apiKey))
+                specWithManyToolProvider (runEffectStackResult (T.pack apiKey))
                 specWithStructuredSchemaProvider
                     structuredSchemaExpectations
                     (runEffectStackResult (T.pack apiKey))

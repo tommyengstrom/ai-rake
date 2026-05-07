@@ -545,7 +545,21 @@ decodeResponsesResponse providerTag responseValue = do
     parsedOutputItems <- forM (Vector.toList outputItems) $ \payload -> do
         payloadObject <- expectObject "response.output item" payload
         pure (payload, payloadObject)
-    let outputStatuses = mapMaybe (lookupText "status" . snd) parsedOutputItems
+    let statusContexts =
+            catMaybes
+                [ statusContext
+                    "Responses response status was "
+                    responseStatus
+                    (providerFailureDetail responseObject)
+                ]
+                <> mapMaybe
+                    ( \(_, payloadObject) ->
+                        statusContext
+                            "Responses output item status was "
+                            (lookupText "status" payloadObject)
+                            (providerFailureDetail payloadObject)
+                    )
+                    parsedOutputItems
         classifiedOutputItems =
             [ let (notes, canonicalItem, mediaReferences) = classifyResponsesPayload responseApiFamily responseId payload
                in (payload, payloadObject, notes, canonicalItem, mediaReferences)
@@ -562,8 +576,7 @@ decodeResponsesResponse providerTag responseValue = do
         toolCalls = collectToolCalls projectedItems
         roundAction =
             responsesRoundAction
-                responseStatus
-                outputStatuses
+                statusContexts
                 projectedItems
                 toolCalls
                 projectionNotes
@@ -588,18 +601,17 @@ decodeResponsesResponse providerTag responseValue = do
     pure ProviderRound{roundItems, mediaReferences = roundMediaReferences, action = roundAction}
 
 responsesRoundAction
-    :: Maybe Text
-    -> [Text]
+    :: [(Text, Text, Maybe Text)]
     -> [GenericItem]
     -> [ToolCall]
     -> [Text]
     -> ProviderRoundAction
-responsesRoundAction responseStatus outputStatuses projectedItems toolCalls projectionNotes
-    | Just failureReason <- responsesFailureReason responseStatus outputStatuses =
+responsesRoundAction statusContexts projectedItems toolCalls projectionNotes
+    | Just failureReason <- responsesFailureReason statusContexts =
         ProviderRoundFailed failureReason
     | not (null toolCalls) =
         ProviderRoundNeedsLocalTools toolCalls
-    | Just pauseReason <- responsesPauseReason responseStatus outputStatuses =
+    | Just pauseReason <- responsesPauseReason statusContexts =
         ProviderRoundPaused pauseReason
     | hasAssistantMessage projectedItems =
         ProviderRoundDone
@@ -610,33 +622,29 @@ responsesRoundAction responseStatus outputStatuses projectedItems toolCalls proj
                     "Responses response completed without tool calls or assistant message"
                     projectionNotes
 
-responsesFailureReason :: Maybe Text -> [Text] -> Maybe ChatFailureReason
-responsesFailureReason responseStatus outputStatuses =
-    asum
-        (map statusFailureReason (statusContexts "Responses response status was " responseStatus outputStatuses))
+responsesFailureReason :: [(Text, Text, Maybe Text)] -> Maybe ChatFailureReason
+responsesFailureReason =
+    asum . map statusFailureReason
 
-responsesPauseReason :: Maybe Text -> [Text] -> Maybe ChatPauseReason
-responsesPauseReason responseStatus outputStatuses =
-    asum
-        (map statusIncompletePause (statusContexts "Responses response status was " responseStatus outputStatuses))
-        <|> asum
-            (map statusWaitingPause (statusContexts "Responses response status was " responseStatus outputStatuses))
+responsesPauseReason :: [(Text, Text, Maybe Text)] -> Maybe ChatPauseReason
+responsesPauseReason contexts =
+    asum (map statusIncompletePause contexts)
+        <|> asum (map statusWaitingPause contexts)
 
-statusContexts :: Text -> Maybe Text -> [Text] -> [(Text, Text)]
-statusContexts topPrefix maybeTopLevelStatus outputStatuses =
-    maybe [] (\statusText -> [(topPrefix, statusText)]) maybeTopLevelStatus
-        <> map (("Responses output item status was ",)) outputStatuses
+statusContext :: Text -> Maybe Text -> Maybe Text -> Maybe (Text, Text, Maybe Text)
+statusContext prefix maybeStatus maybeDetail =
+    (\statusText -> (prefix, statusText, maybeDetail)) <$> maybeStatus
 
-statusFailureReason :: (Text, Text) -> Maybe ChatFailureReason
-statusFailureReason (prefix, statusText) = case statusText of
+statusFailureReason :: (Text, Text, Maybe Text) -> Maybe ChatFailureReason
+statusFailureReason (prefix, statusText, maybeDetail) = case statusText of
     "failed" ->
-        Just (FailureProvider (prefix <> statusText))
+        Just (FailureProvider (appendProviderFailureDetail (prefix <> statusText) maybeDetail))
     "cancelled" ->
-        Just (FailureProvider (prefix <> statusText))
+        Just (FailureProvider (appendProviderFailureDetail (prefix <> statusText) maybeDetail))
     "canceled" ->
-        Just (FailureProvider (prefix <> statusText))
+        Just (FailureProvider (appendProviderFailureDetail (prefix <> statusText) maybeDetail))
     "expired" ->
-        Just (FailureProvider (prefix <> statusText))
+        Just (FailureProvider (appendProviderFailureDetail (prefix <> statusText) maybeDetail))
     "completed" ->
         Nothing
     "incomplete" ->
@@ -650,17 +658,17 @@ statusFailureReason (prefix, statusText) = case statusText of
     "processing" ->
         Nothing
     otherStatus ->
-        Just (FailureContract ("Unsupported Responses status: " <> otherStatus))
+        Just (FailureContract (appendProviderFailureDetail ("Unsupported Responses status: " <> otherStatus) maybeDetail))
 
-statusIncompletePause :: (Text, Text) -> Maybe ChatPauseReason
-statusIncompletePause (prefix, statusText) = case statusText of
+statusIncompletePause :: (Text, Text, Maybe Text) -> Maybe ChatPauseReason
+statusIncompletePause (prefix, statusText, _) = case statusText of
     "incomplete" ->
         Just (PauseIncomplete (prefix <> statusText))
     _ ->
         Nothing
 
-statusWaitingPause :: (Text, Text) -> Maybe ChatPauseReason
-statusWaitingPause (prefix, statusText) = case statusText of
+statusWaitingPause :: (Text, Text, Maybe Text) -> Maybe ChatPauseReason
+statusWaitingPause (prefix, statusText, _) = case statusText of
     "queued" ->
         Just (PauseProviderWaiting (prefix <> statusText))
     "in_progress" ->
@@ -671,6 +679,40 @@ statusWaitingPause (prefix, statusText) = case statusText of
         Just (PauseProviderWaiting (prefix <> statusText))
     _ ->
         Nothing
+
+appendProviderFailureDetail :: Text -> Maybe Text -> Text
+appendProviderFailureDetail base maybeDetail =
+    maybe base ((base <> ": ") <>) maybeDetail
+
+providerFailureDetail :: Object -> Maybe Text
+providerFailureDetail objectValue =
+    (KM.lookup "error" objectValue >>= providerErrorValueDetail)
+        <|> lookupText "message" objectValue
+        <|> lookupText "failure_reason" objectValue
+
+providerErrorValueDetail :: Value -> Maybe Text
+providerErrorValueDetail = \case
+    Object errorObject ->
+        combineErrorCodeAndMessage
+            (lookupText "code" errorObject)
+            (lookupText "message" errorObject)
+            <|> Just (valueToCompactText (Object errorObject))
+    String errorText ->
+        Just errorText
+    otherValue ->
+        Just (valueToCompactText otherValue)
+
+combineErrorCodeAndMessage :: Maybe Text -> Maybe Text -> Maybe Text
+combineErrorCodeAndMessage maybeCode maybeMessage =
+    case (maybeCode, maybeMessage) of
+        (Just code, Just message) ->
+            Just (code <> ": " <> message)
+        (Just code, Nothing) ->
+            Just code
+        (Nothing, Just message) ->
+            Just message
+        (Nothing, Nothing) ->
+            Nothing
 
 providerRoundItemLifecycle :: ProviderRoundAction -> ItemLifecycle
 providerRoundItemLifecycle = \case

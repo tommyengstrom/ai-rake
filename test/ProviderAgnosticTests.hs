@@ -191,6 +191,49 @@ specWithProvider ProviderImageFixture{registerImageFixture} runEffectStack = do
                         _ -> False
                     )
 
+specWithManyToolProvider
+    :: forall es
+     . ( IOE :> es
+       , RakeMediaStorage :> es
+       , Error RakeError :> es
+       , Rake :> es
+       )
+    => (forall a. Eff es a -> IO (Either RakeError a))
+    -> Spec
+specWithManyToolProvider runEffectStackResult =
+    describe "many tool handling" $ do
+        it "answers normally with two generated tools" $ do
+            result <-
+                runEffectStackResult $
+                    chatOutcome
+                        defaultChatConfig
+                            { tools = generatedTools 2
+                            , llmCallTimeout = Just 60
+                            }
+                        [ system "Reply directly. Do not call tools."
+                        , user "Reply with one short sentence."
+                        ]
+
+            case result of
+                Right outcome ->
+                    lastAssistantTexts (expectFinished outcome) `shouldSatisfy` any (not . T.null)
+                Left err ->
+                    expectationFailure ("Expected a finished answer with two tools, got: " <> show err)
+
+        it "returns an explicit failure for excessive generated tools" $ do
+            result <-
+                runEffectStackResult $
+                    chatOutcome
+                        defaultChatConfig
+                            { tools = generatedTools excessiveToolCount
+                            , llmCallTimeout = Just 60
+                            }
+                        [ system "Reply directly. Do not call tools."
+                        , user "Reply with one short sentence."
+                        ]
+
+            assertExcessiveToolFailure result
+
 data PersonInfo = PersonInfo
     { name :: Text
     , age :: Int
@@ -227,6 +270,67 @@ expectFinished = \case
         appendedItems
     other ->
         error ("Expected ChatFinished, got: " <> show other)
+
+excessiveToolCount :: Int
+excessiveToolCount = 5000
+
+generatedTools :: Int -> [ToolDef es]
+generatedTools count =
+    [ defineToolNoArgument
+        ("generated_tool_" <> show toolIndex)
+        (generatedToolDescription count toolIndex)
+        (pure (Right "ok"))
+    | toolIndex <- [1 .. count]
+    ]
+
+generatedToolDescription :: Int -> Int -> Text
+generatedToolDescription count toolIndex
+    | count >= excessiveToolCount =
+        "Generated no-op tool "
+            <> show toolIndex
+            <> ". "
+            <> T.replicate 3000 "large provider rejection payload. "
+    | otherwise =
+        "Generated no-op tool " <> show toolIndex
+
+assertExcessiveToolFailure :: Either RakeError ChatOutcome -> Expectation
+assertExcessiveToolFailure = \case
+    Left err@LlmClientError{} ->
+        renderRakeError err `shouldSatisfy` (not . T.null)
+    Left err@LlmTimeoutError{} ->
+        renderRakeError err `shouldSatisfy` (not . T.null)
+    Left err ->
+        expectationFailure ("Expected an explicit failure for excessive tools, got: " <> show err)
+    Right ChatFailed{appendedItems, failureReason} -> do
+        failureReasonText failureReason `shouldSatisfy` (not . T.null)
+        appendedItems `shouldSatisfy` any isReplayBarrier
+    Right outcome ->
+        expectationFailure $
+            "Expected an explicit failure for excessive tools, got "
+                <> outcomeSummary outcome
+
+failureReasonText :: ChatFailureReason -> Text
+failureReasonText = \case
+    FailureProvider failureReason ->
+        failureReason
+    FailureContract failureReason ->
+        failureReason
+
+isReplayBarrier :: HistoryItem -> Bool
+isReplayBarrier = \case
+    HistoryItem{genericItem = GenericReplayBarrier{}} ->
+        True
+    _ ->
+        False
+
+outcomeSummary :: ChatOutcome -> String
+outcomeSummary = \case
+    ChatFinished{appendedItems} ->
+        "ChatFinished with " <> show (length appendedItems) <> " appended items"
+    ChatPaused{appendedItems, pauseReason} ->
+        "ChatPaused with " <> show (length appendedItems) <> " appended items: " <> show pauseReason
+    ChatFailed{appendedItems, failureReason} ->
+        "ChatFailed with " <> show (length appendedItems) <> " appended items: " <> show failureReason
 
 showPhoneNumber :: ToolDef es
 showPhoneNumber =
