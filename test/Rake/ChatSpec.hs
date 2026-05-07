@@ -1,5 +1,6 @@
 module Rake.ChatSpec where
 
+import Control.Concurrent (threadDelay)
 import Data.Aeson
 import Data.Aeson.Key (fromText)
 import Data.Aeson.KeyMap qualified as KM
@@ -146,6 +147,72 @@ spec = describe "Rake" $ do
                         }
             recordedSampling <- IORef.readIORef samplingRef
             recordedSampling `shouldBe` [samplingOptions, samplingOptions]
+
+        it "times out slow non-streaming provider calls" $ do
+            result <-
+                runDelayedMockChatOutcome
+                    50_000
+                    [finalProviderRound [responsesAssistantItem ItemCompleted "done"]]
+                    ( chatOutcome
+                        defaultChatConfig{llmCallTimeout = Just 0.01}
+                        [user "start"]
+                    )
+
+            result `shouldBe` Left (LlmTimeoutError 0.01)
+
+        it "allows non-streaming provider calls that finish before the timeout" $ do
+            result <-
+                runDelayedMockChatOutcome
+                    1_000
+                    [finalProviderRound [responsesAssistantItem ItemCompleted "done"]]
+                    ( chatOutcome
+                        defaultChatConfig{llmCallTimeout = Just 1}
+                        [user "start"]
+                    )
+
+            result
+                `shouldBe` Right
+                    ChatFinished
+                        { appendedItems = [withAvailableLocalTools [] (responsesAssistantItem ItemCompleted "done")]
+                        }
+
+        it "applies the timeout independently to each provider round in a tool loop" $ do
+            let pendingCall = loopToolCall "loop-1"
+            result <-
+                runDelayedMockChatOutcome
+                    50_000
+                    [ toolProviderRound [responsesToolCallItem ItemPending pendingCall] [pendingCall]
+                    , finalProviderRound [responsesAssistantItem ItemCompleted "done"]
+                    ]
+                    ( chatOutcome
+                        defaultChatConfig
+                            { llmCallTimeout = Just 0.1
+                            , maxToolRounds = 1
+                            , tools = [loopTool]
+                            }
+                        [user "start"]
+                    )
+
+            result
+                `shouldBe` Right
+                    ChatFinished
+                        { appendedItems =
+                            [ withAvailableLocalTools [loopTool] (responsesToolCallItem ItemPending pendingCall)
+                            , toolResult "loop-1" "looped"
+                            , withAvailableLocalTools [loopTool] (responsesAssistantItem ItemCompleted "done")
+                            ]
+                        }
+
+        it "rejects non-positive LLM call timeouts" $ do
+            result <-
+                runMockChatOutcome
+                    []
+                    ( chatOutcome
+                        defaultChatConfig{llmCallTimeout = Just 0}
+                        [user "start"]
+                    )
+
+            result `shouldBe` Left (LlmExpectationError "LLM call timeout must be positive")
 
     describe "chatOutcome" $ do
         it "returns paused outcomes with canonical pending history" $ do
@@ -494,6 +561,19 @@ spec = describe "Rake" $ do
                     message `shouldContain` "closed refusal socket"
                 other ->
                     expectationFailure ("Unexpected streaming refusal callback failure result: " <> show other)
+
+        it "times out slow streaming provider calls" $ do
+            result <-
+                runDelayedMockStreamChatOutcome
+                    50_000
+                    [MockStreamingRound [MockTextDelta "partial"] (finalProviderRound [responsesAssistantItem ItemCompleted "done"])]
+                    ( streamChatOutcome
+                        defaultStreamCallbacks
+                        defaultChatConfig{llmCallTimeout = Just 0.01}
+                        [user "start"]
+                    )
+
+            result `shouldBe` Left (LlmTimeoutError 0.01)
 
     describe "assistant helpers" $ do
         it "keeps lastAssistantTexts as a best-effort helper" $ do
@@ -1043,6 +1123,19 @@ runMockChatOutcome plannedRounds action =
             . runMockRake plannedRounds
             $ action
 
+runDelayedMockChatOutcome
+    :: Int
+    -> [ProviderRound]
+    -> Eff '[Rake, RakeMediaStorage, Error RakeError, IOE] ChatOutcome
+    -> IO (Either RakeError ChatOutcome)
+runDelayedMockChatOutcome delayMicroseconds plannedRounds action =
+    fmap (fmap stripHistoryItemIdsFromOutcome) $
+        runEff
+            . runErrorNoCallStack
+            . runRakeMediaStorageInMemory
+            . runDelayedMockRake delayMicroseconds plannedRounds
+            $ action
+
 runMockStreamChatOutcome
     :: [MockStreamingRound]
     -> Eff '[Rake, RakeMediaStorage, Error RakeError, IOE] ChatOutcome
@@ -1053,6 +1146,19 @@ runMockStreamChatOutcome plannedRounds action =
             . runErrorNoCallStack
             . runRakeMediaStorageInMemory
             . runMockStreamingRake plannedRounds
+            $ action
+
+runDelayedMockStreamChatOutcome
+    :: Int
+    -> [MockStreamingRound]
+    -> Eff '[Rake, RakeMediaStorage, Error RakeError, IOE] ChatOutcome
+    -> IO (Either RakeError ChatOutcome)
+runDelayedMockStreamChatOutcome delayMicroseconds plannedRounds action =
+    fmap (fmap stripHistoryItemIdsFromOutcome) $
+        runEff
+            . runErrorNoCallStack
+            . runRakeMediaStorageInMemory
+            . runDelayedMockStreamingRake delayMicroseconds plannedRounds
             $ action
 
 runRecordedMockChatOutcome
@@ -1100,6 +1206,27 @@ runMockRake plannedRounds eff = do
         GetLlmResponseStream{} ->
             pure (failedProviderRound (FailureContract "Unexpected streaming provider round request in non-streaming test") [])
 
+runDelayedMockRake
+    :: IOE :> es
+    => Int
+    -> [ProviderRound]
+    -> Eff (Rake ': es) a
+    -> Eff es a
+runDelayedMockRake delayMicroseconds plannedRounds eff = do
+    responsesRef <- liftIO (IORef.newIORef plannedRounds)
+    interpretWith eff \_ -> \case
+        GetLlmResponse{} -> do
+            liftIO (threadDelay delayMicroseconds)
+            remainingResponses <- liftIO (IORef.readIORef responsesRef)
+            case remainingResponses of
+                response : rest -> do
+                    liftIO (IORef.writeIORef responsesRef rest)
+                    pure response
+                [] ->
+                    pure (failedProviderRound (FailureContract "Unexpected provider round request in test") [])
+        GetLlmResponseStream{} ->
+            pure (failedProviderRound (FailureContract "Unexpected streaming provider round request in non-streaming test") [])
+
 runMockStreamingRake
     :: ( IOE :> es
        , Error RakeError :> es
@@ -1114,6 +1241,37 @@ runMockStreamingRake plannedRounds eff = do
             pure (failedProviderRound (FailureContract "Unexpected non-streaming provider round request in streaming test") [])
         GetLlmResponseStream onAssistantTextDelta onAssistantRefusalDelta _ _ _ _ -> do
             localSeqUnlift localEnv \unlift -> do
+                remainingResponses <- liftIO (IORef.readIORef responsesRef)
+                case remainingResponses of
+                    MockStreamingRound{streamDeltas, streamRound} : rest -> do
+                        liftIO (IORef.writeIORef responsesRef rest)
+                        let streamCallbacks =
+                                protectMockStreamCallbacks
+                                    StreamCallbacks
+                                        { onAssistantTextDelta = unlift . onAssistantTextDelta
+                                        , onAssistantRefusalDelta = unlift . onAssistantRefusalDelta
+                                        }
+                        traverse_ (emitMockStreamDelta streamCallbacks) streamDeltas
+                        pure streamRound
+                    [] ->
+                        pure (failedProviderRound (FailureContract "Unexpected streaming provider round request in test") [])
+
+runDelayedMockStreamingRake
+    :: ( IOE :> es
+       , Error RakeError :> es
+       )
+    => Int
+    -> [MockStreamingRound]
+    -> Eff (Rake ': es) a
+    -> Eff es a
+runDelayedMockStreamingRake delayMicroseconds plannedRounds eff = do
+    responsesRef <- liftIO (IORef.newIORef plannedRounds)
+    interpretWith eff \localEnv -> \case
+        GetLlmResponse{} ->
+            pure (failedProviderRound (FailureContract "Unexpected non-streaming provider round request in streaming test") [])
+        GetLlmResponseStream onAssistantTextDelta onAssistantRefusalDelta _ _ _ _ -> do
+            localSeqUnlift localEnv \unlift -> do
+                liftIO (threadDelay delayMicroseconds)
                 remainingResponses <- liftIO (IORef.readIORef responsesRef)
                 case remainingResponses of
                     MockStreamingRound{streamDeltas, streamRound} : rest -> do

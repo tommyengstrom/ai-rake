@@ -42,6 +42,10 @@ spec = describe "Rake.Error" $ do
             renderRakeError (LlmExpectationError "boom")
                 `shouldBe` "boom"
 
+        it "renders LLM timeout errors directly" $ do
+            renderRakeError (LlmTimeoutError 30)
+                `shouldBe` "LLM call timed out after 30s"
+
         it "renders structured streaming callback errors directly" $ do
             renderRakeError (StreamingInternalError (OnAssistantTextDeltaFailed "stream callback exploded"))
                 `shouldBe` "Streaming assistant text callback failed: stream callback exploded"

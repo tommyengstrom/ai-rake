@@ -13,6 +13,7 @@ import Data.Generics.Labels ()
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TextEncoding
 import Data.Text.Lazy qualified as TL
+import Data.Time (NominalDiffTime)
 import Network.HTTP.Types.Status (Status, statusCode, statusMessage)
 import Rake.Types (ReplayBlockReason (..), ResetCheckpoint (..))
 import Relude
@@ -21,6 +22,7 @@ import Servant.Client (ClientError (..), ResponseF (..))
 data RakeError
     = LlmClientError ClientError
     | LlmExpectationError String
+    | LlmTimeoutError NominalDiffTime
     | StreamingInternalError StreamingInternalIssue
     | ConversationBlocked ReplayBlockReason (Maybe ResetCheckpoint)
     deriving stock (Show, Eq, Generic)
@@ -38,6 +40,8 @@ renderRakeError = \case
         renderClientError clientError
     LlmExpectationError err ->
         toText err
+    LlmTimeoutError timeoutSeconds ->
+        "LLM call timed out after " <> show timeoutSeconds
     StreamingInternalError issue ->
         renderStreamingInternalIssue issue
     ConversationBlocked blockedReason maybeCheckpoint ->

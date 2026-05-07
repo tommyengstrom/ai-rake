@@ -1544,16 +1544,16 @@ spec = describe "Responses request rendering" $ do
             T.strip output `shouldBe` ""
 
 withTools :: [ToolDef es] -> ChatConfig es -> ChatConfig es
-withTools tools ChatConfig{responseFormat, sampling, onItem, maxToolRounds} =
-    ChatConfig{tools, responseFormat, sampling, onItem, maxToolRounds}
+withTools tools ChatConfig{responseFormat, sampling, onItem, maxToolRounds, llmCallTimeout} =
+    ChatConfig{tools, responseFormat, sampling, onItem, maxToolRounds, llmCallTimeout}
 
 withResponseFormat :: ResponseFormat -> ChatConfig es -> ChatConfig es
-withResponseFormat responseFormat ChatConfig{tools, sampling, onItem, maxToolRounds} =
-    ChatConfig{tools, responseFormat, sampling, onItem, maxToolRounds}
+withResponseFormat responseFormat ChatConfig{tools, sampling, onItem, maxToolRounds, llmCallTimeout} =
+    ChatConfig{tools, responseFormat, sampling, onItem, maxToolRounds, llmCallTimeout}
 
 withSampling :: SamplingOptions -> ChatConfig es -> ChatConfig es
-withSampling sampling ChatConfig{tools, responseFormat, onItem, maxToolRounds} =
-    ChatConfig{tools, responseFormat, sampling, onItem, maxToolRounds}
+withSampling sampling ChatConfig{tools, responseFormat, onItem, maxToolRounds, llmCallTimeout} =
+    ChatConfig{tools, responseFormat, sampling, onItem, maxToolRounds, llmCallTimeout}
 
 withTemperature :: Maybe Double -> SamplingOptions -> SamplingOptions
 withTemperature temperature SamplingOptions{topP} =

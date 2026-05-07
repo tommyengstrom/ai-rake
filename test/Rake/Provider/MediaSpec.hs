@@ -199,10 +199,10 @@ spec = describe "media providers" $ do
             toJSON XAIVideoFailed `shouldBe` String "failed"
 
     describe "request encoding" $ do
-        it "encodes default OpenAI image requests for gpt-image-1.5" $ do
+        it "encodes default OpenAI image requests for gpt-image-2" $ do
             toJSON (defaultOpenAIImageRequest "draw a lighthouse")
                 `shouldBe` object
-                    [ "model" .= ("gpt-image-1.5" :: Text)
+                    [ "model" .= ("gpt-image-2" :: Text)
                     , "prompt" .= ("draw a lighthouse" :: Text)
                     ]
 
@@ -221,7 +221,7 @@ spec = describe "media providers" $ do
 
             toJSON request
                 `shouldBe` object
-                    [ "model" .= ("gpt-image-1.5" :: Text)
+                    [ "model" .= ("gpt-image-2" :: Text)
                     , "prompt" .= ("add a moon" :: Text)
                     , "images"
                         .= ( [ object ["image_url" .= ("https://example.com/base.png" :: Text)]
@@ -533,6 +533,33 @@ spec = describe "media providers" $ do
 
             result
                 `shouldBe` Left (LlmExpectationError "OpenAI inputFidelity requires at least one input image")
+
+        it "fails fast on transparent backgrounds for gpt-image-2" $ do
+            let request =
+                    (defaultOpenAIImageRequest "draw a transparent icon")
+                        { background = Just "transparent"
+                        }
+
+            result <-
+                runLlmError
+                    $ generateOpenAIImage (defaultOpenAIImagesSettings "test-key") request
+
+            result
+                `shouldBe` Left (LlmExpectationError "OpenAI gpt-image-2 does not support transparent backgrounds")
+
+        it "fails fast on explicit input fidelity for gpt-image-2" $ do
+            let request =
+                    (defaultOpenAIImageRequest "sharpen this")
+                        { inputImages = [OpenAIImageUrl "https://example.com/base.png"]
+                        , inputFidelity = Just "high"
+                        }
+
+            result <-
+                runLlmError
+                    $ generateOpenAIImage (defaultOpenAIImagesSettings "test-key") request
+
+            result
+                `shouldBe` Left (LlmExpectationError "OpenAI gpt-image-2 automatically uses high-fidelity input images and does not support inputFidelity")
 
         it "fails fast on OpenAI TTS instructions for unsupported models" $ do
             let settings :: OpenAITTSSettings '[Error RakeError, IOE]

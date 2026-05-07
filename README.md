@@ -60,6 +60,7 @@ Notes:
 - Provider-backed history items store the local `ToolDeclaration`s that were available to the model for the request that produced the provider item. This is debug/provenance data only; replay and tool execution still use the current `ChatConfig.tools`.
 - `chatOutcome` and `withResumableChat` require `IOE` because the library assigns `HistoryItemId`s before replay and persistence.
 - `streamChatOutcome` and `withResumableStreamingChat` also require `IOE`; they surface live assistant text/refusal deltas through `StreamCallbacks` but still only persist finalized `HistoryItem` suffixes.
+- Set `llmCallTimeout = Just 60` on `ChatConfig` to bound each individual provider LLM round. This is separate from `maxToolRounds`, which only bounds local tool-loop recursion.
 - `chatOutcome` returns an append-only canonical suffix plus explicit pause/failure state. Failed outcomes append a durable `ReplayBarrier` control item into the returned suffix.
 - `withResumableChat` is the recommended durable wrapper for append-only loops. It persists paused and failed suffixes through `chatOutcome`.
 - Shared streaming is text-first today. Provider-native reasoning deltas, partial tool arguments, and partial multimodal outputs stay out of the shared API.
@@ -195,6 +196,7 @@ main = do
 Validation notes:
 
 - OpenAI `mask` and `inputFidelity` require at least one input image.
+- OpenAI `gpt-image-2` does not support transparent backgrounds or explicit `inputFidelity`.
 - xAI `videoUrl` requests are edit operations and cannot be combined with `duration`, `aspectRatio`, or `resolution`.
 - xAI video requests may set `imageUrl` or `videoUrl`, but not both.
 
@@ -263,7 +265,7 @@ cabal run rake-tts -- xai --codec=wav --sample-rate=24000 -o update.wav "A short
 
 Defaults:
 
-- `rake-image gptimage ...` uses OpenAI `gpt-image-1.5`
+- `rake-image gptimage ...` uses OpenAI `gpt-image-2`
 - `rake-image xai ...` uses xAI Grok Imagine image generation
 - `rake-image banana2 ...` uses Gemini `gemini-2.5-flash-image`
 - `rake-video xai ...` uses xAI Grok Imagine video generation

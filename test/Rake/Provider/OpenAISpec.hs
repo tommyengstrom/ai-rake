@@ -2,7 +2,9 @@ module Rake.Provider.OpenAISpec where
 
 import Data.Aeson (object, (.=))
 import Data.ByteString qualified as BS
+import Data.ByteString.Base64 qualified as Base64
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TextEncoding
 import Effectful
 import Effectful.Concurrent
 import Effectful.Error.Static
@@ -12,6 +14,7 @@ import ProviderStructuredSchemaBehaviorTests
 import Rake
 import Rake.MediaStorage.InMemory
 import Rake.Providers.OpenAI.Chat
+import Rake.Providers.OpenAI.Images
 import Rake.Providers.OpenAI.TTS
 import Rake.Storage.InMemory
 import Relude
@@ -152,3 +155,29 @@ spec = do
                             Right Audio{audioBytes} -> do
                                 BS.length streamedChunks `shouldSatisfy` (> 0)
                                 streamedChunks `shouldBe` audioBytes
+
+                describe "standalone images" $ do
+                    it "generates a non-empty image with gpt-image-2" $ do
+                        let openAISettings = defaultOpenAIImagesSettings (T.pack apiKey)
+                            request =
+                                (defaultOpenAIImageRequest "a tiny blue square on white background")
+                                    { size = Just "1024x1024"
+                                    , quality = Just "low"
+                                    , outputFormat = Just "png"
+                                    , n = Just 1
+                                    }
+                        result <-
+                            runStandaloneResult
+                                $ generateOpenAIImage openAISettings request
+
+                        case result of
+                            Left rakeError ->
+                                expectationFailure (toString (renderRakeError rakeError))
+                            Right ImageGenerationResponse{images = GeneratedImage{b64Json = Just encodedBytes} : _} ->
+                                case Base64.decode (TextEncoding.encodeUtf8 encodedBytes) of
+                                    Left err ->
+                                        expectationFailure ("Failed to decode image base64: " <> err)
+                                    Right imageBytes ->
+                                        BS.length imageBytes `shouldSatisfy` (> 0)
+                            Right ImageGenerationResponse{} ->
+                                expectationFailure "OpenAI returned no base64 image payload"

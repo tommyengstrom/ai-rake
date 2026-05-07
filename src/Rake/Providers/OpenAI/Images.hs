@@ -8,6 +8,7 @@ module Rake.Providers.OpenAI.Images
     ) where
 
 import Data.Aeson
+import Data.Text qualified as T
 import Effectful
 import Effectful.Error.Static
 import Rake.Effect
@@ -70,7 +71,7 @@ data OpenAIImageRequest = OpenAIImageRequest
 defaultOpenAIImageRequest :: Text -> OpenAIImageRequest
 defaultOpenAIImageRequest prompt =
     OpenAIImageRequest
-        { model = "gpt-image-1.5"
+        { model = "gpt-image-2"
         , prompt
         , inputImages = []
         , mask = Nothing
@@ -176,10 +177,18 @@ generateOpenAIImage OpenAIImagesSettings{apiKey, baseUrl, organizationId, projec
                 pure response
 
 validateOpenAIImageRequest :: OpenAIImageRequest -> Either RakeError ()
-validateOpenAIImageRequest OpenAIImageRequest{inputImages, mask, inputFidelity}
+validateOpenAIImageRequest OpenAIImageRequest{model, inputImages, mask, background, inputFidelity}
     | null inputImages && isJust mask =
         Left (LlmExpectationError "OpenAI image masks require at least one input image")
     | null inputImages && isJust inputFidelity =
         Left (LlmExpectationError "OpenAI inputFidelity requires at least one input image")
+    | isGPTImage2Model model && background == Just "transparent" =
+        Left (LlmExpectationError "OpenAI gpt-image-2 does not support transparent backgrounds")
+    | isGPTImage2Model model && isJust inputFidelity =
+        Left (LlmExpectationError "OpenAI gpt-image-2 automatically uses high-fidelity input images and does not support inputFidelity")
     | otherwise =
         Right ()
+
+isGPTImage2Model :: Text -> Bool
+isGPTImage2Model model =
+    model == "gpt-image-2" || "gpt-image-2-" `T.isPrefixOf` model

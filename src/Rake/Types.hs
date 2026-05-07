@@ -82,6 +82,7 @@ import Data.OpenApi (ToParamSchema, ToSchema, toInlinedSchema)
 import Data.Proxy (Proxy (..))
 import Data.String (IsString (..))
 import Data.Text (Text)
+import Data.Time (NominalDiffTime)
 import Data.UUID (UUID)
 import Data.UUID.V4 (nextRandom)
 import Effectful (Eff, IOE, (:>), liftIO)
@@ -433,6 +434,7 @@ data ChatConfig es = ChatConfig
     , sampling :: SamplingOptions
     , onItem :: HistoryItem -> Eff es ()
     , maxToolRounds :: Int
+    , llmCallTimeout :: Maybe NominalDiffTime
     }
 
 defaultChatConfig :: ChatConfig es
@@ -443,6 +445,7 @@ defaultChatConfig =
         , sampling = defaultSamplingOptions
         , onItem = \_ -> pure ()
         , maxToolRounds = 8
+        , llmCallTimeout = Nothing
         }
 
 system :: Text -> HistoryItem

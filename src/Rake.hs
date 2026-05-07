@@ -27,6 +27,7 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Set qualified as Set
+import Data.Time (NominalDiffTime)
 import Effectful
 import Effectful.Error.Static
 import Rake.Effect as X
@@ -37,6 +38,7 @@ import Rake.TTS as X
 import Rake.Tool as X
 import Rake.Types as X
 import Relude
+import System.Timeout qualified as Timeout
 
 type ProviderRoundRequest es =
     [ToolDeclaration]
@@ -69,10 +71,11 @@ chatOutcome
     => ChatConfig es
     -> [HistoryItem]
     -> Eff es ChatOutcome
-chatOutcome ChatConfig{tools, responseFormat, sampling = samplingOptions, onItem, maxToolRounds} conversation = do
+chatOutcome ChatConfig{tools, responseFormat, sampling = samplingOptions, onItem, maxToolRounds, llmCallTimeout} conversation = do
     normalizedConversation <- ensureHistoryItemIds conversation
     handleToolLoop
         getLlmResponse
+        llmCallTimeout
         tools
         responseFormat
         samplingOptions
@@ -93,10 +96,11 @@ streamChatOutcome
     -> ChatConfig es
     -> [HistoryItem]
     -> Eff es ChatOutcome
-streamChatOutcome StreamCallbacks{onAssistantTextDelta, onAssistantRefusalDelta} ChatConfig{tools, responseFormat, sampling = samplingOptions, onItem, maxToolRounds} conversation = do
+streamChatOutcome StreamCallbacks{onAssistantTextDelta, onAssistantRefusalDelta} ChatConfig{tools, responseFormat, sampling = samplingOptions, onItem, maxToolRounds, llmCallTimeout} conversation = do
     normalizedConversation <- ensureHistoryItemIds conversation
     handleToolLoop
         (getLlmResponseStream onAssistantTextDelta onAssistantRefusalDelta)
+        llmCallTimeout
         tools
         responseFormat
         samplingOptions
@@ -475,6 +479,7 @@ handleToolLoop
        , Rake :> es
        )
     => ProviderRoundRequest es
+    -> Maybe NominalDiffTime
     -> [ToolDef es]
     -> ResponseFormat
     -> SamplingOptions
@@ -485,7 +490,7 @@ handleToolLoop
     -> [HistoryItem]
     -> Int
     -> Eff es ChatOutcome
-handleToolLoop requestProviderRound tools responseFormat samplingOptions onItem maxRounds checkpointHistory conversation accumulated completedRounds = do
+handleToolLoop requestProviderRound llmCallTimeout tools responseFormat samplingOptions onItem maxRounds checkpointHistory conversation accumulated completedRounds = do
     let availableLocalTools = toToolDeclaration <$> tools
     let fullHistory = conversation <> accumulated
     throwIfReplayBlocked fullHistory checkpointHistory
@@ -501,13 +506,14 @@ handleToolLoop requestProviderRound tools responseFormat samplingOptions onItem 
         , mediaReferences = roundMediaReferences
         , action = roundAction
         } <-
-        requestProviderRound
-            availableLocalTools
-            responseFormat
-            samplingOptions
-            ( let ReplayState{replayHistory} = conversationReplayState fullHistoryAfterResume
-               in replayHistory
-            )
+        timeoutLlmCall llmCallTimeout $
+            requestProviderRound
+                availableLocalTools
+                responseFormat
+                samplingOptions
+                ( let ReplayState{replayHistory} = conversationReplayState fullHistoryAfterResume
+                   in replayHistory
+                )
     saveMediaReferences roundMediaReferences
     roundHistoryItems <-
         ensureHistoryItemIds (recordAvailableLocalTools availableLocalTools <$> roundHistoryItemsRaw)
@@ -561,6 +567,7 @@ handleToolLoop requestProviderRound tools responseFormat samplingOptions onItem 
                         traverse_ onItem toolCallResults
                         handleToolLoop
                             requestProviderRound
+                            llmCallTimeout
                             tools
                             responseFormat
                             samplingOptions
@@ -590,6 +597,40 @@ handleToolLoop requestProviderRound tools responseFormat samplingOptions onItem 
 
     toolCallProjectionMismatchReason =
         "Provider round toolCalls did not match the unresolved tool calls implied by appended round history"
+
+timeoutLlmCall
+    :: ( IOE :> es
+       , Error RakeError :> es
+       )
+    => Maybe NominalDiffTime
+    -> Eff es a
+    -> Eff es a
+timeoutLlmCall Nothing action =
+    action
+timeoutLlmCall (Just timeoutSeconds) action
+    | timeoutSeconds <= 0 =
+        throwError (LlmExpectationError "LLM call timeout must be positive")
+    | otherwise = do
+        timeoutResult <-
+            withEffToIO SeqUnlift \runInIO ->
+                Timeout.timeout
+                    (nominalDiffTimeToMicroseconds timeoutSeconds)
+                    ( runInIO
+                        ( (Right <$> action)
+                            `catchError` (\_ (rakeError :: RakeError) -> pure (Left rakeError))
+                        )
+                    )
+        case timeoutResult of
+            Nothing ->
+                throwError (LlmTimeoutError timeoutSeconds)
+            Just (Left rakeError) ->
+                throwError @RakeError rakeError
+            Just (Right value) ->
+                pure value
+
+nominalDiffTimeToMicroseconds :: NominalDiffTime -> Int
+nominalDiffTimeToMicroseconds timeoutSeconds =
+    ceiling (realToFrac timeoutSeconds * (1_000_000 :: Double))
 
 flattenReplayHistory :: [HistoryItem] -> [HistoryItem]
 flattenReplayHistory history =

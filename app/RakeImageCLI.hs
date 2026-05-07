@@ -121,7 +121,7 @@ defaultOpenAIGenImageOptions =
                 , commonOutputPath = Nothing
                 , commonImageCount = 1
                 }
-        , openAIModel = "gpt-image-1.5"
+        , openAIModel = "gpt-image-2"
         , openAISize = Nothing
         , openAIQuality = Nothing
         , openAIOutputFormat = "png"
@@ -673,7 +673,7 @@ renderGenImageHelp progName = \case
             , "  " <> toText progName <> " banana2 [OPTIONS] PROMPT"
             , ""
             , "Commands:"
-            , "  gptimage  Generate images with OpenAI. Default model: gpt-image-1.5"
+            , "  gptimage  Generate images with OpenAI. Default model: gpt-image-2"
             , "  xai       Generate images with xAI Grok Imagine. Default model: grok-imagine-image"
             , "  banana2   Generate images with Gemini Nano Banana 2. Default model: gemini-2.5-flash-image"
             , ""
@@ -712,7 +712,7 @@ renderGenImageHelp progName = \case
             [ "Usage:"
             , "  " <> toText progName <> " gptimage [OPTIONS] PROMPT"
             , ""
-            , "Default model: gpt-image-1.5"
+            , "Default model: gpt-image-2"
             , ""
             , "Common options:"
             ]
@@ -798,7 +798,7 @@ renderGenImageHelp progName = \case
         , "  --quality QUALITY            Image quality, for example low, medium, or high."
         , "  --output-format FORMAT       Output format. Default: png"
         , "  --output-compression N       Compression level from 0 to 100."
-        , "  --background MODE            Background mode, for example transparent."
+        , "  --background MODE            Background mode, for example opaque or auto."
         , "  --moderation MODE            Moderation level."
         , "  --user USER_ID               User identifier for provider-side tracking."
         , "  --image SOURCE               Repeatable. Add input image URLs or local files."

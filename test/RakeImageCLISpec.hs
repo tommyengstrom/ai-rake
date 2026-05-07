@@ -25,7 +25,7 @@ spec = describe "RakeImageCLI" $ do
                                     , commonOutputPath = Nothing
                                     , commonImageCount = 1
                                     }
-                            , openAIModel = "gpt-image-1.5"
+                            , openAIModel = "gpt-image-2"
                             , openAISize = Nothing
                             , openAIQuality = Nothing
                             , openAIOutputFormat = "png"
@@ -134,7 +134,7 @@ spec = describe "RakeImageCLI" $ do
                                     , commonOutputPath = Just "out.jpg"
                                     , commonImageCount = 1
                                     }
-                            , openAIModel = "gpt-image-1.5"
+                            , openAIModel = "gpt-image-2"
                             , openAISize = Just "1536x1024"
                             , openAIQuality = Just "high"
                             , openAIOutputFormat = "jpeg"
@@ -230,6 +230,7 @@ spec = describe "RakeImageCLI" $ do
 
         it "gptimage help focuses on gptimage options" $ do
             let helpText = renderGenImageHelp "rake-image" GenImageHelpOpenAI
+            helpText `shouldSatisfy` T.isInfixOf "Default model: gpt-image-2"
             helpText `shouldSatisfy` T.isInfixOf "--mask-file-id FILE_ID"
             helpText `shouldSatisfy` T.isInfixOf "--output-compression N"
             helpText `shouldNotSatisfy` T.isInfixOf "--aspect-ratio RATIO"
