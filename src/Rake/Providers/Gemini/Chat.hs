@@ -31,7 +31,7 @@ import Data.Vector qualified as Vector
 import Effectful
 import Effectful.Error.Static
 import Network.HTTP.Client qualified as HttpClient
-import Network.HTTP.Client.TLS (newTlsManager)
+import Network.HTTP.Client.TLS (newTlsManagerWith, tlsManagerSettings)
 import Rake.Effect
 import Rake.Internal.Sse
 import Rake.MediaStorage.Effect
@@ -289,7 +289,10 @@ runRakeGeminiChat
     -> Eff (Rake ': es) a
     -> Eff es a
 runRakeGeminiChat settings@GeminiChatSettings{apiKey, baseUrl, requestLogger} eff = do
-    manager <- liftIO newTlsManager
+    manager <-
+        liftIO $
+            newTlsManagerWith
+                tlsManagerSettings{HttpClient.managerResponseTimeout = HttpClient.responseTimeoutNone}
     parsedBaseUrl <- either (throwError . invalidBaseUrl) pure $ parseBaseUrl (toString baseUrl)
     let clientEnv = mkClientEnv manager parsedBaseUrl
         postInteraction = client geminiInteractionsApi
@@ -448,6 +451,7 @@ buildGeminiRequestBody GeminiChatSettings{model, providerTools, systemInstructio
     let RenderedGeminiHistory
             { renderedTurns = renderedTurnValues
             } = renderedHistory
+        maybeResponseFormat = geminiResponseFormatSchema responseFormat
     pure $
         object $
             [ "model" .= model
@@ -459,9 +463,7 @@ buildGeminiRequestBody GeminiChatSettings{model, providerTools, systemInstructio
                     , if null allTools
                         then Nothing
                         else Just ("tools" .= allTools)
-                    , ("response_format" .=) <$> responseFormatSchema responseFormat
-                    , ("response_mime_type" .= ("application/json" :: Text))
-                        <$ guard (hasStructuredResponseFormat responseFormat)
+                    , ("response_format" .=) <$> maybeResponseFormat
                     , ("generation_config" .=) <$> generationConfigValue generationConfig samplingOptions
                     ]
   where
@@ -813,8 +815,8 @@ emptyToolParametersSchema :: Value
 emptyToolParametersSchema =
     object []
 
-responseFormatSchema :: ResponseFormat -> Maybe Value
-responseFormatSchema = \case
+geminiResponseFormatSchema :: ResponseFormat -> Maybe Value
+geminiResponseFormatSchema = \case
     Unstructured ->
         Nothing
     JsonValue ->
@@ -824,16 +826,203 @@ responseFormatSchema = \case
                 , "additionalProperties" .= True
                 ]
     JsonSchema schema ->
-        Just schema
+        Just (toGeminiStructuredSchema schema)
 
-hasStructuredResponseFormat :: ResponseFormat -> Bool
-hasStructuredResponseFormat = \case
-    Unstructured ->
+toGeminiStructuredSchema :: Value -> Value
+toGeminiStructuredSchema = \case
+    Object objectValue
+        | Just nullableSchema <- nullableAnyOfSchema objectValue ->
+            makeGeminiSchemaNullable (toGeminiStructuredSchema nullableSchema)
+        | Just flattenedObject <- flattenObjectOneOfSchema objectValue ->
+            toGeminiStructuredSchema (Object flattenedObject)
+        | otherwise ->
+            Object (ensureGeminiSchemaType normalizedObject)
+      where
+        normalizedObject = KM.mapWithKey normalizeGeminiSchemaField objectValue
+    Array values ->
+        Array (toGeminiStructuredSchema <$> values)
+    other ->
+        other
+
+normalizeGeminiSchemaField :: Key.Key -> Value -> Value
+normalizeGeminiSchemaField fieldName fieldValue
+    | fieldName `elem` geminiSchemaMapFields =
+        normalizeGeminiSchemaMap fieldValue
+    | otherwise =
+        toGeminiStructuredSchema fieldValue
+
+normalizeGeminiSchemaMap :: Value -> Value
+normalizeGeminiSchemaMap = \case
+    Object objectValue ->
+        Object (KM.map toGeminiStructuredSchema objectValue)
+    other ->
+        toGeminiStructuredSchema other
+
+nullableAnyOfSchema :: KM.KeyMap Value -> Maybe Value
+nullableAnyOfSchema objectValue = do
+    Array alternatives <- KM.lookup "anyOf" objectValue
+    let alternativeValues = toList alternatives
+        nonNullAlternatives = filter (not . isNullSchema) alternativeValues
+    guard (length nonNullAlternatives == 1 && any isNullSchema alternativeValues)
+    viaNonEmpty head nonNullAlternatives
+
+flattenObjectOneOfSchema :: KM.KeyMap Value -> Maybe (KM.KeyMap Value)
+flattenObjectOneOfSchema objectValue = do
+    Array alternatives <- KM.lookup "oneOf" objectValue
+    alternativeObjects <- traverse objectSchema (toList alternatives)
+    firstObject : restObjects <- pure alternativeObjects
+    let alternativeProperties = objectProperties <$> alternativeObjects
+        mergedProperties = foldl' mergeProperties mempty alternativeProperties
+        commonRequired =
+            foldl'
+                intersectRequired
+                (requiredPropertyNames firstObject)
+                (requiredPropertyNames <$> restObjects)
+    pure $
+        KM.fromList
+            [ ("type", String "object")
+            , ("properties", Object mergedProperties)
+            , ("required", toJSON commonRequired)
+            , ("additionalProperties", Bool False)
+            ]
+
+objectSchema :: Value -> Maybe (KM.KeyMap Value)
+objectSchema = \case
+    Object objectValue
+        | KM.lookup "type" objectValue == Just (String "object") || KM.member "properties" objectValue ->
+            Just objectValue
+    _ ->
+        Nothing
+
+objectProperties :: KM.KeyMap Value -> KM.KeyMap Value
+objectProperties objectValue = case KM.lookup "properties" objectValue of
+    Just (Object propertiesObject) ->
+        propertiesObject
+    _ ->
+        mempty
+
+requiredPropertyNames :: KM.KeyMap Value -> [Text]
+requiredPropertyNames objectValue = case KM.lookup "required" objectValue of
+    Just (Array values) ->
+        mapMaybe requiredPropertyName (toList values)
+    _ ->
+        []
+
+requiredPropertyName :: Value -> Maybe Text
+requiredPropertyName = \case
+    String fieldName ->
+        Just fieldName
+    _ ->
+        Nothing
+
+intersectRequired :: [Text] -> [Text] -> [Text]
+intersectRequired left right =
+    filter (`elem` right) left
+
+mergeProperties :: KM.KeyMap Value -> KM.KeyMap Value -> KM.KeyMap Value
+mergeProperties =
+    KM.unionWith mergePropertySchema
+
+mergePropertySchema :: Value -> Value -> Value
+mergePropertySchema left@(Object leftObject) (Object rightObject)
+    | Just mergedEnum <- mergeEnumValues leftObject rightObject =
+        Object (ensureGeminiSchemaType (KM.insert "enum" mergedEnum leftObject))
+    | otherwise =
+        left
+mergePropertySchema left _ =
+    left
+
+mergeEnumValues :: KM.KeyMap Value -> KM.KeyMap Value -> Maybe Value
+mergeEnumValues leftObject rightObject = do
+    Array leftEnum <- KM.lookup "enum" leftObject
+    Array rightEnum <- KM.lookup "enum" rightObject
+    pure . Array . fromList $ ordNub (toList leftEnum <> toList rightEnum)
+
+isNullSchema :: Value -> Bool
+isNullSchema = \case
+    Object objectValue ->
+        KM.lookup "type" objectValue == Just (String "null")
+    _ ->
         False
-    JsonValue ->
-        True
-    JsonSchema{} ->
-        True
+
+makeGeminiSchemaNullable :: Value -> Value
+makeGeminiSchemaNullable = \case
+    Object objectValue ->
+        Object (KM.insert "type" (nullableTypeValue (KM.lookup "type" objectValue)) objectValue)
+    schemaValue ->
+        object
+            [ "type" .= (["null"] :: [Text])
+            , "anyOf" .= ([schemaValue] :: [Value])
+            ]
+
+nullableTypeValue :: Maybe Value -> Value
+nullableTypeValue = \case
+    Just (String typeName) ->
+        toJSON ([typeName, "null"] :: [Text])
+    Just (Array typeNames)
+        | any (== String "null") typeNames ->
+            Array typeNames
+        | otherwise ->
+            Array (typeNames <> Vector.singleton (String "null"))
+    _ ->
+        toJSON (["null"] :: [Text])
+
+ensureGeminiSchemaType :: KM.KeyMap Value -> KM.KeyMap Value
+ensureGeminiSchemaType objectValue
+    | KM.member "type" objectValue = objectValue
+    | otherwise =
+        case inferGeminiSchemaType objectValue of
+            Nothing ->
+                objectValue
+            Just typeValue ->
+                KM.insert "type" typeValue objectValue
+
+inferGeminiSchemaType :: KM.KeyMap Value -> Maybe Value
+inferGeminiSchemaType objectValue
+    | KM.member "properties" objectValue =
+        Just (String "object")
+    | KM.member "oneOf" objectValue =
+        Just (String "object")
+    | KM.member "items" objectValue =
+        Just (String "array")
+    | otherwise =
+        inferEnumSchemaType =<< KM.lookup "enum" objectValue
+
+inferEnumSchemaType :: Value -> Maybe Value
+inferEnumSchemaType = \case
+    Array values ->
+        enumTypeValue (filter (/= Null) (toList values))
+    _ ->
+        Nothing
+
+enumTypeValue :: [Value] -> Maybe Value
+enumTypeValue values
+    | null values = Nothing
+    | all isString values = Just (String "string")
+    | all isNumber values = Just (String "number")
+    | all isBool values = Just (String "boolean")
+    | otherwise = Nothing
+  where
+    isString = \case
+        String{} -> True
+        _ -> False
+
+    isNumber = \case
+        Number{} -> True
+        _ -> False
+
+    isBool = \case
+        Bool{} -> True
+        _ -> False
+
+geminiSchemaMapFields :: [Key.Key]
+geminiSchemaMapFields =
+    [ "$defs"
+    , "definitions"
+    , "dependentSchemas"
+    , "patternProperties"
+    , "properties"
+    ]
 
 generationConfigValue :: GeminiGenerationConfig -> SamplingOptions -> Maybe Value
 generationConfigValue GeminiGenerationConfig{temperature, topP, seed, stopSequences, thinkingLevel, thinkingSummaries, maxOutputTokens, toolChoice} SamplingOptions{temperature = samplingTemperature, topP = samplingTopP} =

@@ -17,7 +17,7 @@ import Data.Vector qualified as Vector
 import Effectful
 import Effectful.Error.Static
 import Network.HTTP.Client qualified as HttpClient
-import Network.HTTP.Client.TLS (newTlsManager)
+import Network.HTTP.Client.TLS (newTlsManagerWith, tlsManagerSettings)
 import Rake.Effect
 import Rake.Internal.Sse
 import Rake.Internal.Schema (normalizeStructuredOutputSchema)
@@ -72,7 +72,10 @@ runResponsesChatProvider
     -> Eff (Rake ': es) a
     -> Eff es a
 runResponsesChatProvider config@ResponsesProviderConfig{..} eff = do
-    manager <- liftIO newTlsManager
+    manager <-
+        liftIO $
+            newTlsManagerWith
+                tlsManagerSettings{HttpClient.managerResponseTimeout = HttpClient.responseTimeoutNone}
     parsedBaseUrl <- either (throwError . invalidBaseUrl) pure $ parseBaseUrl (toString baseUrl)
     let clientEnv = mkClientEnv manager parsedBaseUrl
         postResponse = client responsesApi

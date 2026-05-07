@@ -21,6 +21,7 @@ import Rake.Providers.XAI.Imagine
 import Relude
 import Servant.Client (BaseUrl (..), ClientError (..), ResponseF (..), Scheme (..))
 import Servant.Client.Core.Request (RequestF (..))
+import StructuredSchemaTestTypes
 import System.Directory (removeFile)
 import System.IO qualified as IO
 import Test.Hspec
@@ -93,6 +94,34 @@ spec = describe "Responses request rendering" $ do
                     [user "hello"]
 
             firstToolParameters requestBody `shouldBe` Just (object [])
+
+        it "renders Gemini structured response schemas as response_format only" $ do
+            requestBody <-
+                captureGeminiRequestBody
+                    (withResponseFormat (jsonSchemaFormat @RecordWithMaybe) defaultChatConfig)
+                    [user "hello"]
+
+            lookupPath ["response_mime_type"] requestBody `shouldBe` Nothing
+            lookupPath ["response_format", "type"] requestBody `shouldBe` Just (String "object")
+            lookupPath ["response_format", "properties", "toolCall", "type"] requestBody
+                `shouldBe` Just (toJSON (["object", "null"] :: [Text]))
+            lookupPath ["response_format", "properties", "toolCall", "anyOf"] requestBody `shouldBe` Nothing
+
+        it "adds Gemini response_format types for enum and sum schemas" $ do
+            enumRequestBody <-
+                captureGeminiRequestBody
+                    (withResponseFormat (jsonSchemaFormat @NullaryEnum) defaultChatConfig)
+                    [user "hello"]
+            sumRequestBody <-
+                captureGeminiRequestBody
+                    (withResponseFormat (jsonSchemaFormat @NonNullarySum) defaultChatConfig)
+                    [user "hello"]
+
+            lookupPath ["response_format", "type"] enumRequestBody `shouldBe` Just (String "string")
+            lookupPath ["response_format", "type"] sumRequestBody `shouldBe` Just (String "object")
+            lookupPath ["response_format", "oneOf"] sumRequestBody `shouldBe` Nothing
+            lookupPath ["response_format", "properties", "tag", "enum"] sumRequestBody
+                `shouldBe` Just (toJSON (["SumText", "SumCount"] :: [Text]))
 
     describe "sampling options" $ do
         it "renders temperature when explicitly configured" $ do
