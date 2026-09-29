@@ -57,7 +57,7 @@ data OpenAIGenImageOptions = OpenAIGenImageOptions
     , openAIOutputFormat :: Text
     , openAIOutputCompression :: Maybe Int
     , openAIBackground :: Maybe Text
-    , openAIModeration :: Maybe Text
+    , openAIModeration :: Maybe OpenAIImageModeration
     , openAIUser :: Maybe Text
     , openAIInputImageSources :: [Text]
     , openAIInputFileIds :: [Text]
@@ -127,7 +127,7 @@ defaultOpenAIGenImageOptions =
         , openAIOutputFormat = "png"
         , openAIOutputCompression = Nothing
         , openAIBackground = Nothing
-        , openAIModeration = Nothing
+        , openAIModeration = Just OpenAIImageModerationLow
         , openAIUser = Nothing
         , openAIInputImageSources = []
         , openAIInputFileIds = []
@@ -303,6 +303,7 @@ runGenImage = \case
                                             , inputImages
                                             , aspectRatio = banana2AspectRatio
                                             , imageSize = banana2ImageSize
+                                            , safetySettings = leastRestrictiveGeminiSafetySettings
                                             }
                                 responseResult <- runProvider (generateGeminiImage settings request)
                                 handleImageResponse commonOutputPath commonPromptText responseResult
@@ -403,7 +404,11 @@ parseOpenAIArgs =
         "--background" : backgroundValue : rest ->
             go commonState openAIOptions{openAIBackground = Just backgroundValue} rest
         "--moderation" : moderationValue : rest ->
-            go commonState openAIOptions{openAIModeration = Just moderationValue} rest
+            case parseOpenAIImageModerationOption moderationValue of
+                Left err ->
+                    ParseGenImageArgsError err GenImageHelpOpenAI
+                Right moderation ->
+                    go commonState openAIOptions{openAIModeration = Just moderation} rest
         "--user" : userValue : rest ->
             go commonState openAIOptions{openAIUser = Just userValue} rest
         "--image" : imageSource : rest ->
@@ -442,7 +447,11 @@ parseOpenAIArgs =
             | Just backgroundValue <- T.stripPrefix "--background=" arg ->
                 go commonState openAIOptions{openAIBackground = Just backgroundValue} rest
             | Just moderationValue <- T.stripPrefix "--moderation=" arg ->
-                go commonState openAIOptions{openAIModeration = Just moderationValue} rest
+                case parseOpenAIImageModerationOption moderationValue of
+                    Left err ->
+                        ParseGenImageArgsError err GenImageHelpOpenAI
+                    Right moderation ->
+                        go commonState openAIOptions{openAIModeration = Just moderation} rest
             | Just userValue <- T.stripPrefix "--user=" arg ->
                 go commonState openAIOptions{openAIUser = Just userValue} rest
             | Just imageSource <- T.stripPrefix "--image=" arg ->
@@ -639,6 +648,15 @@ parseBoundedIntOption optionName minValue maxValue rawValue =
             | otherwise ->
                 Right value
 
+parseOpenAIImageModerationOption :: Text -> Either Text OpenAIImageModeration
+parseOpenAIImageModerationOption = \case
+    "auto" ->
+        Right OpenAIImageModerationAuto
+    "low" ->
+        Right OpenAIImageModerationLow
+    otherValue ->
+        Left ("Invalid value for --moderation: " <> otherValue <> ". Use auto or low.")
+
 appendPromptParts :: CommonParseState -> [Text] -> CommonParseState
 appendPromptParts commonState@CommonParseState{parsePromptParts} extraPromptParts =
     commonState{parsePromptParts = parsePromptParts <> extraPromptParts}
@@ -799,7 +817,7 @@ renderGenImageHelp progName = \case
         , "  --output-format FORMAT       Output format. Default: png"
         , "  --output-compression N       Compression level from 0 to 100."
         , "  --background MODE            Background mode, for example opaque or auto."
-        , "  --moderation MODE            Moderation level."
+        , "  --moderation MODE            Moderation level: low or auto. Default: low"
         , "  --user USER_ID               User identifier for provider-side tracking."
         , "  --image SOURCE               Repeatable. Add input image URLs or local files."
         , "  --image-file-id FILE_ID      Repeatable. Add OpenAI uploaded file ids."

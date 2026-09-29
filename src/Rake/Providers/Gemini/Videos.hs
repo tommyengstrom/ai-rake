@@ -4,6 +4,7 @@ module Rake.Providers.Gemini.Videos
     ( GeminiVideoSettings (..)
     , defaultGeminiVideoSettings
     , GeminiInlineImage (..)
+    , GeminiPersonGeneration (..)
     , GeminiVideoRequest (..)
     , defaultGeminiVideoRequest
     , GeminiVideoOperationName (..)
@@ -56,6 +57,22 @@ defaultGeminiVideoSettings apiKey =
         , requestLogger = defaultWarningLogger "gemini.videos"
         }
 
+data GeminiPersonGeneration
+    = GeminiPersonGenerationAllowAll
+    | GeminiPersonGenerationAllowAdult
+    | GeminiPersonGenerationDontAllow
+    deriving stock (Show, Eq, Generic)
+
+instance ToJSON GeminiPersonGeneration where
+    toJSON =
+        String . \case
+            GeminiPersonGenerationAllowAll ->
+                "allow_all"
+            GeminiPersonGenerationAllowAdult ->
+                "allow_adult"
+            GeminiPersonGenerationDontAllow ->
+                "dont_allow"
+
 data GeminiVideoRequest = GeminiVideoRequest
     { model :: Text
     , prompt :: Text
@@ -64,7 +81,7 @@ data GeminiVideoRequest = GeminiVideoRequest
     , durationSeconds :: Maybe Int
     , aspectRatio :: Maybe Text
     , resolution :: Maybe Text
-    , personGeneration :: Maybe Text
+    , personGeneration :: Maybe GeminiPersonGeneration
     , seed :: Maybe Int
     }
     deriving stock (Show, Eq, Generic)
@@ -84,7 +101,7 @@ defaultGeminiVideoRequest prompt =
         }
 
 instance ToJSON GeminiVideoRequest where
-    toJSON GeminiVideoRequest{prompt, image, lastFrame, durationSeconds, aspectRatio, resolution, personGeneration, seed} =
+    toJSON request@GeminiVideoRequest{prompt, image, lastFrame, durationSeconds, aspectRatio, resolution, personGeneration, seed} =
         object $
             [ "instances"
                 .= ( [ object $
@@ -105,13 +122,20 @@ instance ToJSON GeminiVideoRequest where
                 [ ("durationSeconds" .=) <$> durationSeconds
                 , ("aspectRatio" .=) <$> aspectRatio
                 , ("resolution" .=) <$> resolution
-                , ("personGeneration" .=) <$> personGeneration
+                , Just ("personGeneration" .= fromMaybe (defaultGeminiPersonGeneration request) personGeneration)
                 , ("seed" .=) <$> seed
                 ] of
                 [] ->
                     []
                 fields ->
                     ["parameters" .= object fields]
+
+defaultGeminiPersonGeneration :: GeminiVideoRequest -> GeminiPersonGeneration
+defaultGeminiPersonGeneration GeminiVideoRequest{image, lastFrame}
+    | isJust image || isJust lastFrame =
+        GeminiPersonGenerationAllowAdult
+    | otherwise =
+        GeminiPersonGenerationAllowAll
 
 newtype GeminiVideoOperationName = GeminiVideoOperationName Text
     deriving stock (Show, Eq, Ord, Generic)

@@ -2,6 +2,7 @@ module RakeVideoCLISpec where
 
 import Data.Text qualified as T
 import RakeCliSupport (ImageDimensions (..))
+import Rake.Providers.Gemini.Videos (GeminiPersonGeneration (..))
 import RakeVideoCLI
 import Relude
 import Test.Hspec
@@ -132,7 +133,7 @@ spec = describe "RakeVideoCLI" $ do
                             , veoVideoDuration = Nothing
                             , veoVideoAspectRatio = Nothing
                             , veoVideoResolution = Nothing
-                            , veoVideoPersonGeneration = Nothing
+                            , veoVideoPersonGeneration = Just GeminiPersonGenerationAllowAll
                             , veoVideoSeed = Nothing
                             , veoVideoPollIntervalMilliseconds = 5000
                             , veoVideoMaxPollAttempts = 120
@@ -155,7 +156,7 @@ spec = describe "RakeVideoCLI" $ do
                             , veoVideoDuration = Nothing
                             , veoVideoAspectRatio = Nothing
                             , veoVideoResolution = Nothing
-                            , veoVideoPersonGeneration = Nothing
+                            , veoVideoPersonGeneration = Just GeminiPersonGenerationAllowAdult
                             , veoVideoSeed = Nothing
                             , veoVideoPollIntervalMilliseconds = 5000
                             , veoVideoMaxPollAttempts = 120
@@ -195,12 +196,18 @@ spec = describe "RakeVideoCLI" $ do
                             , veoVideoDuration = Just 8
                             , veoVideoAspectRatio = Just "16:9"
                             , veoVideoResolution = Just "720p"
-                            , veoVideoPersonGeneration = Just "allow_adult"
+                            , veoVideoPersonGeneration = Just GeminiPersonGenerationAllowAdult
                             , veoVideoSeed = Just 123
                             , veoVideoPollIntervalMilliseconds = 1500
                             , veoVideoMaxPollAttempts = 20
                             }
                     )
+
+        it "rejects unknown Veo person generation values" $ do
+            parseGenVideoArgs ["veo", "--person-generation=spicy", "A cinematic shot"]
+                `shouldBe` ParseGenVideoArgsError
+                    "Invalid value for --person-generation: spicy. Use allow_all, allow_adult, or dont_allow."
+                    GenVideoHelpVeo
 
         it "shows help" $ do
             parseGenVideoArgs ["--help"]

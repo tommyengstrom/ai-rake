@@ -2,6 +2,7 @@ module Rake.Providers.OpenAI.Images
     ( OpenAIImagesSettings (..)
     , defaultOpenAIImagesSettings
     , OpenAIImageReference (..)
+    , OpenAIImageModeration (..)
     , OpenAIImageRequest (..)
     , defaultOpenAIImageRequest
     , generateOpenAIImage
@@ -51,6 +52,19 @@ instance ToJSON OpenAIImageReference where
         OpenAIImageFileId fileId ->
             object ["file_id" .= fileId]
 
+data OpenAIImageModeration
+    = OpenAIImageModerationAuto
+    | OpenAIImageModerationLow
+    deriving stock (Show, Eq, Generic)
+
+instance ToJSON OpenAIImageModeration where
+    toJSON =
+        String . \case
+            OpenAIImageModerationAuto ->
+                "auto"
+            OpenAIImageModerationLow ->
+                "low"
+
 data OpenAIImageRequest = OpenAIImageRequest
     { model :: Text
     , prompt :: Text
@@ -58,7 +72,7 @@ data OpenAIImageRequest = OpenAIImageRequest
     , mask :: Maybe OpenAIImageReference
     , background :: Maybe Text
     , inputFidelity :: Maybe Text
-    , moderation :: Maybe Text
+    , moderation :: Maybe OpenAIImageModeration
     , n :: Maybe Int
     , outputCompression :: Maybe Int
     , outputFormat :: Maybe Text
@@ -77,7 +91,7 @@ defaultOpenAIImageRequest prompt =
         , mask = Nothing
         , background = Nothing
         , inputFidelity = Nothing
-        , moderation = Nothing
+        , moderation = Just OpenAIImageModerationLow
         , n = Nothing
         , outputCompression = Nothing
         , outputFormat = Nothing

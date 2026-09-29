@@ -204,8 +204,11 @@ main = do
 
 Validation notes:
 
+- OpenAI image requests default to the lower documented moderation level, `low`; use `--moderation=auto` or `OpenAIImageModerationAuto` for standard filtering.
+- Gemini image requests default adjustable safety settings to `OFF`; Gemini Veo defaults `personGeneration` to `allow_all` for text-to-video and `allow_adult` for image-based requests.
 - OpenAI `mask` and `inputFidelity` require at least one input image.
 - OpenAI `gpt-image-2` does not support transparent backgrounds or explicit `inputFidelity`.
+- xAI's documented public Imagine API does not expose a request-side spicy mode or moderation-level option.
 - xAI `videoUrl` requests are edit operations and cannot be combined with `duration`, `aspectRatio`, or `resolution`.
 - xAI video requests may set `imageUrl` or `videoUrl`, but not both.
 - Gemini Veo `image` requests animate one still image as the first frame; `lastFrame` must also set `image` and is only for first-frame/last-frame interpolation.

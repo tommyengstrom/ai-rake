@@ -66,7 +66,7 @@ data VeoGenVideoOptions = VeoGenVideoOptions
     , veoVideoDuration :: Maybe Int
     , veoVideoAspectRatio :: Maybe Text
     , veoVideoResolution :: Maybe Text
-    , veoVideoPersonGeneration :: Maybe Text
+    , veoVideoPersonGeneration :: Maybe GeminiPersonGeneration
     , veoVideoSeed :: Maybe Int
     , veoVideoPollIntervalMilliseconds :: Int
     , veoVideoMaxPollAttempts :: Int
@@ -627,7 +627,11 @@ parseVeoArgs =
         "--resolution" : resolutionValue : rest ->
             go commonState veoOptions{veoVideoResolution = Just resolutionValue} rest
         "--person-generation" : personGenerationValue : rest ->
-            go commonState veoOptions{veoVideoPersonGeneration = Just personGenerationValue} rest
+            case parseGeminiPersonGenerationOption personGenerationValue of
+                Left err ->
+                    ParseGenVideoArgsError err GenVideoHelpVeo
+                Right personGeneration ->
+                    go commonState veoOptions{veoVideoPersonGeneration = Just personGeneration} rest
         "--seed" : rawSeed : rest ->
             case parseIntOption "--seed" rawSeed of
                 Left err ->
@@ -666,7 +670,11 @@ parseVeoArgs =
             | Just resolutionValue <- T.stripPrefix "--resolution=" arg ->
                 go commonState veoOptions{veoVideoResolution = Just resolutionValue} rest
             | Just personGenerationValue <- T.stripPrefix "--person-generation=" arg ->
-                go commonState veoOptions{veoVideoPersonGeneration = Just personGenerationValue} rest
+                case parseGeminiPersonGenerationOption personGenerationValue of
+                    Left err ->
+                        ParseGenVideoArgsError err GenVideoHelpVeo
+                    Right personGeneration ->
+                        go commonState veoOptions{veoVideoPersonGeneration = Just personGeneration} rest
             | Just rawSeed <- T.stripPrefix "--seed=" arg ->
                 case parseIntOption "--seed" rawSeed of
                     Left err ->
@@ -700,7 +708,7 @@ parseVeoArgs =
         | otherwise =
             ParseGenVideoArgsSuccess $
                 GenVideoVeo
-                    veoOptions
+                    (defaultVeoPersonGeneration veoOptions)
                         { veoVideoCommonOptions =
                             CommonGenVideoOptions
                                 { commonVideoPromptText = T.unwords parsePromptParts
@@ -727,6 +735,17 @@ parseIntOption optionName rawValue =
         Just value ->
             Right value
 
+parseGeminiPersonGenerationOption :: Text -> Either Text GeminiPersonGeneration
+parseGeminiPersonGenerationOption = \case
+    "allow_all" ->
+        Right GeminiPersonGenerationAllowAll
+    "allow_adult" ->
+        Right GeminiPersonGenerationAllowAdult
+    "dont_allow" ->
+        Right GeminiPersonGenerationDontAllow
+    otherValue ->
+        Left ("Invalid value for --person-generation: " <> otherValue <> ". Use allow_all, allow_adult, or dont_allow.")
+
 appendPromptParts :: CommonParseState -> [Text] -> CommonParseState
 appendPromptParts commonState@CommonParseState{parsePromptParts} extraPromptParts =
     commonState{parsePromptParts = parsePromptParts <> extraPromptParts}
@@ -738,6 +757,15 @@ hasXAIVideoSourceConflict XAIGenVideoOptions{xaiVideoImageSource, xaiVideoEditSo
 hasVeoLastFrameWithoutImage :: VeoGenVideoOptions -> Bool
 hasVeoLastFrameWithoutImage VeoGenVideoOptions{veoVideoImageSource, veoVideoLastFrameSource} =
     isNothing veoVideoImageSource && isJust veoVideoLastFrameSource
+
+defaultVeoPersonGeneration :: VeoGenVideoOptions -> VeoGenVideoOptions
+defaultVeoPersonGeneration options@VeoGenVideoOptions{veoVideoImageSource, veoVideoLastFrameSource, veoVideoPersonGeneration}
+    | isJust veoVideoPersonGeneration =
+        options
+    | isJust veoVideoImageSource || isJust veoVideoLastFrameSource =
+        options{veoVideoPersonGeneration = Just GeminiPersonGenerationAllowAdult}
+    | otherwise =
+        options{veoVideoPersonGeneration = Just GeminiPersonGenerationAllowAll}
 
 renderGenVideoHelp :: String -> GenVideoHelpTopic -> Text
 renderGenVideoHelp progName = \case
@@ -842,6 +870,7 @@ renderGenVideoHelp progName = \case
                    , "  Use `--image SOURCE` to animate one still image as the first frame."
                    , "  Use `--image START --last-frame END` for first/last frame interpolation."
                    , "  If `--aspect-ratio` is omitted for a Veo image request, source image dimensions are used to pick 16:9 or 9:16."
+                   , "  Default person generation is allow_all for text-to-video and allow_adult for image-based requests."
                    , "  GEMINI_API_KEY is required."
                    , ""
                    , "Examples:"
@@ -875,7 +904,7 @@ renderGenVideoHelp progName = \case
         , "  --duration SECONDS           Duration hint, for example 4, 6, or 8; first/last frame interpolation requires 8."
         , "  --aspect-ratio RATIO         Aspect ratio hint, for example 16:9 or 9:16."
         , "  --resolution RESOLUTION      Resolution hint, for example 720p, 1080p, or 4k."
-        , "  --person-generation VALUE    Person generation setting, for example allow_adult."
+        , "  --person-generation VALUE    Person generation setting: allow_all, allow_adult, or dont_allow."
         , "  --seed N                     Provider seed hint."
         , "  --poll-interval-ms N         Poll interval in milliseconds. Default: 5000"
         , "  --max-poll-attempts N        Maximum poll attempts. Default: 120"

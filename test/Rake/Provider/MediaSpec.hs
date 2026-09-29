@@ -409,6 +409,19 @@ spec = describe "media providers" $ do
                 `shouldBe` object
                     [ "model" .= ("gpt-image-2" :: Text)
                     , "prompt" .= ("draw a lighthouse" :: Text)
+                    , "moderation" .= ("low" :: Text)
+                    ]
+
+        it "encodes explicit OpenAI image moderation" $ do
+            toJSON
+                ( (defaultOpenAIImageRequest "draw a lighthouse")
+                    { moderation = Just OpenAIImageModerationAuto
+                    }
+                )
+                `shouldBe` object
+                    [ "model" .= ("gpt-image-2" :: Text)
+                    , "prompt" .= ("draw a lighthouse" :: Text)
+                    , "moderation" .= ("auto" :: Text)
                     ]
 
         it "encodes OpenAI image edits with JSON image references" $ do
@@ -436,6 +449,7 @@ spec = describe "media providers" $ do
                            )
                     , "mask" .= object ["image_url" .= ("https://example.com/mask.png" :: Text)]
                     , "input_fidelity" .= ("high" :: Text)
+                    , "moderation" .= ("low" :: Text)
                     , "output_format" .= ("png" :: Text)
                     ]
 
@@ -573,6 +587,7 @@ spec = describe "media providers" $ do
                         , inputImages = []
                         , aspectRatio = Just "16:9"
                         , imageSize = Just "2K"
+                        , safetySettings = leastRestrictiveGeminiSafetySettings
                         }
 
             toJSON request
@@ -599,6 +614,7 @@ spec = describe "media providers" $ do
                                     , "imageSize" .= ("2K" :: Text)
                                     ]
                             ]
+                    , "safetySettings" .= leastRestrictiveGeminiSafetySettingsJson
                     ]
 
         it "encodes Gemini image edits with inline input images" $ do
@@ -615,6 +631,7 @@ spec = describe "media providers" $ do
                             ]
                         , aspectRatio = Nothing
                         , imageSize = Nothing
+                        , safetySettings = leastRestrictiveGeminiSafetySettings
                         }
 
             toJSON request
@@ -644,6 +661,54 @@ spec = describe "media providers" $ do
                                 .= (["TEXT", "IMAGE"] :: [Text])
                             , "imageConfig" .= object []
                             ]
+                    , "safetySettings" .= leastRestrictiveGeminiSafetySettingsJson
+                    ]
+
+        it "defaults Gemini Veo text-to-video person generation to allow_all" $ do
+            toJSON (defaultGeminiVideoRequest "flower blooming")
+                `shouldBe` object
+                    [ "instances"
+                        .= ( [ object
+                                [ "prompt" .= ("flower blooming" :: Text)
+                                ]
+                             ]
+                                :: [Value]
+                           )
+                    , "parameters"
+                        .= object
+                            [ "personGeneration" .= ("allow_all" :: Text)
+                            ]
+                    ]
+
+        it "defaults Gemini Veo image requests to adult person generation" $ do
+            let request =
+                    (defaultGeminiVideoRequest "animate the still")
+                        { image =
+                            Just
+                                GeminiInlineImage
+                                    { mimeType = "image/png"
+                                    , base64Data = "Zmlyc3Q="
+                                    }
+                        }
+
+            toJSON request
+                `shouldBe` object
+                    [ "instances"
+                        .= ( [ object
+                                [ "prompt" .= ("animate the still" :: Text)
+                                , "image"
+                                    .= object
+                                        [ "bytesBase64Encoded" .= ("Zmlyc3Q=" :: Text)
+                                        , "mimeType" .= ("image/png" :: Text)
+                                        ]
+                                ]
+                             ]
+                                :: [Value]
+                           )
+                    , "parameters"
+                        .= object
+                            [ "personGeneration" .= ("allow_adult" :: Text)
+                            ]
                     ]
 
         it "encodes Gemini Veo first and last frame requests" $ do
@@ -667,7 +732,7 @@ spec = describe "media providers" $ do
                         , durationSeconds = Just 8
                         , aspectRatio = Just "16:9"
                         , resolution = Just "720p"
-                        , personGeneration = Just "allow_adult"
+                        , personGeneration = Just GeminiPersonGenerationAllowAdult
                         , seed = Just 123
                         }
 
@@ -923,3 +988,17 @@ runLlmError :: Eff '[Error RakeError, IOE] a -> IO (Either RakeError a)
 runLlmError =
     runEff
         . runErrorNoCallStack
+
+leastRestrictiveGeminiSafetySettingsJson :: [Value]
+leastRestrictiveGeminiSafetySettingsJson =
+    [ safetySettingValue "HARM_CATEGORY_HARASSMENT"
+    , safetySettingValue "HARM_CATEGORY_HATE_SPEECH"
+    , safetySettingValue "HARM_CATEGORY_SEXUALLY_EXPLICIT"
+    , safetySettingValue "HARM_CATEGORY_DANGEROUS_CONTENT"
+    ]
+  where
+    safetySettingValue category =
+        object
+            [ "category" .= (category :: Text)
+            , "threshold" .= ("OFF" :: Text)
+            ]

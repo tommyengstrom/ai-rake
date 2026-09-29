@@ -2,6 +2,7 @@ module RakeImageCLISpec where
 
 import RakeImageCLI
 import Data.Text qualified as T
+import Rake.Providers.OpenAI.Images (OpenAIImageModeration (..))
 import Relude
 import Test.Hspec
 
@@ -31,7 +32,7 @@ spec = describe "RakeImageCLI" $ do
                             , openAIOutputFormat = "png"
                             , openAIOutputCompression = Nothing
                             , openAIBackground = Nothing
-                            , openAIModeration = Nothing
+                            , openAIModeration = Just OpenAIImageModerationLow
                             , openAIUser = Nothing
                             , openAIInputImageSources = []
                             , openAIInputFileIds = []
@@ -140,7 +141,7 @@ spec = describe "RakeImageCLI" $ do
                             , openAIOutputFormat = "jpeg"
                             , openAIOutputCompression = Just 80
                             , openAIBackground = Just "transparent"
-                            , openAIModeration = Just "auto"
+                            , openAIModeration = Just OpenAIImageModerationAuto
                             , openAIUser = Just "user-123"
                             , openAIInputImageSources = ["base.png"]
                             , openAIInputFileIds = ["file-123"]
@@ -149,6 +150,12 @@ spec = describe "RakeImageCLI" $ do
                             , openAIInputFidelity = Just "high"
                             }
                     )
+
+        it "rejects unknown OpenAI image moderation values" $ do
+            parseGenImageArgs ["gptimage", "--moderation=spicy", "horse"]
+                `shouldBe` ParseGenImageArgsError
+                    "Invalid value for --moderation: spicy. Use auto or low."
+                    GenImageHelpOpenAI
 
         it "parses banana2-specific options" $ do
             parseGenImageArgs
