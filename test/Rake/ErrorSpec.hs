@@ -42,6 +42,10 @@ spec = describe "Rake.Error" $ do
             renderRakeError (LlmExpectationError "boom")
                 `shouldBe` "boom"
 
+        it "identifies invalid provider responses separately from local errors" $ do
+            renderRakeError (LlmInvalidResponseError "Expected response.output to be an array")
+                `shouldBe` "Provider returned an invalid response: Expected response.output to be an array"
+
         it "renders LLM timeout errors directly" $ do
             renderRakeError (LlmTimeoutError 30)
                 `shouldBe` "LLM call timed out after 30s"

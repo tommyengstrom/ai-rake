@@ -21,6 +21,7 @@ import Servant.Client (ClientError (..), ResponseF (..))
 data RakeError
     = LlmClientError ClientError
     | LlmExpectationError String
+    | LlmInvalidResponseError String
     | LlmTimeoutError NominalDiffTime
     | StreamingInternalError StreamingInternalIssue
     | ConversationBlocked ReplayBlockReason (Maybe ResetCheckpoint)
@@ -39,6 +40,8 @@ renderRakeError = \case
         renderClientError clientError
     LlmExpectationError err ->
         toText err
+    LlmInvalidResponseError err ->
+        "Provider returned an invalid response: " <> toText err
     LlmTimeoutError timeoutSeconds ->
         "LLM call timed out after " <> show timeoutSeconds
     StreamingInternalError issue ->

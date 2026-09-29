@@ -6,6 +6,7 @@ module Rake.Providers.Internal
     , protectStreamingInternalAction
     , runChatProvider
     , runStreamingSseRequest
+    , validateProviderRound
     , valueToCompactText
     ) where
 
@@ -29,6 +30,16 @@ import Relude
 import Servant.Client (BaseUrl (..), ClientError (..), ResponseF (..))
 import Servant.Client.Core.Request (RequestF (..))
 import UnliftIO.Exception qualified as Exception
+
+validateProviderRound :: ProviderRound -> Either RakeError ProviderRound
+validateProviderRound roundResult@ProviderRound{action} =
+    case action of
+        ProviderRoundFailed (FailureContract reason) ->
+            Left (LlmInvalidResponseError (toString reason))
+        ProviderRoundFailed FailureProvider{} -> Right roundResult
+        ProviderRoundDone -> Right roundResult
+        ProviderRoundNeedsLocalTools{} -> Right roundResult
+        ProviderRoundPaused{} -> Right roundResult
 
 runChatProvider
     :: ( IOE :> es

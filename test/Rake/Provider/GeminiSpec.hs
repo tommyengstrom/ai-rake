@@ -2,6 +2,7 @@ module Rake.Provider.GeminiSpec where
 
 import Control.Concurrent qualified as IO
 import Data.Aeson (object, (.=))
+import Data.IORef qualified as IORef
 import Data.Text qualified as T
 import Effectful
 import Effectful.Concurrent
@@ -140,3 +141,20 @@ spec = do
                 specWithProvider imageFixture (runEffectStack (T.pack apiKey))
                 specWithManyToolProvider (runEffectStackResult (T.pack apiKey))
                 specWithStructuredSchemaProvider allStructuredSchemasAccepted (runEffectStackResult (T.pack apiKey))
+                it "streams current Interactions step events into a completed round" $ do
+                    streamedTextRef <- IORef.newIORef ""
+                    outcome <-
+                        runEffectStack (T.pack apiKey) $
+                            streamChatOutcome
+                                StreamCallbacks
+                                    { onAssistantTextDelta = \textDelta ->
+                                        liftIO (IORef.modifyIORef' streamedTextRef (<> textDelta))
+                                    , onAssistantRefusalDelta = \_ -> pure ()
+                                    }
+                                defaultChatConfig
+                                [user "Reply with exactly READY."]
+
+                    let completedText = T.concat (lastAssistantTexts $ expectFinished outcome)
+                    completedText `shouldSatisfy` not . T.null . T.strip
+                    streamedText <- IORef.readIORef streamedTextRef
+                    streamedText `shouldBe` completedText

@@ -23,16 +23,16 @@ import Rake.Providers.Gemini.Chat
     , runRakeGeminiChat
     )
 import Rake.Providers.OpenAI.Chat
-    ( OpenAIChatSettings (..)
-    , decodeOpenAIResponse
+    ( decodeOpenAIResponse
     , defaultOpenAIChatSettings
     , runRakeOpenAIChat
     )
+import Rake.Providers.OpenAI.Chat qualified as OpenAI
 import Rake.Providers.XAI.Chat
-    ( XAIChatSettings (..)
-    , defaultXAIChatSettings
+    ( defaultXAIChatSettings
     , runRakeXAIChat
     )
+import Rake.Providers.XAI.Chat qualified as XAI
 import Rake.Storage.InMemory (runRakeStorageInMemory)
 import Relude
 import System.Directory qualified as Directory
@@ -397,20 +397,10 @@ spec = describe "Rake.Replay" $ do
                     . runErrorNoCallStackWith @ChatStorageError (error . show)
                     . runRakeStorageInMemory
                     $ do
-                        let OpenAIChatSettings
-                                { apiKey = defaultApiKey
-                                , model = defaultModel
-                                , organizationId = defaultOrganizationId
-                                , projectId = defaultProjectId
-                                } = defaultOpenAIChatSettings "test-api-key"
-                            settings =
-                                OpenAIChatSettings
-                                    { apiKey = defaultApiKey
-                                    , model = defaultModel
-                                    , baseUrl = Render.unreachableBaseUrl
-                                    , organizationId = defaultOrganizationId
-                                    , projectId = defaultProjectId
-                                    , requestLogger = \_ -> pure ()
+                        let settings =
+                                (defaultOpenAIChatSettings "test-api-key")
+                                    { OpenAI.baseUrl = Render.unreachableBaseUrl
+                                    , OpenAI.requestLogger = \_ -> pure ()
                                     }
                         convId <- createConversation
                         appendItems convId [user "show me a cat"]
@@ -457,20 +447,10 @@ spec = describe "Rake.Replay" $ do
                         . runErrorNoCallStackWith @ChatStorageError (error . show)
                         . runRakeStorageInMemory
                         $ do
-                            let OpenAIChatSettings
-                                    { apiKey = defaultApiKey
-                                    , model = defaultModel
-                                    , organizationId = defaultOrganizationId
-                                    , projectId = defaultProjectId
-                                    } = defaultOpenAIChatSettings "test-api-key"
-                                settings =
-                                    OpenAIChatSettings
-                                        { apiKey = defaultApiKey
-                                        , model = defaultModel
-                                        , baseUrl = Render.unreachableBaseUrl
-                                        , organizationId = defaultOrganizationId
-                                        , projectId = defaultProjectId
-                                        , requestLogger = Render.recordRequest requestRef
+                            let settings =
+                                    (defaultOpenAIChatSettings "test-api-key")
+                                        { OpenAI.baseUrl = Render.unreachableBaseUrl
+                                        , OpenAI.requestLogger = Render.recordRequest requestRef
                                         }
                             convId <- createConversation
                             appendItems convId [user "show me a cat"]
@@ -531,11 +511,7 @@ spec = describe "Rake.Replay" $ do
                 Render.lookupPath ["input"] requestBody
                     `shouldBe` Just
                         ( toJSON
-                            ( [ object
-                                    [ "role" .= ("user" :: Text)
-                                    , "content" .= ([requestPart] :: [Value])
-                                    ]
-                              ]
+                            ( [storedMediaUserInput providerFamily requestPart]
                                 :: [Value]
                             )
                         )
@@ -551,11 +527,7 @@ spec = describe "Rake.Replay" $ do
                 Render.lookupPath ["input"] requestBody
                     `shouldBe` Just
                         ( toJSON
-                            ( [ object
-                                    [ "role" .= ("user" :: Text)
-                                    , "content" .= ([requestPart] :: [Value])
-                                    ]
-                              ]
+                            ( [storedMediaUserInput providerFamily requestPart]
                                 :: [Value]
                             )
                         )
@@ -772,23 +744,27 @@ storedMediaRenderCases =
         }
     ]
 
+storedMediaUserInput :: ProviderApiFamily -> Value -> Value
+storedMediaUserInput providerFamily requestPart =
+    case providerFamily of
+        ProviderGeminiInteractions ->
+            object
+                [ "type" .= ("user_input" :: Text)
+                , "content" .= ([requestPart] :: [Value])
+                ]
+        _ ->
+            object
+                [ "role" .= ("user" :: Text)
+                , "content" .= ([requestPart] :: [Value])
+                ]
+
 captureStoredOpenAIRequestBody :: [MediaProviderReference] -> [HistoryItem] -> IO Value
 captureStoredOpenAIRequestBody mediaReferences history = do
     requestRef <- IORef.newIORef Nothing
-    let OpenAIChatSettings
-            { apiKey = defaultApiKey
-            , model = defaultModel
-            , organizationId = defaultOrganizationId
-            , projectId = defaultProjectId
-            } = defaultOpenAIChatSettings "test-api-key"
-        settings =
-            OpenAIChatSettings
-                { apiKey = defaultApiKey
-                , model = defaultModel
-                , baseUrl = Render.unreachableBaseUrl
-                , organizationId = defaultOrganizationId
-                , projectId = defaultProjectId
-                , requestLogger = Render.recordRequest requestRef
+    let settings =
+            (defaultOpenAIChatSettings "test-api-key")
+                { OpenAI.baseUrl = Render.unreachableBaseUrl
+                , OpenAI.requestLogger = Render.recordRequest requestRef
                 }
 
     result <-
@@ -814,16 +790,10 @@ captureStoredOpenAIRequestBody mediaReferences history = do
 captureStoredXAIRequestBody :: [MediaProviderReference] -> [HistoryItem] -> IO Value
 captureStoredXAIRequestBody mediaReferences history = do
     requestRef <- IORef.newIORef Nothing
-    let XAIChatSettings
-            { apiKey = defaultApiKey
-            , model = defaultModel
-            } = defaultXAIChatSettings "test-api-key"
-        settings =
-            XAIChatSettings
-                { apiKey = defaultApiKey
-                , model = defaultModel
-                , baseUrl = Render.unreachableBaseUrl
-                , requestLogger = Render.recordRequest requestRef
+    let settings =
+            (defaultXAIChatSettings "test-api-key")
+                { XAI.baseUrl = Render.unreachableBaseUrl
+                , XAI.requestLogger = Render.recordRequest requestRef
                 }
 
     result <-

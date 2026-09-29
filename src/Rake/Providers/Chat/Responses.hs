@@ -27,6 +27,7 @@ import Rake.Providers.Internal
     ( protectStreamingInternalAction
     , runChatProvider
     , runStreamingSseRequest
+    , validateProviderRound
     , valueToCompactText
     )
 import Rake.Types
@@ -47,6 +48,7 @@ data ResponsesProviderConfig es = ResponsesProviderConfig
     , model :: Text
     , organizationId :: Maybe Text
     , projectId :: Maybe Text
+    , reasoningConfig :: Maybe Value
     , requestLogger :: NativeMsgFormat -> Eff es ()
     }
 
@@ -118,7 +120,7 @@ runResponsesChatProvider config@ResponsesProviderConfig{..} eff = do
                     (handleResponsesStreamEvent requestLogger streamCallbacks)
             finalResponseValue <-
                 maybe
-                    (throwError (LlmExpectationError "Responses stream ended without a terminal response event"))
+                    (throwError (LlmInvalidResponseError "Responses stream ended without a terminal response event"))
                     pure
                     maybeFinalResponseValue
             either throwError pure (decodeResponsesResponse providerTag finalResponseValue)
@@ -138,7 +140,7 @@ buildResponsesRequestBody
     -> SamplingOptions
     -> [HistoryItem]
     -> Eff es Value
-buildResponsesRequestBody ResponsesProviderConfig{providerTag, requestLogger, model} tools responseFormat samplingOptions history = do
+buildResponsesRequestBody ResponsesProviderConfig{providerTag, requestLogger, model, reasoningConfig} tools responseFormat samplingOptions history = do
     -- OpenAI and xAI share this Responses renderer. We collapse GenericSystem
     -- to the latest snapshot and send it once as the leading instruction for
     -- provider compatibility, instead of replaying historical system messages.
@@ -161,6 +163,7 @@ buildResponsesRequestBody ResponsesProviderConfig{providerTag, requestLogger, mo
             , "store" .= False
             ]
                 <> samplingFields
+                <> reasoningFields
                 <> toolFields
                 <> responseFormatFields
   where
@@ -171,6 +174,9 @@ buildResponsesRequestBody ResponsesProviderConfig{providerTag, requestLogger, mo
             ]
 
     SamplingOptions{temperature, topP} = samplingOptions
+
+    reasoningFields =
+        maybe [] (\configValue -> ["reasoning" .= configValue]) reasoningConfig
 
     toolFields
         | null tools = []
@@ -221,7 +227,7 @@ handleResponsesStreamEvent requestLogger streamCallbacks _ payload
         case eitherDecodeStrict' payload of
             Left err ->
                 throwError
-                    ( LlmExpectationError
+                    ( LlmInvalidResponseError
                         ( "Responses stream event was not valid JSON: "
                             <> err
                         )
@@ -598,7 +604,7 @@ decodeResponsesResponse providerTag responseValue = do
                             , availableLocalTools = []
                             }
                 }
-    pure ProviderRound{roundItems, mediaReferences = roundMediaReferences, action = roundAction}
+    validateProviderRound ProviderRound{roundItems, mediaReferences = roundMediaReferences, action = roundAction}
 
 responsesRoundAction
     :: [(Text, Text, Maybe Text)]
@@ -750,14 +756,14 @@ expectObject label = \case
     Object objectValue ->
         Right objectValue
     _ ->
-        Left (LlmExpectationError ("Expected " <> toString label <> " to be an object"))
+        Left (LlmInvalidResponseError ("Expected " <> toString label <> " to be an object"))
 
 expectArray :: Text -> Value -> Either RakeError (Vector.Vector Value)
 expectArray label = \case
     Array values ->
         Right values
     _ ->
-        Left (LlmExpectationError ("Expected " <> toString label <> " to be an array"))
+        Left (LlmInvalidResponseError ("Expected " <> toString label <> " to be an array"))
 
 lookupText :: Key.Key -> Object -> Maybe Text
 lookupText key objectValue = KM.lookup key objectValue >>= \case

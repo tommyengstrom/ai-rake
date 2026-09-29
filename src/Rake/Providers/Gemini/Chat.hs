@@ -25,6 +25,7 @@ import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString qualified as BS
+import Data.IORef qualified as IORef
 import Data.Map qualified as Map
 import Data.Text.Encoding qualified as TextEncoding
 import Data.Vector qualified as Vector
@@ -41,6 +42,7 @@ import Rake.Providers.Internal
     , protectStreamingInternalAction
     , runChatProvider
     , runStreamingSseRequest
+    , validateProviderRound
     , valueToCompactText
     )
 import Rake.Types
@@ -318,16 +320,17 @@ runRakeGeminiChat settings@GeminiChatSettings{apiKey, baseUrl, requestLogger} ef
             let streamingRequestBody = enableStreamingRequestBody requestBody
             requestLogger (NativeMsgOut streamingRequestBody)
             streamingRequest <- liftIO (buildGeminiStreamingRequest baseUrl apiKey streamingRequestBody)
+            streamedStepsRef <- liftIO (IORef.newIORef mempty)
             maybeFinalResponseValue <-
                 runStreamingSseRequest
                     parsedBaseUrl
                     manager
                     streamingRequest
                     (\clientErr -> requestLogger (NativeRequestFailure clientErr))
-                    (handleGeminiStreamEvent requestLogger streamCallbacks)
+                    (handleGeminiStreamEvent requestLogger streamCallbacks streamedStepsRef)
             finalResponseValue <-
                 maybe
-                    (throwError (LlmExpectationError "Gemini stream ended without a terminal interaction event"))
+                    (throwError (LlmInvalidResponseError "Gemini stream ended without a terminal interaction event"))
                     pure
                     maybeFinalResponseValue
             either throwError pure (decodeGeminiResponse finalResponseValue)
@@ -365,17 +368,18 @@ handleGeminiStreamEvent
        )
     => (NativeMsgFormat -> Eff es ())
     -> StreamCallbacks es
+    -> IORef.IORef (Map Int Value)
     -> Maybe Text
     -> BS.ByteString
     -> Eff es (SseStep Value)
-handleGeminiStreamEvent requestLogger streamCallbacks _ payload
+handleGeminiStreamEvent requestLogger streamCallbacks streamedStepsRef _ payload
     | payload == "[DONE]" =
         pure SseStop
     | otherwise =
         case eitherDecodeStrict' payload of
             Left err ->
                 throwError
-                    ( LlmExpectationError
+                    ( LlmInvalidResponseError
                         ( "Gemini stream event was not valid JSON: "
                             <> err
                         )
@@ -385,38 +389,145 @@ handleGeminiStreamEvent requestLogger streamCallbacks _ payload
                     (RequestLoggerFailed . ("gemini: " <>))
                     (requestLogger (NativeMsgIn eventValue))
                 emitGeminiStreamDelta streamCallbacks eventValue
+                streamedSteps <-
+                    liftIO $
+                        IORef.atomicModifyIORef' streamedStepsRef $ \currentSteps ->
+                            let updatedSteps = accumulateGeminiStreamEvent eventValue currentSteps
+                             in (updatedSteps, updatedSteps)
                 pure $
                     maybe
                         SseContinue
                         SseFinish
-                        (geminiTerminalInteraction eventValue)
+                        (geminiTerminalInteraction streamedSteps eventValue)
 
 emitGeminiStreamDelta :: StreamCallbacks es -> Value -> Eff es ()
 emitGeminiStreamDelta StreamCallbacks{onAssistantTextDelta, onAssistantRefusalDelta} = \case
     Object eventObject
-        | lookupText "event_type" eventObject == Just "content.delta"
+        | let eventType = lookupText "event_type" eventObject
+        , eventType == Just "step.delta" || eventType == Just "content.delta"
         , Just (Object deltaObject) <- KM.lookup "delta" eventObject ->
-            case lookupText "type" deltaObject of
-                Just "text"
-                    | Just deltaText <- lookupText "text" deltaObject ->
-                        onAssistantTextDelta deltaText
-                Just "refusal"
-                    | Just refusalText <- lookupText "refusal" deltaObject <|> lookupText "text" deltaObject ->
-                        onAssistantRefusalDelta refusalText
+            emitGeminiContentDelta onAssistantTextDelta onAssistantRefusalDelta deltaObject
+        | lookupText "event_type" eventObject == Just "step.start"
+        , Just (Object stepObject) <- KM.lookup "step" eventObject
+        , lookupText "type" stepObject == Just "model_output"
+        , Just (Array contentValues) <- KM.lookup "content" stepObject ->
+            forM_ contentValues $ \case
+                Object contentObject ->
+                    emitGeminiContentDelta onAssistantTextDelta onAssistantRefusalDelta contentObject
                 _ ->
                     pure ()
     _ ->
         pure ()
 
-geminiTerminalInteraction :: Value -> Maybe Value
-geminiTerminalInteraction = \case
+emitGeminiContentDelta
+    :: (Text -> Eff es ())
+    -> (Text -> Eff es ())
+    -> Object
+    -> Eff es ()
+emitGeminiContentDelta onAssistantTextDelta onAssistantRefusalDelta contentObject =
+    case lookupText "type" contentObject of
+        Just "text"
+            | Just deltaText <- lookupText "text" contentObject ->
+                onAssistantTextDelta deltaText
+        Just "refusal"
+            | Just refusalText <- lookupText "refusal" contentObject <|> lookupText "text" contentObject ->
+                onAssistantRefusalDelta refusalText
+        _ ->
+            pure ()
+
+accumulateGeminiStreamEvent :: Value -> Map Int Value -> Map Int Value
+accumulateGeminiStreamEvent eventValue currentSteps =
+    case eventValue of
+        Object eventObject ->
+            case lookupText "event_type" eventObject of
+                Just "step.start"
+                    | Just stepIndex <- geminiEventIndex eventObject
+                    , Just stepValue <- KM.lookup "step" eventObject ->
+                        Map.insert stepIndex stepValue currentSteps
+                Just "step.delta"
+                    | Just stepIndex <- geminiEventIndex eventObject
+                    , Just deltaValue <- KM.lookup "delta" eventObject ->
+                        Map.adjust (`applyGeminiStepDelta` deltaValue) stepIndex currentSteps
+                _ ->
+                    currentSteps
+        _ ->
+            currentSteps
+
+geminiEventIndex :: Object -> Maybe Int
+geminiEventIndex eventObject = do
+    indexValue <- KM.lookup "index" eventObject
+    case fromJSON indexValue of
+        Success stepIndex ->
+            Just stepIndex
+        Error _ ->
+            Nothing
+
+applyGeminiStepDelta :: Value -> Value -> Value
+applyGeminiStepDelta stepValue deltaValue =
+    case (stepValue, deltaValue) of
+        (Object stepObject, Object deltaObject) ->
+            Object $
+                case lookupText "type" deltaObject of
+                    Just deltaType
+                        | deltaType `elem` (["audio", "document", "image", "text", "video"] :: [Text]) ->
+                            appendGeminiArrayField "content" deltaValue stepObject
+                    Just "thought_summary"
+                        | Just summaryContent <- KM.lookup "content" deltaObject ->
+                            appendGeminiArrayField "summary" summaryContent stepObject
+                    Just "thought_signature"
+                        | Just signatureValue <- KM.lookup "signature" deltaObject ->
+                            KM.insert "signature" signatureValue stepObject
+                    Just "arguments_delta"
+                        | Just (String argumentsFragment) <- KM.lookup "arguments" deltaObject ->
+                            appendGeminiTextField "arguments" argumentsFragment stepObject
+                    _ ->
+                        mergeGeminiStepDelta stepObject deltaObject
+        _ ->
+            stepValue
+
+appendGeminiArrayField :: Key.Key -> Value -> Object -> Object
+appendGeminiArrayField fieldName value objectValue =
+    KM.insert fieldName updatedValues objectValue
+  where
+    updatedValues =
+        case KM.lookup fieldName objectValue of
+            Just (Array existingValues) ->
+                Array (existingValues <> Vector.singleton value)
+            _ ->
+                Array (Vector.singleton value)
+
+appendGeminiTextField :: Key.Key -> Text -> Object -> Object
+appendGeminiTextField fieldName textFragment objectValue =
+    KM.insert fieldName (String updatedText) objectValue
+  where
+    updatedText =
+        case KM.lookup fieldName objectValue of
+            Just (String existingText) ->
+                existingText <> textFragment
+            _ ->
+                textFragment
+
+mergeGeminiStepDelta :: Object -> Object -> Object
+mergeGeminiStepDelta stepObject deltaObject =
+    foldl'
+        (\accumulatedStep (fieldName, fieldValue) ->
+            if fieldName == "type"
+                then accumulatedStep
+                else KM.insert fieldName fieldValue accumulatedStep
+        )
+        stepObject
+        (KM.toList deltaObject :: [(Key.Key, Value)])
+
+geminiTerminalInteraction :: Map Int Value -> Value -> Maybe Value
+geminiTerminalInteraction streamedSteps = \case
     Object eventObject
-        | lookupText "event_type" eventObject == Just "interaction.complete" ->
-            KM.lookup "interaction" eventObject
+        | let eventType = lookupText "event_type" eventObject
+        , eventType == Just "interaction.completed" || eventType == Just "interaction.complete" ->
+            addStreamedSteps streamedSteps <$> KM.lookup "interaction" eventObject
         | Just interactionValue@(Object interactionObject) <- KM.lookup "interaction" eventObject
         , Just statusText <- lookupText "status" interactionObject
         , any (== statusText) terminalStatuses ->
-            Just interactionValue
+            Just (addStreamedSteps streamedSteps interactionValue)
     _ ->
         Nothing
   where
@@ -430,6 +541,16 @@ geminiTerminalInteraction = \case
         , "canceled"
         , "expired"
         ]
+
+addStreamedSteps :: Map Int Value -> Value -> Value
+addStreamedSteps streamedSteps = \case
+    Object interactionObject
+        | KM.member "steps" interactionObject ->
+            Object interactionObject
+        | otherwise ->
+            Object (KM.insert "steps" (toJSON (Map.elems streamedSteps)) interactionObject)
+    otherValue ->
+        otherValue
 
 buildGeminiRequestBody
     :: ( Error RakeError :> es
@@ -455,7 +576,7 @@ buildGeminiRequestBody GeminiChatSettings{model, providerTools, systemInstructio
     pure $
         object $
             [ "model" .= model
-            , "input" .= reverse renderedTurnValues
+            , "input" .= geminiTurnsToSteps (reverse renderedTurnValues)
             , "store" .= False
             ]
                 <> catMaybes
@@ -518,10 +639,70 @@ turnValue role content =
         , "content" .= content
         ]
 
+-- The v1beta Interactions API now uses a step-list history. Keep the existing
+-- turn-oriented canonical renderer internally, then translate each turn into
+-- the wire format here so stateless history remains chronological. Model tool
+-- and thought steps must stay top-level and are replayed exactly as received.
+geminiTurnsToSteps :: [Value] -> [Value]
+geminiTurnsToSteps = concatMap geminiTurnToSteps
+
+geminiTurnToSteps :: Value -> [Value]
+geminiTurnToSteps = \case
+    Object turnObject
+        | Just (Array contentValues) <- KM.lookup "content" turnObject ->
+            case renderedTurnRole turnObject of
+                Just "user" ->
+                    wrapGeminiTurnContent "user_input" isGeminiFunctionResultStep (Vector.toList contentValues)
+                Just "model" ->
+                    wrapGeminiTurnContent "model_output" (not . isGeminiContentBlock) (Vector.toList contentValues)
+                _ ->
+                    []
+    _ ->
+        []
+
+wrapGeminiTurnContent :: Text -> (Value -> Bool) -> [Value] -> [Value]
+wrapGeminiTurnContent wrapperType isTopLevelStep = go []
+  where
+    go :: [Value] -> [Value] -> [Value]
+    go pendingContent = \case
+        [] ->
+            wrapContent pendingContent
+        contentValue : remainingContent
+            | isTopLevelStep contentValue ->
+                wrapContent pendingContent
+                    <> [contentValue]
+                    <> go [] remainingContent
+            | otherwise ->
+                go (pendingContent <> [contentValue]) remainingContent
+
+    wrapContent :: [Value] -> [Value]
+    wrapContent = \case
+        [] ->
+            []
+        contentValues ->
+            [ object
+                [ "type" .= wrapperType
+                , "content" .= contentValues
+                ]
+            ]
+
+isGeminiFunctionResultStep :: Value -> Bool
+isGeminiFunctionResultStep = geminiPayloadHasType "function_result"
+
+isGeminiContentBlock :: Value -> Bool
+isGeminiContentBlock value =
+    any (`geminiPayloadHasType` value) (["audio", "document", "image", "text", "video"] :: [Text])
+
+geminiPayloadHasType :: Text -> Value -> Bool
+geminiPayloadHasType expectedType = \case
+    Object payloadObject ->
+        lookupText "type" payloadObject == Just expectedType
+    _ ->
+        False
+
 data RenderedGeminiHistory = RenderedGeminiHistory
     { renderedTurns :: [Value]
     , toolCallNames :: Map Text Text
-    , openModelTurnHasFunctionCall :: Bool
     }
 
 initialRenderedGeminiHistory :: RenderedGeminiHistory
@@ -529,7 +710,6 @@ initialRenderedGeminiHistory =
     RenderedGeminiHistory
         { renderedTurns = []
         , toolCallNames = mempty
-        , openModelTurnHasFunctionCall = False
         }
 
 combinedSystemInstruction :: Maybe Text -> Maybe Text -> Maybe Text
@@ -576,16 +756,15 @@ renderGeminiCanonicalHistoryItem renderedHistory HistoryItem
                     ]
                 renderedHistoryWithContinuations =
                     foldl' (flip (appendGeminiTurnBlock "model")) renderedHistory geminiContinuationPayloads
-                RenderedGeminiHistory{openModelTurnHasFunctionCall = sawFunctionCallInCurrentModelTurn} =
-                    renderedHistoryWithContinuations
-                shouldInjectDummyThoughtSignature =
-                    null geminiContinuationPayloads
-                        && not sawFunctionCallInCurrentModelTurn
+                renderedFunctionCall =
+                    fromMaybe
+                        (genericGeminiFunctionCallValue toolCallId toolName toolArgs)
+                        (nativeGeminiFunctionCallPayload maybeProviderItem)
              in
                 pure $
                     appendGeminiTurnBlock
                         "model"
-                        (genericGeminiFunctionCallValue shouldInjectDummyThoughtSignature toolCallId toolName toolArgs)
+                        renderedFunctionCall
                         (registerToolCall toolCallId toolName renderedHistoryWithContinuations)
         GenericToolResult{toolResult = ToolResult{toolCallId = ToolCallId toolCallId, toolResponse}} -> do
             let RenderedGeminiHistory{toolCallNames} = renderedHistory
@@ -620,56 +799,26 @@ renderGeminiCanonicalHistoryItem renderedHistory HistoryItem
                         renderedHistory
 
 appendGeminiTurnBlock :: Text -> Value -> RenderedGeminiHistory -> RenderedGeminiHistory
-appendGeminiTurnBlock role content renderedHistory@RenderedGeminiHistory{renderedTurns, openModelTurnHasFunctionCall} =
+appendGeminiTurnBlock role content renderedHistory@RenderedGeminiHistory{renderedTurns} =
     renderedHistory
         { renderedTurns = appendGeminiTurn role content renderedTurns
-        , openModelTurnHasFunctionCall =
-            case role of
-                "model" ->
-                    if extendsExistingTurn
-                        then openModelTurnHasFunctionCall || isGeminiFunctionCallPayload content
-                        else isGeminiFunctionCallPayload content
-                _ ->
-                    False
         }
-  where
-    extendsExistingTurn =
-        case renderedTurns of
-            Object existingTurn : _
-                | renderedTurnRole existingTurn == Just role ->
-                    True
-            _ ->
-                False
-
-isGeminiFunctionCallPayload :: Value -> Bool
-isGeminiFunctionCallPayload = \case
-    Object payloadObject ->
-        lookupText "type" payloadObject == Just "function_call"
-    _ ->
-        False
-
--- Gemini 3 function calling validates the current-turn function call against a
--- thought signature. When replaying a foreign tool continuation into Gemini,
--- there is no provider-issued signature to preserve, so we attach Google's
--- documented dummy signature to the first replayed generic function_call in
--- that step. Same-provider Gemini continuation instead carries provider-owned
--- continuation payloads on the pending ToolCall itself.
--- Docs: https://ai.google.dev/gemini-api/docs/thought-signatures
-geminiForeignTraceDummyThoughtSignature :: Text
-geminiForeignTraceDummyThoughtSignature =
-    "context_engineering_is_the_way_to_go"
-
-genericGeminiFunctionCallValue :: Bool -> Text -> Text -> Map Text Value -> Value
-genericGeminiFunctionCallValue includeDummyThoughtSignature toolCallId toolName toolArgs =
-    object $
+genericGeminiFunctionCallValue :: Text -> Text -> Map Text Value -> Value
+genericGeminiFunctionCallValue toolCallId toolName toolArgs =
+    object
         [ "type" .= ("function_call" :: Text)
         , "id" .= toolCallId
         , "name" .= toolName
         , "arguments" .= toolArgs
         ]
-            <> [ "thought_signature" .= geminiForeignTraceDummyThoughtSignature
-               | includeDummyThoughtSignature
-               ]
+
+nativeGeminiFunctionCallPayload :: Maybe ProviderItem -> Maybe Value
+nativeGeminiFunctionCallPayload = \case
+    Just ProviderItem{apiFamily = ProviderGeminiInteractions, payload}
+        | geminiPayloadHasType "function_call" payload ->
+            Just payload
+    _ ->
+        Nothing
 
 registerToolCall :: Text -> Text -> RenderedGeminiHistory -> RenderedGeminiHistory
 registerToolCall toolCallId toolName renderedHistory@RenderedGeminiHistory{toolCallNames} =
@@ -821,12 +970,21 @@ geminiResponseFormatSchema = \case
         Nothing
     JsonValue ->
         Just $
-            object
-                [ "type" .= ("object" :: Text)
-                , "additionalProperties" .= True
-                ]
+            geminiJsonResponseFormat $
+                object
+                    [ "type" .= ("object" :: Text)
+                    , "additionalProperties" .= True
+                    ]
     JsonSchema schema ->
-        Just (toGeminiStructuredSchema schema)
+        Just (geminiJsonResponseFormat (toGeminiStructuredSchema schema))
+
+geminiJsonResponseFormat :: Value -> Value
+geminiJsonResponseFormat schema =
+    object
+        [ "type" .= ("text" :: Text)
+        , "mime_type" .= ("application/json" :: Text)
+        , "schema" .= schema
+        ]
 
 toGeminiStructuredSchema :: Value -> Value
 toGeminiStructuredSchema = \case
@@ -1049,12 +1207,8 @@ decodeGeminiResponse responseValue = do
     responseObject <- expectObject "interaction" responseValue
     let interactionStatus = lookupText "status" responseObject
         interactionFailureDetail = providerFailureDetail responseObject
-    outputs <- case KM.lookup "outputs" responseObject of
-        Just outputsValue ->
-            expectArray "interaction.outputs" outputsValue
-        Nothing ->
-            Right Vector.empty
-    let outputPayloads = Vector.toList outputs
+    outputPayloads <- geminiResponsePayloads responseObject
+    let
         interactionExchangeId =
             lookupText "id" responseObject
                 <|> geminiFallbackExchangeId outputPayloads
@@ -1100,7 +1254,37 @@ decodeGeminiResponse responseValue = do
                         , genericItem = canonicalItem
                         , providerItem = Just rawProviderItem
                         }
-    pure ProviderRound{roundItems, mediaReferences = [], action = roundAction}
+    validateProviderRound ProviderRound{roundItems, mediaReferences = [], action = roundAction}
+
+geminiResponsePayloads :: Object -> Either RakeError [Value]
+geminiResponsePayloads responseObject =
+    case KM.lookup "steps" responseObject of
+        Just stepsValue -> do
+            steps <- expectArray "interaction.steps" stepsValue
+            concat <$> traverse geminiStepPayloads (Vector.toList steps)
+        Nothing ->
+            -- Retain the old beta response shape as a cheap compatibility
+            -- fallback while all current responses use `steps`.
+            case KM.lookup "outputs" responseObject of
+                Just outputsValue ->
+                    Vector.toList <$> expectArray "interaction.outputs" outputsValue
+                Nothing ->
+                    Right []
+
+geminiStepPayloads :: Value -> Either RakeError [Value]
+geminiStepPayloads stepValue =
+    case stepValue of
+        Object stepObject
+            | lookupText "type" stepObject == Just "model_output" ->
+                case KM.lookup "content" stepObject of
+                    Just contentValue ->
+                        Vector.toList <$> expectArray "interaction.steps[].content" contentValue
+                    Nothing ->
+                        Right []
+            | lookupText "type" stepObject == Just "user_input" ->
+                Right []
+        _ ->
+            Right [stepValue]
 
 geminiRoundAction
     :: Maybe Text
@@ -1257,14 +1441,14 @@ expectObject label = \case
     Object objectValue ->
         Right objectValue
     _ ->
-        Left (LlmExpectationError ("Expected " <> toString label <> " to be an object"))
+        Left (LlmInvalidResponseError ("Expected " <> toString label <> " to be an object"))
 
 expectArray :: Text -> Value -> Either RakeError (Vector.Vector Value)
 expectArray label = \case
     Array values ->
         Right values
     _ ->
-        Left (LlmExpectationError ("Expected " <> toString label <> " to be an array"))
+        Left (LlmInvalidResponseError ("Expected " <> toString label <> " to be an array"))
 
 lookupText :: Key.Key -> Object -> Maybe Text
 lookupText key objectValue = KM.lookup key objectValue >>= \case

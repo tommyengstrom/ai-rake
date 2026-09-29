@@ -62,6 +62,7 @@ data XAITTSOptions = XAITTSOptions
     { voice :: XAITTSVoice
     , language :: XAITTSLanguage
     , outputFormat :: Maybe XAIOutputFormat
+    , speed :: Maybe Double
     }
     deriving stock (Show, Eq, Generic)
 
@@ -71,6 +72,7 @@ defaultXAITTSOptions =
         { voice = XAITTSVoiceEve
         , language = XAITTSLanguageAuto
         , outputFormat = Nothing
+        , speed = Nothing
         }
 
 data XAITTSVoice
@@ -277,13 +279,14 @@ instance ToJSON XAIOutputFormat where
                     ]
 
 instance ToJSON XAITTSOptions where
-    toJSON XAITTSOptions{voice, language, outputFormat} =
+    toJSON XAITTSOptions{voice, language, outputFormat, speed} =
         object
             $ [ "voice_id" .= voice
               , "language" .= language
               ]
             <> catMaybes
                 [ ("output_format" .=) <$> outputFormat
+                , ("speed" .=) <$> speed
                 ]
 
 generateXAISpeech

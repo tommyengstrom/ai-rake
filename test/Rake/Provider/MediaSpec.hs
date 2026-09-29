@@ -506,6 +506,7 @@ spec = describe "media providers" $ do
                                     { sampleRate = Just XAISampleRate44100
                                     , bitRate = Just XAIMP3BitRate192000
                                     }
+                        , speed = Just 0.75
                         }
 
             toJSON options
@@ -518,6 +519,14 @@ spec = describe "media providers" $ do
                             , "sample_rate" .= (44100 :: Int)
                             , "bit_rate" .= (192000 :: Int)
                             ]
+                    , "speed" .= (0.75 :: Double)
+                    ]
+
+        it "omits xAI TTS speed by default" $ do
+            toJSON defaultXAITTSOptions
+                `shouldBe` object
+                    [ "voice_id" .= ("eve" :: Text)
+                    , "language" .= ("auto" :: Text)
                     ]
 
         it "encodes xAI image edits with a single source image" $ do
