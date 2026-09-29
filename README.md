@@ -2,6 +2,10 @@
 
 A Haskell library for provider-agnostic LLM chat with local tool execution, Effectful integration, and storage backends.
 
+Standalone TypeSafe AI Jev support is available through `TypeSafe.Jev`. Combine
+typed Choice, Score, and Noul questions into one applicative request. The modules
+are independent of Rake's chat API; see the [complete Jev example](docs/jev.md).
+
 ## Basic Usage
 
 ```haskell

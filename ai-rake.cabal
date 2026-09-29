@@ -14,6 +14,7 @@ build-type:     Simple
 extra-source-files:
     README.md
     CHANGELOG.md
+    docs/jev.md
 
 source-repository head
   type: git
@@ -75,7 +76,7 @@ common shared_opts
     , containers
     , effectful
     , effectful-th
-    , effectful-postgresql
+    , effectful-postgresql >=0.1.0.1 && <0.2
     , filelock
     , http-types
     , monad-time-effectful
@@ -93,7 +94,7 @@ common shared_opts
 library
   import: shared_opts
   mixins:
-    , effectful-core (Effectful.Internal.Monad)
+    , effectful-core (Effectful.Internal.Monad, Effectful.Internal.Effect)
   exposed-modules:
       Rake
       Rake.Effect
@@ -118,6 +119,9 @@ library
       Rake.Storage.Postgres
       Rake.Tool
       Rake.Types
+      TypeSafe.Jev
+      TypeSafe.Jev.Effect
+      TypeSafe.Jev.Types
   other-modules:
       Rake.Postgres.Internal
       Rake.Internal.Sse
@@ -129,6 +133,10 @@ library
       Rake.Providers.XAI.Imagine.Client
       Rake.Providers.XAI.Imagine.Types
       Rake.TTS.Types
+      TypeSafe.Jev.Batch
+      TypeSafe.Jev.Client
+      TypeSafe.Jev.Error
+      TypeSafe.Jev.Wire
   hs-source-dirs: src
   build-depends:
     , directory
@@ -136,6 +144,7 @@ library
     , http-client
     , http-client-tls
     , effectful-core
+    , effectful-plugin
     , filepath
     , resource-pool
     , servant
@@ -170,6 +179,8 @@ test-suite ai-rake-test
       Rake.Storage.InMemorySpec
       Rake.TypesSpec
       ProviderAgnosticTests
+      TypeSafe.JevExample
+      TypeSafe.JevSpec
   hs-source-dirs: test, app
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-tool-depends:
@@ -182,6 +193,7 @@ test-suite ai-rake-test
     , ai-rake
     , effectful-core
     , deepseq
+    , effectful-plugin
     , directory
     , hashable
     , http-client
@@ -194,6 +206,8 @@ test-suite ai-rake-test
     , unordered-containers
     , unliftio-pool
     , yaml
+    , wai
+    , warp
 
 executable minimal-example
   import: shared_opts
