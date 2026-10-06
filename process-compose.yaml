@@ -24,7 +24,8 @@ processes:
         condition: process_completed_successfully
 
   backend-4-cabal-test-all:
-    command: cabal test all -O0
+    # Use static colored output so process-compose does not duplicate redrawn rows.
+    command: cabal test all -O0 --test-show-details=direct --test-options="--color --format=specdoc"
     availability:
       restart: "no"
     depends_on:
