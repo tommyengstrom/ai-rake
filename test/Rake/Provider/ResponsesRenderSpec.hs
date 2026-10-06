@@ -850,6 +850,36 @@ spec = describe "Responses request rendering" $ do
                         )
                     )
 
+        it "keeps application context after the preceding reply for Responses providers" $ do
+            let history :: [HistoryItem]
+                history = [system "Current state", assistantText "Your turn", contextText "The player completed their set"]
+                expected :: Value
+                expected = toJSON @([Value])
+                    [ object ["role" .= ("system" :: Text), "content" .= ("Current state" :: Text)]
+                    , object ["role" .= ("assistant" :: Text), "content" .= ("Your turn" :: Text)]
+                    , object ["role" .= ("user" :: Text), "content" .=
+                        ([ object ["type" .= ("input_text" :: Text), "text" .= ("Application context (not user speech):\n" :: Text)]
+                         , object ["type" .= ("input_text" :: Text), "text" .= ("The player completed their set" :: Text)]
+                         ] :: [Value])]
+                    ]
+            openai <- captureOpenAIRequestBody defaultChatConfig history
+            xai <- captureXAIRequestBody defaultChatConfig history
+            lookupPath ["input"] openai `shouldBe` Just expected
+            lookupPath ["input"] xai `shouldBe` Just expected
+
+        it "keeps application context after the preceding reply for Gemini" $ do
+            (requestBody, notes) <- captureGeminiRender defaultChatConfig
+                [system "Current state", assistantText "Your turn", contextText "The player completed their set"]
+            notes `shouldBe` []
+            lookupPath ["input"] requestBody `shouldBe` Just (toJSON @([Value])
+                [ geminiModelOutputStep
+                    [object ["type" .= ("text" :: Text), "text" .= ("Your turn" :: Text)]]
+                , geminiUserInputStep
+                    [ object ["type" .= ("text" :: Text), "text" .= ("Application context (not user speech):\n" :: Text)]
+                    , object ["type" .= ("text" :: Text), "text" .= ("The player completed their set" :: Text)]
+                    ]
+                ])
+
         it "renders JSON tool results as JSON text for completed tool exchanges" $ do
             requestBody <-
                 captureOpenAIRequestBody

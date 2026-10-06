@@ -1,22 +1,22 @@
 module RakeImageCLISpec where
 
-import RakeImageCLI
 import Data.Text qualified as T
 import Rake.Providers.OpenAI.Images (OpenAIImageModeration (..))
+import RakeImageCLI
 import Relude
 import Test.Hspec
 
 spec :: Spec
 spec = describe "RakeImageCLI" $ do
     describe "parseGenImageArgs" $ do
-        it "requires a model command" $ do
+        it "requires a prompt" $ do
             parseGenImageArgs []
                 `shouldBe` ParseGenImageArgsError
-                    "A model is required. Use `gptimage`, `xai`, or `banana2`."
-                    GenImageHelpGeneral
+                    "A prompt is required."
+                    GenImageHelpXAI
 
         it "parses a minimal gptimage command" $ do
-            parseGenImageArgs ["gptimage", "a man riding a horse on the moon"]
+            parseGenImageArgs ["--model=openai/gpt-image-2", "a man riding a horse on the moon"]
                 `shouldBe` ParseGenImageArgsSuccess
                     ( GenImageOpenAI
                         OpenAIGenImageOptions
@@ -42,8 +42,8 @@ spec = describe "RakeImageCLI" $ do
                             }
                     )
 
-        it "parses a minimal xai command" $ do
-            parseGenImageArgs ["xai", "a man riding a horse on the moon"]
+        it "defaults to xAI without a model flag" $ do
+            parseGenImageArgs ["a man riding a horse on the moon"]
                 `shouldBe` ParseGenImageArgsSuccess
                     ( GenImageXAI
                         XAIGenImageOptions
@@ -62,7 +62,8 @@ spec = describe "RakeImageCLI" $ do
                     )
 
         it "parses a minimal banana2 command" $ do
-            parseGenImageArgs ["banana2", "a man riding a horse on the moon"]
+            parseGenImageArgs
+                ["--model=google/gemini-2.5-flash-image", "a man riding a horse on the moon"]
                 `shouldBe` ParseGenImageArgsSuccess
                     ( GenImageBanana2
                         Banana2GenImageOptions
@@ -81,7 +82,7 @@ spec = describe "RakeImageCLI" $ do
 
         it "parses xai-specific options" $ do
             parseGenImageArgs
-                [ "xai"
+                [ "--model=xai/grok-imagine-image"
                 , "--count=2"
                 , "--aspect-ratio=16:9"
                 , "--resolution=2k"
@@ -109,7 +110,7 @@ spec = describe "RakeImageCLI" $ do
 
         it "parses gptimage-specific options" $ do
             parseGenImageArgs
-                [ "gptimage"
+                [ "--model=openai/gpt-image-2"
                 , "--size=1536x1024"
                 , "--quality=high"
                 , "--output-format=jpeg"
@@ -152,14 +153,14 @@ spec = describe "RakeImageCLI" $ do
                     )
 
         it "rejects unknown OpenAI image moderation values" $ do
-            parseGenImageArgs ["gptimage", "--moderation=spicy", "horse"]
+            parseGenImageArgs ["--model=openai/gpt-image-2", "--moderation=spicy", "horse"]
                 `shouldBe` ParseGenImageArgsError
                     "Invalid value for --moderation: spicy. Use auto or low."
                     GenImageHelpOpenAI
 
         it "parses banana2-specific options" $ do
             parseGenImageArgs
-                [ "banana2"
+                [ "--model=google/gemini-2.5-flash-image"
                 , "--aspect-ratio=16:9"
                 , "--image-size=2K"
                 , "--image=base.png"
@@ -183,11 +184,11 @@ spec = describe "RakeImageCLI" $ do
                     )
 
         it "rejects banana2 count options" $ do
-            parseGenImageArgs ["banana2", "--count=2", "horse"]
+            parseGenImageArgs ["--model=google/gemini-2.5-flash-image", "--count=2", "horse"]
                 `shouldBe` ParseGenImageArgsError
                     "banana2 does not support --count."
                     GenImageHelpBanana2
-            parseGenImageArgs ["banana2", "-n", "2", "horse"]
+            parseGenImageArgs ["--model=google/gemini-2.5-flash-image", "-n", "2", "horse"]
                 `shouldBe` ParseGenImageArgsError
                     "banana2 does not support --count."
                     GenImageHelpBanana2
@@ -197,26 +198,16 @@ spec = describe "RakeImageCLI" $ do
                 `shouldBe` ParseGenImageArgsHelp GenImageHelpGeneral
 
         it "shows model-specific help" $ do
-            parseGenImageArgs ["xai", "--help"]
+            parseGenImageArgs ["--model=xai/grok-imagine-image", "--help"]
                 `shouldBe` ParseGenImageArgsHelp GenImageHelpXAI
-            parseGenImageArgs ["gptimage", "--help"]
+            parseGenImageArgs ["--model=openai/gpt-image-2", "--help"]
                 `shouldBe` ParseGenImageArgsHelp GenImageHelpOpenAI
-            parseGenImageArgs ["banana2", "--help"]
+            parseGenImageArgs ["--model=google/gemini-2.5-flash-image", "--help"]
                 `shouldBe` ParseGenImageArgsHelp GenImageHelpBanana2
 
-        it "errors on removed provider names" $ do
-            parseGenImageArgs ["openai", "horse"]
-                `shouldBe` ParseGenImageArgsError
-                    "Unknown model: openai. Use `gptimage`, `xai`, or `banana2`."
-                    GenImageHelpGeneral
-            parseGenImageArgs ["imagine", "horse"]
-                `shouldBe` ParseGenImageArgsError
-                    "Unknown model: imagine. Use `gptimage`, `xai`, or `banana2`."
-                    GenImageHelpGeneral
-            parseGenImageArgs ["grok", "horse"]
-                `shouldBe` ParseGenImageArgsError
-                    "Unknown model: grok. Use `gptimage`, `xai`, or `banana2`."
-                    GenImageHelpGeneral
+        it "rejects models outside the supported catalog" $ do
+            parseGenImageArgs ["-m", "unknown", "hello"]
+                `shouldSatisfy` (\case ParseGenImageArgsError{} -> True; _ -> False)
 
     describe "renderGenImageHelp" $ do
         it "general help lists all command option sets" $ do
@@ -224,9 +215,9 @@ spec = describe "RakeImageCLI" $ do
             helpText `shouldSatisfy` T.isInfixOf "--image-file-id FILE_ID"
             helpText `shouldSatisfy` T.isInfixOf "--response-format FORMAT"
             helpText `shouldSatisfy` T.isInfixOf "--image-size SIZE"
-            helpText `shouldSatisfy` T.isInfixOf "rake-image gptimage --help"
-            helpText `shouldSatisfy` T.isInfixOf "rake-image xai --help"
-            helpText `shouldSatisfy` T.isInfixOf "rake-image banana2 --help"
+            helpText `shouldSatisfy` T.isInfixOf "rake-image -m openai/gpt-image-2 --help"
+            helpText `shouldSatisfy` T.isInfixOf "rake-image -m xai/grok-imagine-image --help"
+            helpText `shouldSatisfy` T.isInfixOf "rake-image -m google/gemini-2.5-flash-image --help"
 
         it "xai help focuses on xai options" $ do
             let helpText = renderGenImageHelp "rake-image" GenImageHelpXAI
@@ -235,9 +226,9 @@ spec = describe "RakeImageCLI" $ do
             helpText `shouldNotSatisfy` T.isInfixOf "--mask-file-id FILE_ID"
             helpText `shouldNotSatisfy` T.isInfixOf "--image-size SIZE"
 
-        it "gptimage help focuses on gptimage options" $ do
+        it "OpenAI help focuses on OpenAI options" $ do
             let helpText = renderGenImageHelp "rake-image" GenImageHelpOpenAI
-            helpText `shouldSatisfy` T.isInfixOf "Default model: gpt-image-2"
+            helpText `shouldSatisfy` T.isInfixOf "rake-image -m openai/gpt-image-2 [OPTIONS] PROMPT"
             helpText `shouldSatisfy` T.isInfixOf "--mask-file-id FILE_ID"
             helpText `shouldSatisfy` T.isInfixOf "--output-compression N"
             helpText `shouldNotSatisfy` T.isInfixOf "--aspect-ratio RATIO"

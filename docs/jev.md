@@ -8,6 +8,58 @@ composition. `assess` submits every question in the batch against the same state
 in one request, then reconstructs your result `a`. Questions in a batch are
 independent; an answer-dependent follow-up uses another `assess` call.
 
+## Command-line client
+
+`rake-decide` supports Jev without writing Haskell:
+
+```bash
+export TYPESAFE_API_KEY='your-key'
+rake-decide choice Billing Support Sales -c message.txt
+cat message.txt | rake-decide choice Billing Support Sales
+```
+
+Choices are positional arguments. Use `NAME=DESCRIPTION` to describe a choice:
+
+```bash
+rake-decide choice 'approve=Ready to merge' 'reject=Needs changes' \
+  --question 'Should this change be merged?' \
+  --context diff.txt review-notes.txt
+```
+
+`-c` and `--context` consume one or more filenames up to the next option. Put
+choices before `-c`. Without `-c`, context comes from stdin; `-c -` also explicitly
+selects stdin. A single source is sent as text. Multiple files are sent together
+as an array of objects containing `file` and `content`, preserving their order.
+Files must contain UTF-8 text. Add `--json` to parse each source as a JSON string,
+object, or array instead.
+
+Score and Noul are also supported:
+
+```bash
+rake-decide score Low Medium High -q 'How urgent?' -c message.txt
+rake-decide noul 'Is this spam?' --true 'Unsolicited advertising' -c message.txt
+```
+
+Results are JSON on stdout, with the answer under `answers.result`, the resolved
+`model`, and `usage.input_tokens` / `usage.output_tokens`. Choice answers include
+`choice`, `confidence`, and `probabilities`. To extract just the chosen name:
+
+```bash
+cat message.txt | rake-decide choice Billing Support Sales | jq -r '.answers.result.choice'
+```
+
+Errors go to stderr and exit nonzero. The default and currently supported model
+is `typesafe/jev-latest`; select it explicitly with `-m typesafe/jev-latest`,
+`--model=typesafe/jev-latest`, or the unique bare name `-m jev-latest`. Selection
+first tries an exact qualified match, then a unique model-name match (ignoring
+any unmatched provider prefix). Unknown or ambiguous models fail before context
+is read. The library still accepts arbitrary model IDs.
+
+`--base-url` and `--timeout` override the library defaults. `rake-decide --help`
+lists all options and models and needs no credentials. From a checkout, build
+through the managed process-compose build job, then use
+`"$(cabal list-bin -O0 exe:rake-decide)" choice ...` to run the built executable.
+
 ## Complete example
 
 This example is also compiled and exercised against a local HTTP fixture in

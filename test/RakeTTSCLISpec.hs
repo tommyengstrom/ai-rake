@@ -1,24 +1,24 @@
 module RakeTTSCLISpec where
 
 import Data.Text qualified as T
-import RakeTTSCLI
 import Rake (Audio (..))
 import Rake.Providers.OpenAI.TTS
 import Rake.Providers.XAI.TTS
+import RakeTTSCLI
 import Relude
 import Test.Hspec
 
 spec :: Spec
 spec = describe "RakeTTSCLI" $ do
     describe "parseGenSpeechArgs" $ do
-        it "requires a provider" $ do
+        it "requires input" $ do
             parseGenSpeechArgs []
                 `shouldBe` ParseGenSpeechArgsError
-                    "A provider is required. Use `openai` or `xai`."
-                    GenSpeechHelpGeneral
+                    "Input text is required."
+                    GenSpeechHelpXAI
 
         it "parses a minimal openai command" $ do
-            parseGenSpeechArgs ["openai", "Hello", "world"]
+            parseGenSpeechArgs ["--model=openai/gpt-4o-mini-tts", "Hello", "world"]
                 `shouldBe` ParseGenSpeechArgsSuccess
                     ( GenSpeechOpenAI
                         OpenAIGenSpeechOptions
@@ -35,8 +35,8 @@ spec = describe "RakeTTSCLI" $ do
                             }
                     )
 
-        it "parses a minimal xai command" $ do
-            parseGenSpeechArgs ["xai", "Hello", "world"]
+        it "defaults to xAI without a model flag" $ do
+            parseGenSpeechArgs ["Hello", "world"]
                 `shouldBe` ParseGenSpeechArgsSuccess
                     ( GenSpeechXAI
                         XAIGenSpeechOptions
@@ -55,8 +55,7 @@ spec = describe "RakeTTSCLI" $ do
 
         it "parses openai-specific options" $ do
             parseGenSpeechArgs
-                [ "openai"
-                , "--model=tts-1-hd"
+                [ "--model=openai/tts-1-hd"
                 , "--voice=verse"
                 , "--instructions=Speak slowly"
                 , "--format=wav"
@@ -84,7 +83,7 @@ spec = describe "RakeTTSCLI" $ do
 
         it "parses xai-specific options" $ do
             parseGenSpeechArgs
-                [ "xai"
+                [ "--model=xai/tts"
                 , "--voice=rex"
                 , "--language=en"
                 , "--codec=mp3"
@@ -114,31 +113,29 @@ spec = describe "RakeTTSCLI" $ do
         it "shows help" $ do
             parseGenSpeechArgs ["--help"]
                 `shouldBe` ParseGenSpeechArgsHelp GenSpeechHelpGeneral
-            parseGenSpeechArgs ["openai", "--help"]
+            parseGenSpeechArgs ["--model=openai/gpt-4o-mini-tts", "--help"]
                 `shouldBe` ParseGenSpeechArgsHelp GenSpeechHelpOpenAI
-            parseGenSpeechArgs ["xai", "--help"]
+            parseGenSpeechArgs ["--model=xai/tts", "--help"]
                 `shouldBe` ParseGenSpeechArgsHelp GenSpeechHelpXAI
 
-        it "errors on unknown providers" $ do
-            parseGenSpeechArgs ["grok", "hello"]
-                `shouldBe` ParseGenSpeechArgsError
-                    "Unknown provider: grok. Use `openai` or `xai`."
-                    GenSpeechHelpGeneral
+        it "rejects models outside the supported catalog" $ do
+            parseGenSpeechArgs ["-m", "unknown", "hello"]
+                `shouldSatisfy` (\case ParseGenSpeechArgsError{} -> True; _ -> False)
 
         it "rejects xai sample-rate without a codec" $ do
-            parseGenSpeechArgs ["xai", "--sample-rate=24000", "hello"]
+            parseGenSpeechArgs ["--model=xai/tts", "--sample-rate=24000", "hello"]
                 `shouldBe` ParseGenSpeechArgsError
                     "Use --codec when setting --sample-rate."
                     GenSpeechHelpXAI
 
         it "rejects xai bit-rate without a codec" $ do
-            parseGenSpeechArgs ["xai", "--bit-rate=128000", "hello"]
+            parseGenSpeechArgs ["--model=xai/tts", "--bit-rate=128000", "hello"]
                 `shouldBe` ParseGenSpeechArgsError
                     "Use --codec when setting --bit-rate."
                     GenSpeechHelpXAI
 
         it "rejects xai bit-rate on non-mp3 codecs" $ do
-            parseGenSpeechArgs ["xai", "--codec=wav", "--bit-rate=128000", "hello"]
+            parseGenSpeechArgs ["--model=xai/tts", "--codec=wav", "--bit-rate=128000", "hello"]
                 `shouldBe` ParseGenSpeechArgsError
                     "--bit-rate requires --codec=mp3."
                     GenSpeechHelpXAI
@@ -148,9 +145,10 @@ spec = describe "RakeTTSCLI" $ do
             let helpText = renderGenSpeechHelp "rake-tts" GenSpeechHelpGeneral
             helpText `shouldSatisfy` T.isInfixOf "--format FORMAT"
             helpText `shouldSatisfy` T.isInfixOf "--codec CODEC"
-            helpText `shouldSatisfy` T.isInfixOf "With no `--output`, the CLI plays the audio locally."
-            helpText `shouldSatisfy` T.isInfixOf "rake-tts openai --help"
-            helpText `shouldSatisfy` T.isInfixOf "rake-tts xai --help"
+            helpText
+                `shouldSatisfy` T.isInfixOf "With no `--output`, the CLI plays the audio locally."
+            helpText `shouldSatisfy` T.isInfixOf "rake-tts -m openai/gpt-4o-mini-tts --help"
+            helpText `shouldSatisfy` T.isInfixOf "rake-tts -m xai/tts --help"
 
         it "openai help focuses on openai options" $ do
             let helpText = renderGenSpeechHelp "rake-tts" GenSpeechHelpOpenAI
@@ -163,7 +161,8 @@ spec = describe "RakeTTSCLI" $ do
             let helpText = renderGenSpeechHelp "rake-tts" GenSpeechHelpXAI
             helpText `shouldSatisfy` T.isInfixOf "--bit-rate BPS"
             helpText `shouldSatisfy` T.isInfixOf "--sample-rate HZ"
-            helpText `shouldSatisfy` T.isInfixOf "With no `--output`, the CLI plays the audio locally."
+            helpText
+                `shouldSatisfy` T.isInfixOf "With no `--output`, the CLI plays the audio locally."
             helpText `shouldNotSatisfy` T.isInfixOf "--instructions TEXT"
 
     describe "helpers" $ do

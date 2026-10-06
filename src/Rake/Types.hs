@@ -60,6 +60,7 @@ module Rake.Types
     , system
     , systemText
     , systemParts
+    , contextText
     , user
     , userText
     , userParts
@@ -233,6 +234,7 @@ filePart = PartFile
 
 data GenericRole
     = GenericSystem -- ^ Only the latest system message is sent as the effective leading instruction for provider compatibility.
+    | GenericContext -- ^ Application context at this point in the chronology, not user speech.
     | GenericUser
     | GenericAssistant
     deriving stock (Show, Eq, Generic)
@@ -456,6 +458,9 @@ systemText content = systemParts [textPart content]
 
 systemParts :: [MessagePart] -> HistoryItem
 systemParts = localMessage GenericSystem
+
+contextText :: Text -> HistoryItem
+contextText content = localMessage GenericContext [textPart content]
 
 user :: Text -> HistoryItem
 user = userText

@@ -155,7 +155,11 @@ test-suite ai-rake-test
   main-is: Main.hs
   other-modules:
       RakeCliSupport
+      RakeCliModels
       RakeCliSupportSpec
+      RakeCliModelsSpec
+      RakeDecideCLI
+      RakeDecideCLISpec
       RakeImageCLI
       RakeImageCLISpec
       RakeTTSCLI
@@ -185,6 +189,7 @@ test-suite ai-rake-test
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-tool-depends:
       hspec-discover:hspec-discover
+    , ai-rake:rake-decide
   build-depends:
       QuickCheck
     , base64-bytestring
@@ -217,12 +222,23 @@ executable minimal-example
       ai-rake
     , stm
 
+executable rake-decide
+  import: shared_opts
+  hs-source-dirs: app
+  main-is: RakeDecide.hs
+  other-modules:
+      RakeDecideCLI
+      RakeCliModels
+  build-depends:
+      ai-rake
+
 executable rake-image
   import: shared_opts
   hs-source-dirs: app
   main-is: RakeImage.hs
   other-modules:
       RakeCliSupport
+      RakeCliModels
       RakeImageCLI
   build-depends:
       ai-rake
@@ -240,6 +256,7 @@ executable rake-tts
   main-is: RakeTTS.hs
   other-modules:
       RakeCliSupport
+      RakeCliModels
       RakeTTSCLI
   build-depends:
       ai-rake
@@ -257,6 +274,7 @@ executable rake-video
   main-is: RakeVideo.hs
   other-modules:
       RakeCliSupport
+      RakeCliModels
       RakeVideoCLI
   build-depends:
       ai-rake

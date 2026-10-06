@@ -357,6 +357,10 @@ renderCanonicalHistoryItemForResponses providerTag requestLogger HistoryItem
     , providerItem = maybeProviderItem
     } =
     case genericHistoryItem of
+        GenericMessage{role = GenericContext, parts} -> do
+            content <- messagePartsValue (responsesProviderApiFamily providerTag) GenericUser lifecycle
+                (PartText "Application context (not user speech):\n" : parts)
+            pure [messageValue "user" content]
         GenericMessage{role, parts} -> do
             traverse_ (requestLogger . NativeConversionNote) (pendingAssistantAnnotationNote role lifecycle)
             content <- messagePartsValue (responsesProviderApiFamily providerTag) role lifecycle parts
@@ -492,6 +496,8 @@ messageTextPartType = \case
         "output_text"
     GenericSystem ->
         "input_text"
+    GenericContext ->
+        "input_text"
     GenericUser ->
         "input_text"
 
@@ -529,6 +535,7 @@ toolResponseWireOutput = \case
 genericRoleToText :: GenericRole -> Text
 genericRoleToText = \case
     GenericSystem -> "system"
+    GenericContext -> "user"
     GenericUser -> "user"
     GenericAssistant -> "assistant"
 

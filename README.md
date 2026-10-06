@@ -5,6 +5,9 @@ A Haskell library for provider-agnostic LLM chat with local tool execution, Effe
 Standalone TypeSafe AI Jev support is available through `TypeSafe.Jev`. Combine
 typed Choice, Score, and Noul questions into one applicative request. The modules
 are independent of Rake's chat API; see the [complete Jev example](docs/jev.md).
+The `rake-decide` CLI accepts positional choices and context from files or stdin:
+`rake-decide choice Billing Support Sales -c message.txt`. It reads
+`TYPESAFE_API_KEY`; see the [CLI examples](docs/jev.md#command-line-client).
 
 ## Basic Usage
 
@@ -260,56 +263,70 @@ audio <-
 
 ## CLIs
 
-Build and run the image CLI with:
+Each CLI has a default model. Select another with `-m MODEL` or `--model MODEL`.
+`--help` lists the supported models without contacting a provider.
+
+| CLI | Default | Other supported models |
+| --- | --- | --- |
+| `rake-decide` | `typesafe/jev-latest` | — |
+| `rake-image` | `xai/grok-imagine-image` | `openai/gpt-image-2`, `google/gemini-2.5-flash-image` |
+| `rake-video` | `xai/grok-imagine-video` | `google/veo-3.1-generate-preview` |
+| `rake-tts` | `xai/tts` | `openai/gpt-4o-mini-tts`, `openai/tts-1`, `openai/tts-1-hd` |
+
+Model names are case-sensitive. An exact `provider/model` match takes priority.
+Otherwise, the model part must uniquely match a catalog entry, even when a
+provider prefix was supplied. For example, `-m gpt-image-2` and
+`-m openai/gpt-image-2` select the same model. Unknown or ambiguous names fail
+before reading input or making a request. `xai/tts` names xAI's fixed speech
+service; its API does not take a model field.
+
+The examples below assume the executables are installed on your `PATH`:
 
 ```bash
-cabal run rake-image -- xai "a man riding a horse on the moon"
+rake-decide choice "Give a fuck" "Give no fuck" -q "Should we give a fuck?" -c message.txt
+rake-decide noul "Is this spam?" -c message.txt
+cat message.txt | rake-decide score Low Medium High -q "How urgent?"
+
+rake-image "a man riding a horse on the moon"
+rake-image -m openai/gpt-image-2 "a watercolor lighthouse"
+
+rake-video "She walks away" --image girl.jpg
+rake-video --extend clip.mp4 "continue the scene for 5 more seconds"
+rake-video -m google/veo-3.1-generate-preview --image start.png --last-frame end.png "transition between these frames"
+
+rake-tts "Hello from ai-rake."
+rake-tts --codec=wav --sample-rate=24000 -o update.wav "A short status update"
+rake-tts -m openai/tts-1-hd "Hello from OpenAI."
 ```
 
-Build and run the video CLI with:
+From a checkout, build through the managed process-compose build job, then
+locate an executable with `cabal list-bin -O0 exe:NAME`. For example:
 
 ```bash
-cabal run rake-video -- xai "She walk away" --image girl.jpg
-cabal run rake-video -- xai --extend clip.mp4 "continue the scene for 5 more seconds"
-cabal run rake-video -- veo --image still.png "animate this still frame"
-cabal run rake-video -- veo --image start.png --last-frame end.png "transition between these frames"
+"$(cabal list-bin -O0 exe:rake-decide)" noul "Is this spam?" -c message.txt
 ```
 
-Build and run the speech CLI with:
+`rake-decide` reads context from stdin when `-c` / `--context` is omitted and
+writes a JSON answer to stdout. See [Jev decisions](docs/jev.md) for choice
+descriptions, multiple files, JSON context, and response fields.
+
+- No `--output` writes to `./generated/<timestamp>-<slug>.png` for images.
+- No `--output` writes to `./generated/<timestamp>-<slug>.mp4` for videos.
+- No `--output` plays speech locally; playback looks for `ffplay`, `mpv`, or `afplay`.
+- `rake-tts --output PATH ...` saves speech to `PATH` instead of playing it.
+- `rake-video --extend ...` appends a continuation generated from the last frame; it requires local `ffmpeg` and `ffprobe`.
+
+The CLIs read `TYPESAFE_API_KEY` for TypeSafe, `OPENAI_API_KEY` for OpenAI,
+`XAI_API_KEY` for xAI, and `GEMINI_API_KEY` for Google models.
+Provider names are selected through `-m`, and are no longer positional commands.
+
+Use `-m MODEL --help` for the selected provider's controls:
 
 ```bash
-cabal run rake-tts -- openai "Hello from ai-rake."
-cabal run rake-tts -- xai --codec=wav --sample-rate=24000 -o update.wav "A short status update"
-```
-
-Defaults:
-
-- `rake-image gptimage ...` uses OpenAI `gpt-image-2`
-- `rake-image xai ...` uses xAI Grok Imagine image generation
-- `rake-image banana2 ...` uses Gemini `gemini-2.5-flash-image`
-- `rake-video xai ...` uses xAI Grok Imagine video generation
-- `rake-video veo ...` uses Google Veo with default model `veo-3.1-generate-preview`
-- `rake-tts openai ...` uses OpenAI TTS with default model `gpt-4o-mini-tts`
-- `rake-tts xai ...` uses xAI TTS with default voice `eve`
-- No `--output` writes to `./generated/<timestamp>-<slug>.png` for images
-- No `--output` writes to `./generated/<timestamp>-<slug>.mp4` for videos
-- No `--output` plays speech locally by default; local playback looks for `ffplay`, `mpv`, or `afplay`
-- `rake-tts --output PATH ...` saves speech to `PATH` instead of playing it
-- `rake-video --extend ...` performs a true append by extracting the last frame locally, generating a continuation from that frame, and concatenating the clips; it requires local `ffmpeg` and `ffprobe`
-
-The CLIs read `OPENAI_API_KEY` for `gptimage` and `rake-tts openai`, `XAI_API_KEY` for `rake-image xai`, `rake-video xai`, and `rake-tts xai`, and `GEMINI_API_KEY` for `banana2` and `rake-video veo`.
-
-Use provider-specific help to see all available controls:
-
-```bash
-cabal run rake-image -- --help
-cabal run rake-image -- gptimage --help
-cabal run rake-image -- xai --help
-cabal run rake-image -- banana2 --help
-cabal run rake-video -- --help
-cabal run rake-video -- xai --help
-cabal run rake-video -- veo --help
-cabal run rake-tts -- --help
-cabal run rake-tts -- openai --help
-cabal run rake-tts -- xai --help
+rake-decide --help
+rake-image --help
+rake-image -m openai/gpt-image-2 --help
+rake-image -m google/gemini-2.5-flash-image --help
+rake-video -m google/veo-3.1-generate-preview --help
+rake-tts -m openai/gpt-4o-mini-tts --help
 ```

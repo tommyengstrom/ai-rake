@@ -1,8 +1,8 @@
 module RakeVideoCLISpec where
 
 import Data.Text qualified as T
-import RakeCliSupport (ImageDimensions (..))
 import Rake.Providers.Gemini.Videos (GeminiPersonGeneration (..))
+import RakeCliSupport (ImageDimensions (..))
 import RakeVideoCLI
 import Relude
 import Test.Hspec
@@ -10,14 +10,14 @@ import Test.Hspec
 spec :: Spec
 spec = describe "RakeVideoCLI" $ do
     describe "parseGenVideoArgs" $ do
-        it "requires a provider" $ do
+        it "requires input" $ do
             parseGenVideoArgs []
                 `shouldBe` ParseGenVideoArgsError
-                    "A provider is required. Use `xai` or `veo`."
-                    GenVideoHelpGeneral
+                    "A prompt is required."
+                    GenVideoHelpXAI
 
         it "parses a minimal xai video command with the prompt before options" $ do
-            parseGenVideoArgs ["xai", "She walk away", "--image", "girl.jpg"]
+            parseGenVideoArgs ["She walk away", "--image", "girl.jpg"]
                 `shouldBe` ParseGenVideoArgsSuccess
                     ( GenVideoXAI
                         XAIGenVideoOptions
@@ -39,7 +39,7 @@ spec = describe "RakeVideoCLI" $ do
                     )
 
         it "parses a minimal text-to-video command without a source" $ do
-            parseGenVideoArgs ["xai", "A paper crane unfolds into a bird"]
+            parseGenVideoArgs ["--model=xai/grok-imagine-video", "A paper crane unfolds into a bird"]
                 `shouldBe` ParseGenVideoArgsSuccess
                     ( GenVideoXAI
                         XAIGenVideoOptions
@@ -61,7 +61,8 @@ spec = describe "RakeVideoCLI" $ do
                     )
 
         it "parses --extend as the existing-video route" $ do
-            parseGenVideoArgs ["xai", "--extend=clip.mp4", "continue the scene"]
+            parseGenVideoArgs
+                ["--model=xai/grok-imagine-video", "--extend=clip.mp4", "continue the scene"]
                 `shouldBe` ParseGenVideoArgsSuccess
                     ( GenVideoXAI
                         XAIGenVideoOptions
@@ -84,8 +85,7 @@ spec = describe "RakeVideoCLI" $ do
 
         it "parses xai video options" $ do
             parseGenVideoArgs
-                [ "xai"
-                , "--model=my-video-model"
+                [ "--model=xai/grok-imagine-video"
                 , "--image=girl.jpg"
                 , "--duration=8"
                 , "--aspect-ratio=16:9"
@@ -105,7 +105,7 @@ spec = describe "RakeVideoCLI" $ do
                                     { commonVideoPromptText = "Animate her"
                                     , commonVideoOutputPath = Just "out.mp4"
                                     }
-                            , xaiVideoModel = "my-video-model"
+                            , xaiVideoModel = "grok-imagine-video"
                             , xaiVideoImageSource = Just "girl.jpg"
                             , xaiVideoEditSource = Nothing
                             , xaiVideoExtendSource = Nothing
@@ -114,11 +114,12 @@ spec = describe "RakeVideoCLI" $ do
                             , xaiVideoResolution = Just "720p"
                             , xaiVideoPollIntervalMilliseconds = 1500
                             , xaiVideoMaxPollAttempts = 20
-                        }
+                            }
                     )
 
         it "parses a minimal veo text-to-video command" $ do
-            parseGenVideoArgs ["veo", "A cinematic shot of a lion"]
+            parseGenVideoArgs
+                ["--model=google/veo-3.1-generate-preview", "A cinematic shot of a lion"]
                 `shouldBe` ParseGenVideoArgsSuccess
                     ( GenVideoVeo
                         VeoGenVideoOptions
@@ -141,7 +142,11 @@ spec = describe "RakeVideoCLI" $ do
                     )
 
         it "parses veo image-to-video commands" $ do
-            parseGenVideoArgs ["veo", "--image=still.png", "Animate this still frame"]
+            parseGenVideoArgs
+                [ "--model=google/veo-3.1-generate-preview"
+                , "--image=still.png"
+                , "Animate this still frame"
+                ]
                 `shouldBe` ParseGenVideoArgsSuccess
                     ( GenVideoVeo
                         VeoGenVideoOptions
@@ -165,8 +170,7 @@ spec = describe "RakeVideoCLI" $ do
 
         it "parses veo first and last frame options" $ do
             parseGenVideoArgs
-                [ "veo"
-                , "--model=veo-3.1-fast-generate-preview"
+                [ "--model=google/veo-3.1-generate-preview"
                 , "--image=start.png"
                 , "--last-frame=end.png"
                 , "--duration=8"
@@ -190,7 +194,7 @@ spec = describe "RakeVideoCLI" $ do
                                     { commonVideoPromptText = "Move between frames"
                                     , commonVideoOutputPath = Just "out.mp4"
                                     }
-                            , veoVideoModel = "veo-3.1-fast-generate-preview"
+                            , veoVideoModel = "veo-3.1-generate-preview"
                             , veoVideoImageSource = Just "start.png"
                             , veoVideoLastFrameSource = Just "end.png"
                             , veoVideoDuration = Just 8
@@ -204,7 +208,11 @@ spec = describe "RakeVideoCLI" $ do
                     )
 
         it "rejects unknown Veo person generation values" $ do
-            parseGenVideoArgs ["veo", "--person-generation=spicy", "A cinematic shot"]
+            parseGenVideoArgs
+                [ "--model=google/veo-3.1-generate-preview"
+                , "--person-generation=spicy"
+                , "A cinematic shot"
+                ]
                 `shouldBe` ParseGenVideoArgsError
                     "Invalid value for --person-generation: spicy. Use allow_all, allow_adult, or dont_allow."
                     GenVideoHelpVeo
@@ -212,29 +220,29 @@ spec = describe "RakeVideoCLI" $ do
         it "shows help" $ do
             parseGenVideoArgs ["--help"]
                 `shouldBe` ParseGenVideoArgsHelp GenVideoHelpGeneral
-            parseGenVideoArgs ["xai", "--help"]
+            parseGenVideoArgs ["--model=xai/grok-imagine-video", "--help"]
                 `shouldBe` ParseGenVideoArgsHelp GenVideoHelpXAI
-            parseGenVideoArgs ["veo", "--help"]
+            parseGenVideoArgs ["--model=google/veo-3.1-generate-preview", "--help"]
                 `shouldBe` ParseGenVideoArgsHelp GenVideoHelpVeo
 
-        it "errors on unknown providers" $ do
-            parseGenVideoArgs ["openai", "horse"]
-                `shouldBe` ParseGenVideoArgsError
-                    "Unknown provider: openai. Use `xai` or `veo`."
-                    GenVideoHelpGeneral
-            parseGenVideoArgs ["grok", "horse"]
-                `shouldBe` ParseGenVideoArgsError
-                    "Unknown provider: grok. Use `xai` or `veo`."
-                    GenVideoHelpGeneral
+        it "rejects models outside the supported catalog" $ do
+            parseGenVideoArgs ["-m", "unknown", "hello"]
+                `shouldSatisfy` (\case ParseGenVideoArgsError{} -> True; _ -> False)
 
         it "rejects conflicting source modes" $ do
-            parseGenVideoArgs ["xai", "--image=girl.jpg", "--video=clip.mp4", "She walk away"]
+            parseGenVideoArgs
+                [ "--model=xai/grok-imagine-video"
+                , "--image=girl.jpg"
+                , "--video=clip.mp4"
+                , "She walk away"
+                ]
                 `shouldBe` ParseGenVideoArgsError
                     "Use exactly one of --image, --edit/--video, or --extend."
                     GenVideoHelpXAI
 
         it "rejects veo last frame without a first frame" $ do
-            parseGenVideoArgs ["veo", "--last-frame=end.png", "Move between frames"]
+            parseGenVideoArgs
+                ["--model=google/veo-3.1-generate-preview", "--last-frame=end.png", "Move between frames"]
                 `shouldBe` ParseGenVideoArgsError
                     "veo --last-frame is only for first/last frame interpolation and requires --image. To animate one still image, use --image SOURCE."
                     GenVideoHelpVeo
@@ -242,15 +250,17 @@ spec = describe "RakeVideoCLI" $ do
     describe "renderGenVideoHelp" $ do
         it "general help lists the important xai options" $ do
             let helpText = renderGenVideoHelp "rake-video" GenVideoHelpGeneral
-            helpText `shouldSatisfy` T.isInfixOf "With no source option, the CLI sends a text-to-video request."
+            helpText
+                `shouldSatisfy` T.isInfixOf "With no source option, the CLI sends a text-to-video request."
             helpText `shouldSatisfy` T.isInfixOf "--image SOURCE"
             helpText `shouldSatisfy` T.isInfixOf "--edit SOURCE"
             helpText `shouldSatisfy` T.isInfixOf "--extend SOURCE"
             helpText `shouldSatisfy` T.isInfixOf "--video SOURCE"
             helpText `shouldSatisfy` T.isInfixOf "--last-frame SOURCE"
             helpText `shouldSatisfy` T.isInfixOf "--poll-interval-ms N"
-            helpText `shouldSatisfy` T.isInfixOf "rake-video xai --help"
-            helpText `shouldSatisfy` T.isInfixOf "rake-video veo --help"
+            helpText `shouldSatisfy` T.isInfixOf "rake-video -m xai/grok-imagine-video --help"
+            helpText
+                `shouldSatisfy` T.isInfixOf "rake-video -m google/veo-3.1-generate-preview --help"
 
         it "xai help focuses on video options" $ do
             let helpText = renderGenVideoHelp "rake-video" GenVideoHelpXAI
@@ -265,7 +275,8 @@ spec = describe "RakeVideoCLI" $ do
             helpText `shouldSatisfy` T.isInfixOf "GEMINI_API_KEY"
             helpText `shouldNotSatisfy` T.isInfixOf "--extend SOURCE"
         it "parses --edit as the update route" $ do
-            parseGenVideoArgs ["xai", "--edit=clip.mp4", "make the lighting moodier"]
+            parseGenVideoArgs
+                ["--model=xai/grok-imagine-video", "--edit=clip.mp4", "make the lighting moodier"]
                 `shouldBe` ParseGenVideoArgsSuccess
                     ( GenVideoXAI
                         XAIGenVideoOptions
@@ -287,10 +298,10 @@ spec = describe "RakeVideoCLI" $ do
                     )
 
     describe "veoAspectRatioForImageDimensions" $ do
-        it "uses portrait Veo output for portrait source images" $
-            veoAspectRatioForImageDimensions ImageDimensions{imageWidth = 832, imageHeight = 1248}
-                `shouldBe` "9:16"
+        it "uses portrait Veo output for portrait source images"
+            $ veoAspectRatioForImageDimensions ImageDimensions{imageWidth = 832, imageHeight = 1248}
+            `shouldBe` "9:16"
 
-        it "uses landscape Veo output for landscape source images" $
-            veoAspectRatioForImageDimensions ImageDimensions{imageWidth = 1408, imageHeight = 768}
-                `shouldBe` "16:9"
+        it "uses landscape Veo output for landscape source images"
+            $ veoAspectRatioForImageDimensions ImageDimensions{imageWidth = 1408, imageHeight = 768}
+            `shouldBe` "16:9"

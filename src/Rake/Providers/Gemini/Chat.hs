@@ -733,6 +733,10 @@ renderGeminiCanonicalHistoryItem renderedHistory HistoryItem
     , providerItem = maybeProviderItem
     } =
     case genericHistoryItem of
+        GenericMessage{role = GenericContext, parts} -> do
+            renderedContentParts <- messagePartsToGeminiContentParts ProviderGeminiInteractions
+                (PartText "Application context (not user speech):\n" : parts)
+            pure (appendGeminiTurnBlocks "user" renderedContentParts renderedHistory)
         GenericMessage{role = GenericUser, parts} -> do
             renderedContentParts <- messagePartsToGeminiContentParts ProviderGeminiInteractions parts
             pure (appendGeminiTurnBlocks "user" renderedContentParts renderedHistory)
