@@ -18,6 +18,7 @@ module RakeDecideCLI
 import Control.Exception (IOException, displayException, try)
 import Control.Monad (unless, when)
 import Data.Aeson qualified as JSON
+import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Bifunctor (first)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
@@ -34,6 +35,8 @@ import Data.Text.Encoding qualified as Text
 import Data.Text.Encoding.Error (lenientDecode)
 import Data.Text.IO qualified as Text
 import Data.Time (NominalDiffTime)
+import Data.UUID qualified as UUID
+import Data.UUID.V4 qualified as UUID
 import Effectful (runEff)
 import Effectful.Error.Static (runErrorNoCallStack)
 import GHC.Generics (Generic)
@@ -41,7 +44,7 @@ import RakeCliModels (CliModel (..), modelHelpLines, resolveModel)
 import System.Console.GetOpt qualified as Opt
 import System.Environment (getArgs, lookupEnv)
 import System.Exit (exitFailure)
-import System.IO (stderr)
+import System.IO (IOMode (ReadMode), stderr, withBinaryFile)
 import Text.Read (readMaybe)
 import TypeSafe.Jev qualified as Jev
 import Prelude
@@ -55,6 +58,7 @@ data Decision
 data DecideOptions = DecideOptions
     { decision :: Decision
     , contextFiles :: [FilePath]
+    , imageFiles :: [(Text, FilePath)]
     , jsonContext :: Bool
     , model :: Text
     , baseUrl :: Text
@@ -103,6 +107,7 @@ instance JSON.ToJSON Output where
 
 data Flag
     = Context FilePath
+    | ImageFile String
     | JsonContext
     | Model String
     | BaseUrl String
@@ -122,6 +127,11 @@ flags =
         ["context"]
         (Opt.ReqArg Context "FILE...")
         "Read context files; consumes paths up to the next option"
+    , Opt.Option
+        []
+        ["image"]
+        (Opt.ReqArg ImageFile "[NAME=]FILE")
+        "Attach a PNG/JPEG (repeatable); unnamed images use image1, image2, ..."
     , Opt.Option
         []
         ["json"]
@@ -163,7 +173,11 @@ decideHelp =
             , "       rake-decide score LEVEL... [-q QUESTION] [-c FILE...] [OPTIONS]"
             , "       rake-decide noul QUESTION [-c FILE...] [OPTIONS]"
             , ""
-            , "Reads context from stdin when -c is omitted. Use - as a path for stdin."
+            , "Without images, reads context from stdin when -c is omitted. Use - as a path for stdin."
+            , "With images, -c explicitly adds context (use -c - for piped text)."
+            , "Refer to images as images.NAME and additional context as context."
+            , "Images enable Jev's experimental image support automatically."
+            , "Use still PNG/JPEG files, 280-1568 pixels per side and at most 16 MiB each."
             , "Choices are NAME or NAME=DESCRIPTION. Put choices before -c."
             , "Multiple files are sent together with their filenames in one request."
             , "Reads TYPESAFE_API_KEY. Writes JSON to stdout and errors to stderr."
@@ -175,6 +189,7 @@ decideHelp =
             , "  rake-decide choice approve reject -q 'Should we merge?' -c diff.txt notes.txt"
             , "  rake-decide score Low Medium High -q 'How urgent?' -c message.txt"
             , "  rake-decide noul 'Is this spam?' -c message.txt"
+            , "  rake-decide noul 'Is an error visible in images.screen?' --image screen=screenshot.png"
             ]
             <> unlines (map Text.unpack (modelHelpLines decideModels))
             <> "\n"
@@ -182,7 +197,12 @@ decideHelp =
         flags
 
 decideModels :: NonEmpty (CliModel ())
-decideModels = CliModel "typesafe" "jev-latest" () :| []
+decideModels =
+    CliModel "typesafe" "jev-latest" ()
+        :| [ CliModel "typesafe" "jev-1.14.0" ()
+           , CliModel "typesafe" "jev-1.13.0" ()
+           , CliModel "typesafe" "jev-preview" ()
+           ]
 
 parseDecideArgs :: [String] -> Either String (Maybe DecideOptions)
 parseDecideArgs = \case
@@ -228,6 +248,11 @@ parseDecideArgs = \case
                     contextFiles = values (\case Context value -> Just value; _ -> Nothing)
                     hasNoulCriteria :: Bool
                     hasNoulCriteria = isJust whenTrue || isJust whenFalse
+                imageFiles <-
+                    parseImageFiles (values (\case ImageFile value -> Just value; _ -> Nothing))
+                when
+                    (Map.size (Map.fromList imageFiles) /= length imageFiles)
+                    (Left "Image names must be unique")
                 when (length (filter (== "-") contextFiles) > 1) (Left "Stdin (-) may only be used once")
                 when
                     (any (\path -> null path || (path /= "-" && "-" `isPrefixOf` path)) contextFiles)
@@ -271,12 +296,29 @@ parseDecideArgs = \case
                         DecideOptions
                             { decision
                             , contextFiles
+                            , imageFiles
                             , jsonContext = JsonContext `elem` options
                             , model
                             , baseUrl
                             , requestTimeout
                             }
                     )
+
+parseImageFiles :: [String] -> Either String [(Text, FilePath)]
+parseImageFiles = sequence . zipWith parseImageFile [1 :: Int ..]
+  where
+    parseImageFile :: Int -> String -> Either String (Text, FilePath)
+    parseImageFile index raw = do
+        let name :: Text
+            path :: FilePath
+            (name, path) = case break (== '=') raw of
+                (_, []) -> ("image" <> Text.pack (show index), raw)
+                (label, _ : file) -> (Text.pack label, file)
+        when (Text.null (Text.strip name)) (Left "Image names must not be blank")
+        when (null path || "-" `isPrefixOf` path) $
+            Left
+                "--image requires a file path; binary stdin is unsupported, and paths starting with '-' need './'"
+        pure (name, path)
 
 collectContexts :: [Flag] -> [Flag]
 collectContexts = \case
@@ -334,11 +376,15 @@ decodeContext jsonContext sources = do
                 ]
 
 executeDecision
-    :: Jev.JevSettings -> Jev.Content -> Decision -> IO (Either Jev.JevError Output)
-executeDecision settings state decision = do
+    :: Jev.JevSettings
+    -> Map Text Jev.ImageAsset
+    -> Jev.Content
+    -> Decision
+    -> IO (Either Jev.JevError Output)
+executeDecision settings assets state decision = do
     result <-
         runEff . runErrorNoCallStack @Jev.JevError $
-            Jev.runJev settings (Jev.assess state (decisionBatch decision))
+            Jev.runJev settings (Jev.assessWithAssets assets state (decisionBatch decision))
     pure $
         fmap
             ( \Jev.Response{answers = answer, metadata} ->
@@ -398,7 +444,17 @@ runDecideCli = do
         Left message -> failCli (Text.pack message <> "\nRun rake-decide --help for usage.")
         Right Nothing -> putStr decideHelp
         Right
-            (Just DecideOptions{decision, contextFiles, jsonContext, model, baseUrl, requestTimeout}) -> do
+            ( Just
+                    DecideOptions
+                        { decision
+                        , contextFiles
+                        , imageFiles
+                        , jsonContext
+                        , model
+                        , baseUrl
+                        , requestTimeout
+                        }
+                ) -> do
                 outcome <- try @IOException $ do
                     key <-
                         lookupEnv "TYPESAFE_API_KEY" >>= \case
@@ -409,8 +465,25 @@ runDecideCli = do
                             (Text.pack path,) <$> case path of
                                 "-" -> BS.getContents
                                 _ -> BS.readFile path
-                    sources <- traverse readSource (fromMaybe ("-" :| []) (NonEmpty.nonEmpty contextFiles))
-                    state <- either failCli pure (decodeContext jsonContext sources)
+                    images <- traverse readImageFile imageFiles
+                    context <-
+                        traverse
+                            (\paths -> traverse readSource paths >>= either failCli pure . decodeContext jsonContext)
+                            ( if null imageFiles
+                                then Just (fromMaybe ("-" :| []) (NonEmpty.nonEmpty contextFiles))
+                                else NonEmpty.nonEmpty contextFiles
+                            )
+                    let assets :: Map Text Jev.ImageAsset
+                        assets = Map.fromList [(reference, asset) | (_, reference, asset) <- images]
+                        state :: Jev.Content
+                        state = case images of
+                            [] -> fromMaybe (Jev.ObjectContent KeyMap.empty) context
+                            _ : _ ->
+                                Jev.ObjectContent . KeyMap.fromList $
+                                    ( "images"
+                                    , JSON.toJSON (Map.fromList [(name, reference) | (name, reference, _) <- images])
+                                    )
+                                        : [("context", JSON.toJSON content) | Just content <- [context]]
                     let settings :: Jev.JevSettings
                         settings =
                             (Jev.defaultJevSettings key)
@@ -418,10 +491,24 @@ runDecideCli = do
                                 , Jev.requestTimeout = requestTimeout
                                 , Jev.model = model
                                 }
-                    result <- executeDecision settings state decision
+                    result <- executeDecision settings assets state decision
                     output <- either (failCli . renderError) pure result
                     LBS.putStr (JSON.encode output <> "\n")
                 either (failCli . Text.pack . displayException) pure outcome
+
+readImageFile :: (Text, FilePath) -> IO (Text, Text, Jev.ImageAsset)
+readImageFile (name, path) = do
+    bytes <- withBinaryFile path ReadMode (\handle -> BS.hGet handle (16 * 1024 * 1024 + 1))
+    when (BS.length bytes > 16 * 1024 * 1024) $
+        failCli (Text.pack path <> ": image files must be at most 16 MiB")
+    let detectedFormat :: Either Text Jev.ImageFormat
+        detectedFormat
+            | BS.pack [137, 80, 78, 71, 13, 10, 26, 10] `BS.isPrefixOf` bytes = Right Jev.PNG
+            | BS.pack [255, 216, 255] `BS.isPrefixOf` bytes = Right Jev.JPEG
+            | otherwise = Left (Text.pack path <> ": expected a PNG or JPEG image")
+    format <- either failCli pure detectedFormat
+    reference <- UUID.toText <$> UUID.nextRandom
+    pure (name, reference, Jev.ImageAsset{format, bytes})
 
 failCli :: Text -> IO a
 failCli message = Text.hPutStrLn stderr message >> exitFailure

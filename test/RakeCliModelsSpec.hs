@@ -80,8 +80,8 @@ spec = describe "CLI model selection" $ do
                                 , openAICommonOptions = CommonGenImageOptions{commonPromptText}
                                 }
                         ) -> do
-                    openAIModel `shouldBe` "gpt-image-2"
-                    commonPromptText `shouldBe` "a cat"
+                        openAIModel `shouldBe` "gpt-image-2"
+                        commonPromptText `shouldBe` "a cat"
                 result -> expectationFailure (show result)
             case parseGenVideoArgs ["--image", "-m", "prompt", "--model=google/veo-3.1-generate-preview"] of
                 ParseGenVideoArgsSuccess (GenVideoVeo VeoGenVideoOptions{veoVideoImageSource}) -> veoVideoImageSource `shouldBe` Just "-m"

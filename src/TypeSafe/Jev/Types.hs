@@ -1,5 +1,7 @@
 module TypeSafe.Jev.Types
     ( Content (..)
+    , ImageFormat (..)
+    , ImageAsset (..)
     , Probability
     , probabilityValue
     , Confidence
@@ -19,12 +21,22 @@ module TypeSafe.Jev.Types
 
 import Data.Aeson (FromJSON (..), Object, ToJSON (..), Value (..))
 import Data.Aeson.Types (Parser)
+import Data.ByteString (ByteString)
 import Data.List.NonEmpty (NonEmpty)
 import Data.String (IsString (..))
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Vector qualified as Vector
 import Prelude
+
+data ImageFormat = PNG | JPEG
+    deriving stock (Show, Eq)
+
+data ImageAsset = ImageAsset
+    { format :: ImageFormat
+    , bytes :: ByteString
+    }
+    deriving stock (Show, Eq)
 
 data Content
     = TextContent Text

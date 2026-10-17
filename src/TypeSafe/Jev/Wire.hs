@@ -3,6 +3,7 @@ module TypeSafe.Jev.Wire
     , WireNoulCriteria (..)
     , WireAnswer (..)
     , WireRequest (..)
+    , WireAsset (..)
     , WireResponse (..)
     , WireUsage (..)
     ) where
@@ -74,11 +75,21 @@ data WireRequest = WireRequest
     { state :: Content
     , model :: Text
     , questions :: Map Text WireQuestion
+    , assets :: Maybe (Map Text WireAsset)
     }
     deriving stock (Generic)
 
 instance ToJSON WireRequest where
     toJSON = genericToJSON wireOptions
+
+data WireAsset = Image
+    { format :: Text
+    , part :: Text
+    }
+    deriving stock (Generic)
+
+instance ToJSON WireAsset where
+    toJSON = genericToJSON wireOptions{tagSingleConstructors = True}
 
 data WireUsage = WireUsage
     { inputTokens :: Int

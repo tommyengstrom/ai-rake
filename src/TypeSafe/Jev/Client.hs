@@ -20,6 +20,7 @@ import Effectful
 import Effectful.Dispatch.Dynamic (interpret)
 import Effectful.Error.Static (Error, throwError)
 import Network.HTTP.Client qualified as HTTP
+import Network.HTTP.Client.MultipartFormData qualified as Multipart
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status qualified as HTTP
 import System.Timeout (timeout)
@@ -58,7 +59,7 @@ runJev settings action = do
             (HTTP.newManager tlsManagerSettings{HTTP.managerRetryableException = const False})
     interpret
         ( \_ -> \case
-            Assess state batch -> do
+            AssessWithAssets assets state batch -> do
                 CompiledBatch{questions, decodeAnswers} <- either throwError pure (compileBatch batch)
                 if Map.null questions
                     then do
@@ -66,7 +67,8 @@ runJev settings action = do
                         pure Response{answers, metadata = Nothing}
                     else do
                         response <-
-                            liftIO (requestAssessment manager settings state questions) >>= either throwError pure
+                            liftIO (requestAssessment manager settings assets state questions)
+                                >>= either throwError pure
                         let Wire.WireResponse
                                 { model
                                 , answers = wireAnswers
@@ -83,10 +85,11 @@ runJev settings action = do
 requestAssessment
     :: HTTP.Manager
     -> JevSettings
+    -> Map.Map Text ImageAsset
     -> Content
     -> Map.Map Text Wire.WireQuestion
     -> IO (Either JevError Wire.WireResponse)
-requestAssessment manager JevSettings{apiKey, baseUrl, model, requestTimeout} state questions =
+requestAssessment manager JevSettings{apiKey, baseUrl, model, requestTimeout} assets state questions =
     case validateSettings of
         Left err -> pure (Left err)
         Right timeoutMicros -> do
@@ -97,20 +100,44 @@ requestAssessment manager JevSettings{apiKey, baseUrl, model, requestTimeout} st
                     | not (BS.null (HTTP.queryString baseRequest)) ->
                         pure (Left (InvalidRequest "Jev base URL must not contain a query string"))
                     | otherwise -> do
-                        let request :: HTTP.Request
-                            request =
+                        let base :: HTTP.Request
+                            base =
                                 baseRequest
                                     { HTTP.method = "POST"
                                     , HTTP.path = BS.dropWhileEnd (== 47) (HTTP.path baseRequest) <> "/v1/systemone"
                                     , HTTP.requestHeaders =
-                                        [ ("Authorization", Text.encodeUtf8 ("Bearer " <> apiKey))
-                                        , ("Content-Type", "application/json")
-                                        ]
-                                    , HTTP.requestBody = HTTP.RequestBodyLBS (encode (Wire.WireRequest state model questions))
+                                        [("Authorization", Text.encodeUtf8 ("Bearer " <> apiKey))]
                                     , HTTP.responseTimeout = HTTP.responseTimeoutMicro timeoutMicros
                                     , HTTP.redirectCount = 0
                                     , HTTP.checkResponse = \_ _ -> pure ()
                                     }
+                        request <-
+                            if Map.null assets
+                                then
+                                    pure
+                                        base
+                                            { HTTP.requestHeaders = ("Content-Type", "application/json") : HTTP.requestHeaders base
+                                            , HTTP.requestBody =
+                                                HTTP.RequestBodyLBS (encode (Wire.WireRequest state model questions Nothing))
+                                            }
+                                else do
+                                    let prepared :: [(Text, Wire.WireAsset, Multipart.Part)]
+                                        prepared = zipWith prepareImage [0 ..] (Map.toAscList assets)
+                                        wireAssets :: Map.Map Text Wire.WireAsset
+                                        wireAssets = Map.fromList [(reference, asset) | (reference, asset, _) <- prepared]
+                                        requestPart :: Multipart.Part
+                                        requestPart =
+                                            ( Multipart.partLBS
+                                                "request"
+                                                (encode (Wire.WireRequest state model questions (Just wireAssets)))
+                                            )
+                                                { Multipart.partContentType = Just "application/json"
+                                                }
+                                    Multipart.formDataBody
+                                        (requestPart : [part | (_, _, part) <- prepared])
+                                        base
+                                            { HTTP.requestHeaders = ("TypeSafe-Danger-Zone-Images", "true") : HTTP.requestHeaders base
+                                            }
                         result <- timeout timeoutMicros (try @HTTP.HttpException (HTTP.httpLbs request manager))
                         pure $ case result of
                             Nothing -> Left (RequestTimedOut requestTimeout)
@@ -136,7 +163,46 @@ requestAssessment manager JevSettings{apiKey, baseUrl, model, requestTimeout} st
     validateSettings
         | Text.any isControl apiKey =
             Left (InvalidRequest "Jev API key must not contain control characters")
-        | otherwise = timeoutMicroseconds requestTimeout
+        | otherwise = validateAssets assets >> timeoutMicroseconds requestTimeout
+
+prepareImage :: Int -> (Text, ImageAsset) -> (Text, Wire.WireAsset, Multipart.Part)
+prepareImage index (reference, ImageAsset{format, bytes}) =
+    ( reference
+    , Wire.Image{format = formatName, part = partName}
+    , ( Multipart.partFileRequestBody
+            partName
+            (Text.unpack (partName <> "." <> formatName))
+            (HTTP.RequestBodyBS bytes)
+      )
+        { Multipart.partContentType = Just contentType
+        }
+    )
+  where
+    partName :: Text
+    partName = "image-" <> Text.pack (show index)
+    formatName :: Text
+    contentType :: BS.ByteString
+    (formatName, contentType) = case format of
+        PNG -> ("png", "image/png")
+        JPEG -> ("jpeg", "image/jpeg")
+
+validateAssets :: Map.Map Text ImageAsset -> Either JevError ()
+validateAssets assets = do
+    mapM_ validateAsset (Map.toList assets)
+    if sum (map (BS.length . Text.encodeUtf8) (Map.keys assets)) > 65_536
+        then Left (InvalidRequest "Image references must total at most 65536 UTF-8 bytes")
+        else Right ()
+  where
+    validateAsset :: (Text, ImageAsset) -> Either JevError ()
+    validateAsset (reference, ImageAsset{bytes})
+        | Text.null (Text.strip reference) =
+            Left (InvalidRequest "Image references must not be blank")
+        | BS.length (Text.encodeUtf8 reference) > 1_024 =
+            Left (InvalidRequest "Image references must be at most 1024 UTF-8 bytes")
+        | BS.null bytes = Left (InvalidRequest "Image files must not be empty")
+        | BS.length bytes > 16 * 1_024 * 1_024 =
+            Left (InvalidRequest "Image files must be at most 16 MiB")
+        | otherwise = Right ()
 
 timeoutMicroseconds :: NominalDiffTime -> Either JevError Int
 timeoutMicroseconds seconds

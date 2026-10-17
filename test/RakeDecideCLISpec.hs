@@ -4,6 +4,8 @@ module RakeDecideCLISpec (spec) where
 
 import Control.Exception (bracket)
 import Data.Aeson qualified as JSON
+import Data.Aeson.Key qualified as Key
+import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy.Char8 qualified as LBS
 import Data.Either (isLeft)
@@ -11,6 +13,7 @@ import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
+import Data.UUID qualified as UUID
 import Network.HTTP.Types (status200, status429)
 import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp (testWithApplication)
@@ -18,11 +21,26 @@ import RakeDecideCLI
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.Environment (getEnvironment)
 import System.Exit (ExitCode (..))
-import System.IO (hClose, openBinaryTempFile)
-import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
+import System.IO
+    ( IOMode (ReadWriteMode)
+    , hClose
+    , hSetFileSize
+    , openBinaryTempFile
+    , withBinaryFile
+    )
+import System.Process
+    ( CreateProcess (..)
+    , StdStream (..)
+    , proc
+    , readCreateProcessWithExitCode
+    , waitForProcess
+    , withCreateProcess
+    )
+import System.Timeout (timeout)
 import Test.Hspec
 import Test.QuickCheck (choose, forAll, property, (===))
 import TypeSafe.Jev qualified as Jev
+import TypeSafe.JevImageFixture
 import Prelude
 
 spec :: Spec
@@ -41,6 +59,7 @@ spec = describe "RakeDecideCLI" $ do
                                 )
                             )
                     , contextFiles = []
+                    , imageFiles = []
                     , jsonContext = False
                     , model = "jev-latest"
                     , baseUrl = "https://api.typesafe.ai"
@@ -151,6 +170,46 @@ spec = describe "RakeDecideCLI" $ do
                         (Just "-m")
                         (Jev.ChoiceOption "--model" "--model" (Just "unknown") :| [])
                     )
+
+        it "accepts every supported pinned model and alias" $
+            mapM_
+                ( \name -> do
+                    DecideOptions{model} <- parsed ["noul", "Relevant?", "-m", "typesafe/" <> name]
+                    model `shouldBe` Text.pack name
+                )
+                ["jev-1.14.0", "jev-1.13.0", "jev-latest", "jev-preview"]
+
+        it "names image files in argument order and splits named paths at the first equals sign" $ do
+            DecideOptions{imageFiles, contextFiles} <-
+                parsed
+                    [ "noul"
+                    , "Relevant?"
+                    , "--image"
+                    , "first.png"
+                    , "--image=写真=folder/a=b.jpg"
+                    , "--image"
+                    , "third.png"
+                    , "-c"
+                    , "notes.txt"
+                    ]
+            imageFiles
+                `shouldBe` [("image1", "first.png"), ("写真", "folder/a=b.jpg"), ("image3", "third.png")]
+            contextFiles `shouldBe` ["notes.txt"]
+
+        it "rejects invalid image arguments and name collisions before reading files" $
+            mapM_
+                (\args -> parseDecideArgs (["noul", "Relevant?"] <> args) `shouldSatisfy` isLeft)
+                [ ["--image"]
+                , ["--image", ""]
+                , ["--image", "=file.png"]
+                , ["--image", " \t=file.png"]
+                , ["--image", "photo="]
+                , ["--image", "photo=-"]
+                , ["--image", "-"]
+                , ["--image", "--json"]
+                , ["--image", "same=a.png", "--image", "same=b.png"]
+                , ["--image", "image2=a.png", "--image", "b.png"]
+                ]
 
     describe "context" $ do
         it "preserves Unicode text" $ property $ \raw ->
@@ -300,6 +359,125 @@ spec = describe "RakeDecideCLI" $ do
             modelStdout `shouldBe` ""
             modelStderr `shouldContain` "Unknown model: unknown"
 
+    describe "image execution" $ do
+        it "completes image-only requests while stdin remains open" $
+            withFile pngBytes $ \path ->
+                withImageServer [("screen", "image/png", pngBytes)] Nothing $ \baseUrl -> do
+                    inherited <- filter ((/= "TYPESAFE_API_KEY") . fst) <$> getEnvironment
+                    let command :: CreateProcess
+                        command =
+                            ( proc
+                                "rake-decide"
+                                [ "noul"
+                                , "Finns ett fel i images.screen?"
+                                , "--image"
+                                , "screen=" <> path
+                                , "--base-url"
+                                , baseUrl
+                                ]
+                            )
+                                { env = Just (("TYPESAFE_API_KEY", "test-key") : inherited)
+                                , std_in = CreatePipe
+                                , std_out = CreatePipe
+                                , std_err = CreatePipe
+                                }
+                    withCreateProcess command $ \_ output errors processHandle -> do
+                        timeout 5_000_000 (waitForProcess processHandle) `shouldReturn` Just ExitSuccess
+                        case (output, errors) of
+                            (Just stdout, Just stderr) -> do
+                                outputBytes <- BS.hGetContents stdout
+                                JSON.eitherDecodeStrict' @Output outputBytes
+                                    `shouldSatisfy` either (const False) (const True)
+                                BS.hGetContents stderr `shouldReturn` BS.empty
+                            _ -> expectationFailure "Expected output pipes"
+
+        it "combines named and unnamed binary images with explicit UTF-8 stdin" $
+            withFile pngBytes $ \pngPath ->
+                withFile jpegBytes $ \jpegPath ->
+                    withImageServer
+                        [("image1", "image/png", pngBytes), ("写真", "image/jpeg", jpegBytes)]
+                        (Just (JSON.String "こんにちは — jämför bilderna"))
+                        $ \baseUrl -> do
+                            (code, stdout, stderr) <-
+                                cli
+                                    [ "noul"
+                                    , "Match?"
+                                    , "--image"
+                                    , pngPath
+                                    , "--image"
+                                    , "写真=" <> jpegPath
+                                    , "-c"
+                                    , "-"
+                                    , "--base-url"
+                                    , baseUrl
+                                    ]
+                                    "こんにちは — jämför bilderna"
+                                    (Just "test-key")
+                            code `shouldBe` ExitSuccess
+                            stderr `shouldBe` ""
+                            JSON.eitherDecode @Output (LBS.pack stdout)
+                                `shouldSatisfy` either (const False) (const True)
+
+        it "retains structured multi-file JSON context alongside images" $
+            withFile pngBytes $ \imagePath ->
+                withFile "{\"message\":\"hej\"}" $ \firstPath ->
+                    withFile "[1,true,null]" $ \secondPath -> do
+                        let expectedContext :: JSON.Value
+                            expectedContext =
+                                JSON.toJSON
+                                    [ JSON.object
+                                        [ "file" JSON..= firstPath
+                                        , "content" JSON..= JSON.object ["message" JSON..= JSON.String "hej"]
+                                        ]
+                                    , JSON.object
+                                        [ "file" JSON..= secondPath
+                                        , "content" JSON..= JSON.toJSON [JSON.Number 1, JSON.Bool True, JSON.Null]
+                                        ]
+                                    ]
+                        withImageServer [("photo", "image/png", pngBytes)] (Just expectedContext) $ \baseUrl -> do
+                            (code, _, stderr) <-
+                                cli
+                                    [ "noul"
+                                    , "Match?"
+                                    , "--image"
+                                    , "photo=" <> imagePath
+                                    , "--json"
+                                    , "-c"
+                                    , firstPath
+                                    , secondPath
+                                    , "--base-url"
+                                    , baseUrl
+                                    ]
+                                    "ignored"
+                                    (Just "test-key")
+                            code `shouldBe` ExitSuccess
+                            stderr `shouldBe` ""
+
+        it "rejects oversized images before loading context or contacting the provider" $
+            withFile pngBytes $ \path -> do
+                withBinaryFile path ReadWriteMode (\handle -> hSetFileSize handle (16 * 1024 * 1024 + 1))
+                (code, stdout, stderr) <-
+                    cli ["noul", "Match?", "--image", path, "-c", path <> ".missing"] "" (Just "test-key")
+                code `shouldBe` ExitFailure 1
+                stdout `shouldBe` ""
+                stderr `shouldContain` "at most 16 MiB"
+
+        it "reports unsupported, empty, and missing image files without stdout" $ do
+            mapM_
+                ( \bytes -> withFile bytes $ \path -> do
+                    (code, stdout, stderr) <- cli ["noul", "Match?", "--image", path] "" (Just "test-key")
+                    code `shouldBe` ExitFailure 1
+                    stdout `shouldBe` ""
+                    stderr `shouldContain` "expected a PNG or JPEG"
+                )
+                ["not an image", BS.empty]
+            withFile pngBytes $ \path -> do
+                (code, stdout, stderr) <-
+                    cli ["noul", "Match?", "--image", path <> ".missing"] "" (Just "test-key")
+                code `shouldBe` ExitFailure 1
+                stdout `shouldBe` ""
+                stderr `shouldContain` ".missing"
+
     describe "output codecs" $ do
         it "round-trips each answer kind and metadata" $
             forAll (choose (0, 1)) $ \probability ->
@@ -344,6 +522,52 @@ withFile content action = do
         )
         removeFile
         action
+
+withImageServer
+    :: [(Text.Text, BS.ByteString, BS.ByteString)]
+    -> Maybe JSON.Value
+    -> (String -> IO a)
+    -> IO a
+withImageServer expectedImages expectedContext action =
+    testWithApplication
+        ( pure
+            ( \request respond -> do
+                (body, files) <- readImageRequest request
+                lookupJsonPath ["model"] body `shouldBe` Just (JSON.String "jev-latest")
+                lookupJsonPath ["state", "context"] body `shouldBe` expectedContext
+                case lookupJsonPath ["state", "images"] body of
+                    Just (JSON.Object images) ->
+                        Map.keys (KeyMap.toMapText images)
+                            `shouldBe` Map.keys (Map.fromList [(name, ()) | (name, _, _) <- expectedImages])
+                    _ -> expectationFailure "Expected named images in state"
+                case lookupJsonPath ["assets"] body of
+                    Just (JSON.Object assets) -> KeyMap.size assets `shouldBe` length expectedImages
+                    _ -> expectationFailure "Expected assets"
+                Map.size files `shouldBe` length expectedImages
+                mapM_
+                    ( \(name, mimeType, bytes) -> case lookupJsonPath ["state", "images", Key.fromText name] body of
+                        Just (JSON.String reference) -> do
+                            UUID.fromText reference `shouldSatisfy` maybe False (const True)
+                            lookupJsonPath ["assets", Key.fromText reference, "type"] body
+                                `shouldBe` Just (JSON.String "image")
+                            case lookupJsonPath ["assets", Key.fromText reference, "part"] body of
+                                Just (JSON.String part) ->
+                                    Map.lookup (Text.encodeUtf8 part) files `shouldBe` Just (mimeType, LBS.fromStrict bytes)
+                                _ -> expectationFailure "Missing image part reference"
+                        _ -> expectationFailure "Missing named image"
+                    )
+                    expectedImages
+                respond
+                    ( Wai.responseLBS
+                        status200
+                        []
+                        ( JSON.encode
+                            (response (JSON.object ["type" JSON..= JSON.String "noul", "noul" JSON..= (0.8 :: Double)]))
+                        )
+                    )
+            )
+        )
+        (\port -> action ("http://127.0.0.1:" <> show port))
 
 withServer :: Jev.Content -> JSON.Value -> JSON.Value -> (String -> IO a) -> IO a
 withServer state question answer action =

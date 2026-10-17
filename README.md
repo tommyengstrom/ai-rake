@@ -8,6 +8,9 @@ are independent of Rake's chat API; see the [complete Jev example](docs/jev.md).
 The `rake-decide` CLI accepts positional choices and context from files or stdin:
 `rake-decide choice Billing Support Sales -c message.txt`. It reads
 `TYPESAFE_API_KEY`; see the [CLI examples](docs/jev.md#command-line-client).
+Jev defaults to `jev-latest`; select `jev-1.14.0` to pin that version. Use
+`assessWithAssets` or CLI `--image screen=screenshot.png` to include PNG/JPEG
+images; attaching images enables the experimental image header automatically.
 
 ## Basic Usage
 
@@ -268,7 +271,7 @@ Each CLI has a default model. Select another with `-m MODEL` or `--model MODEL`.
 
 | CLI | Default | Other supported models |
 | --- | --- | --- |
-| `rake-decide` | `typesafe/jev-latest` | — |
+| `rake-decide` | `typesafe/jev-latest` | `typesafe/jev-1.14.0`, `typesafe/jev-1.13.0`, `typesafe/jev-preview` |
 | `rake-image` | `xai/grok-imagine-image` | `openai/gpt-image-2`, `google/gemini-2.5-flash-image` |
 | `rake-video` | `xai/grok-imagine-video` | `google/veo-3.1-generate-preview` |
 | `rake-tts` | `xai/tts` | `openai/gpt-4o-mini-tts`, `openai/tts-1`, `openai/tts-1-hd` |
@@ -285,6 +288,7 @@ The examples below assume the executables are installed on your `PATH`:
 ```bash
 rake-decide choice "Give a fuck" "Give no fuck" -q "Should we give a fuck?" -c message.txt
 rake-decide noul "Is this spam?" -c message.txt
+rake-decide noul "Is an error visible in images.screen?" --image screen=screenshot.png
 cat message.txt | rake-decide score Low Medium High -q "How urgent?"
 
 rake-image "a man riding a horse on the moon"
@@ -306,9 +310,10 @@ locate an executable with `cabal list-bin -O0 exe:NAME`. For example:
 "$(cabal list-bin -O0 exe:rake-decide)" noul "Is this spam?" -c message.txt
 ```
 
-`rake-decide` reads context from stdin when `-c` / `--context` is omitted and
-writes a JSON answer to stdout. See [Jev decisions](docs/jev.md) for choice
-descriptions, multiple files, JSON context, and response fields.
+`rake-decide` writes a JSON answer to stdout. Without images, it reads context
+from stdin when `-c` / `--context` is omitted. With `--image`, use `-c -` to add
+piped text. See [Jev decisions](docs/jev.md) for images, choice descriptions,
+multiple files, JSON context, and response fields.
 
 - No `--output` writes to `./generated/<timestamp>-<slug>.png` for images.
 - No `--output` writes to `./generated/<timestamp>-<slug>.mp4` for videos.

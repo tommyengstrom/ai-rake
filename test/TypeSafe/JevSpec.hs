@@ -17,11 +17,14 @@ import Data.Aeson
     )
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as LBS
 import Data.Either (isLeft)
 import Data.Functor.Identity (Identity (..))
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NonEmpty
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Vector qualified as Vector
@@ -48,7 +51,9 @@ import Test.QuickCheck
     , (===)
     )
 import TypeSafe.Jev
+import TypeSafe.Jev qualified as Settings (JevSettings (..))
 import TypeSafe.JevExample
+import TypeSafe.JevImageFixture
 import Prelude
 
 spec :: Spec
@@ -85,6 +90,7 @@ spec = describe "TypeSafe.Jev" $ do
                     Wai.pathInfo request `shouldBe` ["v1", "systemone"]
                     lookup "Authorization" (Wai.requestHeaders request) `shouldBe` Just "Bearer test-key"
                     lookup "Content-Type" (Wai.requestHeaders request) `shouldBe` Just "application/json"
+                    lookup "TypeSafe-Danger-Zone-Images" (Wai.requestHeaders request) `shouldBe` Nothing
                     body <- Wai.strictRequestBody request
                     eitherDecode body `shouldBe` Right expectedExampleRequest
                     respond (jsonResponse status200 mixedResponse)
@@ -209,6 +215,148 @@ spec = describe "TypeSafe.Jev" $ do
                             <*> (probabilityValue . noulProbability <$> noul (NoulQuestion Nothing Nothing))
                 result <- runClient settings (assess "state" batch)
                 fmap (\Response{answers} -> answers) result `shouldBe` Right ("local", 0.75)
+
+    describe "image assessments" $ do
+        it "uploads PNG/JPEG bytes and preserves references throughout a multilingual batch" $ do
+            let assets :: Map.Map Text ImageAsset
+                assets =
+                    Map.fromList
+                        [("photo-ref", ImageAsset PNG pngBytes), ("example-ref", ImageAsset JPEG jpegBytes)]
+                state :: Content
+                state =
+                    ObjectContent
+                        ( KM.fromList
+                            [ ("frames", toJSON [object ["photo" .= String "photo-ref"]])
+                            , ("text", String "Är bilden tydlig? 写真を確認してください。")
+                            ]
+                        )
+                batch :: Batch (ChoiceAssessment (), ScoreAssessment, NoulAssessment)
+                batch =
+                    (,,)
+                        <$> choice
+                            ( ChoiceQuestion
+                                (Just "Compare with example-ref")
+                                (ChoiceOption "match" () (Just (ArrayContent [String "example-ref"])) :| [])
+                            )
+                        <*> score (ScoreQuestion (Just "Bildkvalitet?") ("photo-ref" :| ["example-ref"]))
+                        <*> noul
+                            ( NoulQuestion
+                                (Just "Finns det en katt?")
+                                (Just (NoulCriteria (Just "example-ref") (Just "photo-ref")))
+                            )
+                reply :: Value
+                reply =
+                    responseWithAnswers
+                        [ ("q0", choiceAnswer "match" [("match", 1)] 1)
+                        ,
+                            ( "q1"
+                            , object
+                                [ "type" .= String "score"
+                                , "score" .= (0.25 :: Double)
+                                , "confidence" .= (0.9 :: Double)
+                                , "legend" .= object ["0" .= String "photo-ref", "1" .= String "example-ref"]
+                                , "probabilities" .= object ["0" .= (0.75 :: Double), "1" .= (0.25 :: Double)]
+                                ]
+                            )
+                        , ("q2", noulAnswer 0.8)
+                        ]
+            withServer
+                ( \request respond -> do
+                    (body, files) <- readImageRequest request
+                    lookupJsonPath ["model"] body `shouldBe` Just (String "jev-latest")
+                    lookupJsonPath ["state"] body `shouldBe` Just (toJSON state)
+                    lookupJsonPath ["assets"] body
+                        `shouldBe` Just
+                            ( object
+                                [ "example-ref"
+                                    .= object ["type" .= String "image", "format" .= String "jpeg", "part" .= String "image-0"]
+                                , "photo-ref"
+                                    .= object ["type" .= String "image", "format" .= String "png", "part" .= String "image-1"]
+                                ]
+                            )
+                    files
+                        `shouldBe` Map.fromList
+                            [ ("image-0", ("image/jpeg", LBS.fromStrict jpegBytes))
+                            , ("image-1", ("image/png", LBS.fromStrict pngBytes))
+                            ]
+                    lookupJsonPath ["questions", "q0", "instructions"] body
+                        `shouldBe` Just (String "Compare with example-ref")
+                    lookupJsonPath ["questions", "q0", "criteria", "match"] body
+                        `shouldBe` Just (toJSON [String "example-ref"])
+                    lookupJsonPath ["questions", "q1", "criteria"] body
+                        `shouldBe` Just (toJSON [String "photo-ref", String "example-ref"])
+                    lookupJsonPath ["questions", "q2", "criteria"] body
+                        `shouldBe` Just (object ["true" .= String "example-ref", "false" .= String "photo-ref"])
+                    respond (jsonResponse status200 reply)
+                )
+                $ \settings -> do
+                    result <- runClient settings (assessWithAssets assets state batch)
+                    case result of
+                        Right Response{answers = (_, ScoreAssessment{levels}, NoulAssessment{probability})} -> do
+                            fmap fst levels `shouldBe` ("photo-ref" :| ["example-ref"])
+                            probabilityValue probability `shouldBe` 0.8
+                        Left err -> expectationFailure (show err)
+
+        it "keeps user references out of multipart headers and honors a pinned older model"
+            $ withServer
+                ( \request respond -> do
+                    (body, files) <- readImageRequest request
+                    lookupJsonPath ["model"] body `shouldBe` Just (String "jev-1.13.0")
+                    lookupJsonPath ["assets", "画像\r\nX-Injected: nope", "part"] body
+                        `shouldBe` Just (String "image-0")
+                    Map.keys files `shouldBe` ["image-0"]
+                    respond (jsonResponse status200 (singleAnswer (noulAnswer 1)))
+                )
+            $ \settings -> do
+                result <-
+                    runClient
+                        settings{Settings.model = "jev-1.13.0"}
+                        ( assessWithAssets
+                            (Map.singleton "画像\r\nX-Injected: nope" (ImageAsset PNG pngBytes))
+                            "画像\r\nX-Injected: nope"
+                            (noul humanQuestion)
+                        )
+                result `shouldSatisfy` isRightResult
+
+        it "uses the original JSON shape when assets are empty"
+            $ withServer
+                ( \request respond -> do
+                    lookup "Content-Type" (Wai.requestHeaders request) `shouldBe` Just "application/json"
+                    lookup "TypeSafe-Danger-Zone-Images" (Wai.requestHeaders request) `shouldBe` Nothing
+                    body <- eitherDecode @Value <$> Wai.strictRequestBody request
+                    fmap (lookupJsonPath ["assets"]) body `shouldBe` Right Nothing
+                    respond (jsonResponse status200 (singleAnswer (noulAnswer 1)))
+                )
+            $ \settings -> do
+                result <- runClient settings (assessWithAssets Map.empty "state" (noul humanQuestion))
+                result `shouldSatisfy` isRightResult
+
+        it "evaluates empty batches with images without HTTP" $
+            runClient
+                unreachableSettings
+                ( assessWithAssets
+                    (Map.singleton "photo" (ImageAsset PNG pngBytes))
+                    "photo"
+                    (pure (42 :: Int))
+                )
+                `shouldReturn` Right Response{answers = 42, metadata = Nothing}
+
+        it "rejects blank and oversized references and empty or oversized files before HTTP" $
+            mapM_
+                ( \assets -> do
+                    result <-
+                        runClient unreachableSettings (assessWithAssets assets "state" (noul humanQuestion))
+                    result `shouldSatisfy` isInvalidRequest
+                )
+                [ Map.singleton " \t" (ImageAsset PNG pngBytes)
+                , Map.singleton (Text.replicate 513 "ä") (ImageAsset PNG pngBytes)
+                , Map.singleton "photo" (ImageAsset PNG BS.empty)
+                , Map.singleton "photo" (ImageAsset PNG (BS.replicate (16 * 1024 * 1024 + 1) 0))
+                , Map.fromList
+                    [ (Text.replicate 1020 "a" <> Text.pack (show index), ImageAsset PNG pngBytes)
+                    | index <- [0 :: Int .. 64]
+                    ]
+                ]
 
     describe "response validation" $ do
         mapM_

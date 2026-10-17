@@ -27,7 +27,7 @@ rake-decide choice 'approve=Ready to merge' 'reject=Needs changes' \
 ```
 
 `-c` and `--context` consume one or more filenames up to the next option. Put
-choices before `-c`. Without `-c`, context comes from stdin; `-c -` also explicitly
+choices before `-c`. Without images or `-c`, context comes from stdin; `-c -` explicitly
 selects stdin. A single source is sent as text. Multiple files are sent together
 as an array of objects containing `file` and `content`, preserving their order.
 Files must contain UTF-8 text. Add `--json` to parse each source as a JSON string,
@@ -48,17 +48,48 @@ Results are JSON on stdout, with the answer under `answers.result`, the resolved
 cat message.txt | rake-decide choice Billing Support Sales | jq -r '.answers.result.choice'
 ```
 
-Errors go to stderr and exit nonzero. The default and currently supported model
-is `typesafe/jev-latest`; select it explicitly with `-m typesafe/jev-latest`,
-`--model=typesafe/jev-latest`, or the unique bare name `-m jev-latest`. Selection
+Errors go to stderr and exit nonzero. The default model is `typesafe/jev-latest`.
+Also available are `typesafe/jev-1.14.0`, `typesafe/jev-1.13.0`, and
+`typesafe/jev-preview`; use `-m typesafe/jev-preview`, `--model=jev-preview`, or
+another listed model to select it. Selection
 first tries an exact qualified match, then a unique model-name match (ignoring
 any unmatched provider prefix). Unknown or ambiguous models fail before context
 is read. The library still accepts arbitrary model IDs.
+
+Jev 1.14 includes improved multilingual support without a language flag. The
+default follows the `jev-latest` alias; use `-m jev-1.14.0` to pin that version.
+Aliases can change as TypeSafe releases new models.
+For example, `rake-decide noul 'Är kunden missnöjd?' -c meddelande.txt` uses the
+same API as an English question. See the [release notes](https://typesafe.ai/blog/jev-1-14).
 
 `--base-url` and `--timeout` override the library defaults. `rake-decide --help`
 lists all options and models and needs no credentials. From a checkout, build
 through the managed process-compose build job, then use
 `"$(cabal list-bin -O0 exe:rake-decide)" choice ...` to run the built executable.
+
+### Images in the CLI
+
+Attach local PNG/JPEG files with repeatable `--image [NAME=]FILE` options:
+
+```bash
+rake-decide noul 'Is an error visible in images.screen?' --image screen=screenshot.png
+rake-decide choice cat dog -q 'Which animal is in images.image1?' --image photo.jpg
+cat notes.txt | rake-decide noul 'Does images.photo match context?' --image photo=photo.png -c -
+rake-decide noul 'Are images.before and images.after different?' \
+  --image before=before.png --image after=after.jpg --json -c details.json
+```
+
+Unnamed images use their argument position: `image1`, `image2`, and so on.
+Names must be nonblank and unique, including generated names. Named arguments
+split at the first `=`, so `--image photo=folder/a=b.png` works. Prefix paths
+starting with `-` with `./`; binary image stdin is unsupported.
+
+With images, state contains an `images` object and, when `-c` is supplied, a
+`context` field. Image-only requests do not read stdin; use `-c -` for piped text.
+Multiple context files retain their existing filename/content array under
+`context`, and `--json` applies only to context files. The CLI detects PNG/JPEG
+from file bytes, generates UUID asset references, and enables the experimental
+image header automatically.
 
 ## Complete example
 
@@ -192,6 +223,52 @@ Choice options and score levels use `NonEmpty`. Model-specific cardinality and
 token limits are handled by the service. The [live API schema](https://api.typesafe.ai/openapi.json)
 is the wire contract; it accepts a one-level score rubric even though the prose
 documentation recommends at least two levels.
+
+## Images in the library
+
+`assessWithAssets :: Jev :> es => Map Text ImageAsset -> Content -> Batch a -> Eff es (Response a)`
+adds per-call images. `ImageAsset` holds an `ImageFormat` (`PNG` or `JPEG`) and raw
+`ByteString` bytes. The library does not read files; load them at your IO boundary:
+
+```haskell
+import Data.Aeson (Value (String))
+import Data.Aeson.KeyMap qualified as KeyMap
+import Data.ByteString qualified as BS
+import Data.Map.Strict qualified as Map
+import Data.UUID qualified as UUID
+import Data.UUID.V4 qualified as UUID
+
+-- Inside the IO main from the example above:
+photoBytes <- BS.readFile "photo.png"
+reference <- UUID.toText <$> UUID.nextRandom
+let assets = Map.singleton reference (ImageAsset PNG photoBytes)
+    state = ObjectContent (KeyMap.singleton "photo" (String reference))
+    question = NoulQuestion (Just "Finns det en katt i `photo`?") Nothing
+result <- runEff . runErrorNoCallStack @JevError $
+    runJev (defaultJevSettings apiKey) (assessWithAssets assets state (noul question))
+print result
+```
+
+Asset map keys are references. Place them in string values anywhere in state,
+instructions, or Choice/Score/Noul criteria, including nested content. Every
+asset must be referenced. Use fresh UUIDs to avoid accidental substring matches;
+object keys are not substituted. Reusing a reference uploads the file once, but
+each occurrence adds image input. Returned Score legends retain reference strings.
+
+Nonempty assets use multipart uploads and automatically send
+`TypeSafe-Danger-Zone-Images: true`, on both Jev 1.13 and 1.14. Empty assets use
+ordinary JSON; `assess` is equivalent to `assessWithAssets Map.empty`. Empty
+batches make no request even when assets are supplied. Custom interpreters
+matching the exported effect constructor must handle `AssessWithAssets assets state batch`.
+
+References must be nonblank, at most 1,024 UTF-8 bytes each and 65,536 bytes
+combined. Empty image files and files over 16 MiB fail locally with `InvalidRequest`.
+The service validates image contents: still PNG/JPEG, 280–1568 pixels per side,
+and separate 32 MiB limits on the body, processed images, and expanded request.
+Prepare upright images at the required size; this client does not resize,
+convert, or download them. The API strips EXIF without applying orientation.
+Invalid image content or references fail the whole assessment through `HttpFailure`.
+See the [experimental image documentation](https://docs.typesafe.ai/images).
 
 ## Answers and metadata
 

@@ -7,6 +7,7 @@ module TypeSafe.Jev
     , noul
     , Jev
     , assess
+    , assessWithAssets
     , JevSettings (..)
     , defaultJevSettings
     , runJev
@@ -14,6 +15,6 @@ module TypeSafe.Jev
 
 import TypeSafe.Jev.Batch (Batch, choice, noul, score)
 import TypeSafe.Jev.Client
-import TypeSafe.Jev.Effect (Jev, assess)
+import TypeSafe.Jev.Effect (Jev, assess, assessWithAssets)
 import TypeSafe.Jev.Error
 import TypeSafe.Jev.Types
