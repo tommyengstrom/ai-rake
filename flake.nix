@@ -52,6 +52,7 @@
 
           shellHook = ''
             export PC_PORT_NUM=6599
+            export LD_LIBRARY_PATH="${libraryPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           '';
         };
       });

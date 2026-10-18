@@ -79,7 +79,7 @@ Notes:
 - Stored provider item tool provenance covers local Rake tools only; Gemini provider-native `providerTools` are not included in `availableLocalTools`.
 - Switching away from Gemini keeps generic unresolved tool state portable. Gemini-only pending `thought` metadata is reused only for same-provider Gemini continuation and is dropped when replaying into OpenAI/xAI.
 - Gemini image generation, OpenAI image generation, and xAI Grok Imagine image/video generation are available through provider-specific helper modules instead of the shared chat API.
-- Standalone TTS helpers are available for OpenAI and xAI through the shared `tts` and `ttsStreaming` entrypoints, plus provider-specific modules when you need provider-native settings.
+- Standalone TTS helpers are available for OpenAI, xAI, ElevenLabs, and OpenRouter through the shared `tts` and `ttsStreaming` entrypoints, plus provider-specific modules when you need provider-native settings.
 
 ## Persistence
 
@@ -254,6 +254,69 @@ audio <-
     "Hello from ai-rake."
 ```
 
+ElevenLabs is available directly and through OpenRouter using the same entrypoints:
+
+```haskell
+import Rake.Providers.ElevenLabs.TTS qualified as ElevenLabs
+import Rake.Providers.OpenRouter.TTS qualified as OpenRouter
+
+-- Keys are supplied by the caller; the library does not read environment variables.
+directAudio <- tts
+  (TTSElevenLabs (ElevenLabs.defaultElevenLabsTTSSettings elevenLabsKey))
+  "Hello from ai-rake."
+
+routedAudio <- tts
+  (TTSOpenRouter (OpenRouter.defaultOpenRouterTTSSettings openRouterKey))
+  "Hello from ai-rake."
+
+let controls = ElevenLabs.defaultElevenLabsControls
+      { ElevenLabs.voiceSettings = ElevenLabs.defaultElevenLabsVoiceSettings
+          { ElevenLabs.stability = Just 0.5
+          , ElevenLabs.similarityBoost = Just 0.75
+          }
+      }
+    settings = case OpenRouter.defaultOpenRouterTTSSettings openRouterKey of
+      OpenRouter.OpenRouterTTSSettings{apiKey, baseUrl, requestLogger} ->
+        OpenRouter.OpenRouterTTSSettings
+          { apiKey, baseUrl, requestLogger
+          , options = OpenRouter.defaultOpenRouterTTSOptions
+              { OpenRouter.elevenLabsControls = controls }
+          }
+controlledAudio <- tts (TTSOpenRouter settings) "A short narration."
+```
+
+Both defaults select Eleven v4, George, and MP3. Direct requests use model
+`eleven_v4`, voice ID `JBFqnCBsd6RMkjVDRZzb`, and native format
+`mp3_44100_128`; OpenRouter uses `elevenlabs/eleven-v4`, `george`,
+and `mp3`. Models and voices accept arbitrary provider identifiers. The settings'
+`baseUrl` is the service origin (defaults: `https://api.elevenlabs.io` and
+`https://openrouter.ai`); the adapters append their respective API paths.
+
+`TTSStreamingElevenLabs (ElevenLabs.defaultElevenLabsTTSStreamingSettings key)`
+and `TTSStreamingOpenRouter (OpenRouter.defaultOpenRouterTTSStreamingSettings key)`
+work with the same `ttsStreaming` callbacks shown above. Streaming returns the
+complete aggregated audio as well as delivering chunks. ElevenLabs streaming
+supports MP3, PCM, Opus, ulaw, and alaw; WAV is available only with `tts`.
+OpenRouter currently exposes MP3 and PCM output through this adapter.
+
+Optional controls include language, speed, stability, similarity boost, style,
+and speaker boost. Unset controls preserve the provider's voice defaults.
+OpenRouter forwards these through `provider.options.elevenlabs` and they require
+an `elevenlabs/` model. Eleven v4 supports stability and similarity voice settings;
+use text tags such as `[whispering]` or `[laughing]` to direct its delivery.
+Numeric style exaggeration runs from 0 (none) to 1 (maximum) on supported older
+models. Eleven v4 does not support style or speed controls. Multilingual v2 does
+not support the language hint. Speed is checked for a finite positive value locally;
+model-specific bounds are enforced by the provider. A typical supported range
+is 0.7–1.2. Account-owned or cloned voices on OpenRouter require configuring
+[BYOK](https://openrouter.ai/docs/guides/overview/auth/byok) with ElevenLabs.
+See the [native API](https://elevenlabs.io/docs/api-reference/text-to-speech/convert)
+and [OpenRouter integration guide](https://openrouter.ai/blog/announcements/elevenlabs-on-openrouter/)
+for current model restrictions.
+
+The deterministic tests use a local HTTP server. New paid TTS smoke tests are
+opt-in with `RAKE_TTS_LIVE_TESTS=1` and the corresponding provider API key.
+
 ## CLIs
 
 Build and run the image CLI with:
@@ -276,6 +339,8 @@ Build and run the speech CLI with:
 ```bash
 cabal run rake-tts -- openai "Hello from ai-rake."
 cabal run rake-tts -- xai --codec=wav --sample-rate=24000 -o update.wav "A short status update"
+cabal run rake-tts -- elevenlabs -o hello.mp3 "Hello from ElevenLabs."
+cabal run rake-tts -- openrouter --stability=0.5 --similarity=0.75 -o hello.mp3 "Hello through OpenRouter."
 ```
 
 Defaults:
@@ -287,6 +352,10 @@ Defaults:
 - `rake-video veo ...` uses Google Veo with default model `veo-3.1-generate-preview`
 - `rake-tts openai ...` uses OpenAI TTS with default model `gpt-4o-mini-tts`
 - `rake-tts xai ...` uses xAI TTS with default voice `eve`
+- `rake-tts elevenlabs ...` uses `ELEVENLABS_API_KEY`; `--format` takes native names such as `wav_24000`
+- `rake-tts openrouter ...` uses `OPENROUTER_API_KEY`; `--format` takes `mp3` or `pcm`
+- Both new commands default to Eleven v4, George, and MP3, and accept `--model`, `--voice`, `--language`, `--speed`, `--stability`, `--similarity`, `--style`, and `--speaker-boost true|false` (voice-control support depends on the model)
+- Save raw PCM/telephony formats with `--output`; local players generally need explicit decoding settings for these formats
 - No `--output` writes to `./generated/<timestamp>-<slug>.png` for images
 - No `--output` writes to `./generated/<timestamp>-<slug>.mp4` for videos
 - No `--output` plays speech locally by default; local playback looks for `ffplay`, `mpv`, or `afplay`
@@ -308,4 +377,6 @@ cabal run rake-video -- veo --help
 cabal run rake-tts -- --help
 cabal run rake-tts -- openai --help
 cabal run rake-tts -- xai --help
+cabal run rake-tts -- elevenlabs --help
+cabal run rake-tts -- openrouter --help
 ```

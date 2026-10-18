@@ -17,10 +17,12 @@ module RakeTTSCLI
 import Data.Text qualified as T
 import Effectful
 import Effectful.Error.Static
-import RakeCliSupport
 import Rake
+import Rake.Providers.ElevenLabs.TTS qualified as ElevenLabs
 import Rake.Providers.OpenAI.TTS
+import Rake.Providers.OpenRouter.TTS qualified as OpenRouter
 import Rake.Providers.XAI.TTS
+import RakeCliSupport
 import Relude hiding (exitFailure, getArgs, lookupEnv)
 import System.Directory
 import System.Environment (getArgs, getProgName, lookupEnv)
@@ -31,12 +33,16 @@ import System.Process (readProcessWithExitCode)
 
 data GenSpeechProvider
     = GenSpeechProviderOpenAI
+    | GenSpeechProviderElevenLabs
+    | GenSpeechProviderOpenRouter
     | GenSpeechProviderXAI
     deriving stock (Show, Eq)
 
 data GenSpeechHelpTopic
     = GenSpeechHelpGeneral
     | GenSpeechHelpOpenAI
+    | GenSpeechHelpElevenLabs
+    | GenSpeechHelpOpenRouter
     | GenSpeechHelpXAI
     deriving stock (Show, Eq)
 
@@ -77,6 +83,8 @@ data XAIGenSpeechOptions = XAIGenSpeechOptions
 data GenSpeechOptions
     = GenSpeechOpenAI OpenAIGenSpeechOptions
     | GenSpeechXAI XAIGenSpeechOptions
+    | GenSpeechElevenLabs CommonGenSpeechOptions ElevenLabs.ElevenLabsTTSOptions
+    | GenSpeechOpenRouter CommonGenSpeechOptions OpenRouter.OpenRouterTTSOptions
     deriving stock (Show, Eq)
 
 data ParseGenSpeechArgsResult
@@ -155,9 +163,31 @@ runGenSpeechCli = do
 
 runGenSpeech :: GenSpeechOptions -> IO (Either Text GenSpeechRunResult)
 runGenSpeech options = case options of
-    GenSpeechOpenAI openAIOptions@OpenAIGenSpeechOptions
-        { openAISpeechCommonOptions = CommonGenSpeechOptions{commonSpeechText, commonSpeechOutputPath}
-        } -> do
+    GenSpeechElevenLabs common speechOptions ->
+        runConfiguredSpeech
+            "ELEVENLABS_API_KEY"
+            ( \key ->
+                case ElevenLabs.defaultElevenLabsTTSSettings key of
+                    ElevenLabs.ElevenLabsTTSSettings{apiKey, baseUrl, requestLogger} ->
+                        TTSElevenLabs
+                            (ElevenLabs.ElevenLabsTTSSettings apiKey baseUrl speechOptions requestLogger)
+            )
+            common
+    GenSpeechOpenRouter common speechOptions ->
+        runConfiguredSpeech
+            "OPENROUTER_API_KEY"
+            ( \key ->
+                case OpenRouter.defaultOpenRouterTTSSettings key of
+                    OpenRouter.OpenRouterTTSSettings{apiKey, baseUrl, requestLogger} ->
+                        TTSOpenRouter
+                            (OpenRouter.OpenRouterTTSSettings apiKey baseUrl speechOptions requestLogger)
+            )
+            common
+    GenSpeechOpenAI
+        openAIOptions@OpenAIGenSpeechOptions
+            { openAISpeechCommonOptions =
+                CommonGenSpeechOptions{commonSpeechText, commonSpeechOutputPath}
+            } -> do
             maybeApiKey <- lookupEnv "OPENAI_API_KEY"
             case maybeApiKey of
                 Nothing ->
@@ -165,10 +195,15 @@ runGenSpeech options = case options of
                 Just apiKey -> do
                     let settings = buildOpenAISettings (toText apiKey) openAIOptions
                     responseResult <- runProvider (tts (TTSOpenAI settings) commonSpeechText)
-                    handleSpeechResponse commonSpeechOutputPath commonSpeechText (GenSpeechOpenAI openAIOptions) responseResult
-    GenSpeechXAI xaiOptions@XAIGenSpeechOptions
-        { xaiSpeechCommonOptions = CommonGenSpeechOptions{commonSpeechText, commonSpeechOutputPath}
-        } -> do
+                    handleSpeechResponse
+                        commonSpeechOutputPath
+                        commonSpeechText
+                        (GenSpeechOpenAI openAIOptions)
+                        responseResult
+    GenSpeechXAI
+        xaiOptions@XAIGenSpeechOptions
+            { xaiSpeechCommonOptions = CommonGenSpeechOptions{commonSpeechText, commonSpeechOutputPath}
+            } -> do
             maybeApiKey <- lookupEnv "XAI_API_KEY"
             case maybeApiKey of
                 Nothing ->
@@ -176,8 +211,25 @@ runGenSpeech options = case options of
                 Just apiKey -> do
                     let settings = buildXAISettings (toText apiKey) xaiOptions
                     responseResult <- runProvider (tts (TTSXAI settings) commonSpeechText)
-                    handleSpeechResponse commonSpeechOutputPath commonSpeechText (GenSpeechXAI xaiOptions) responseResult
+                    handleSpeechResponse
+                        commonSpeechOutputPath
+                        commonSpeechText
+                        (GenSpeechXAI xaiOptions)
+                        responseResult
   where
+    runConfiguredSpeech
+        :: String
+        -> (Text -> TTSSettings '[Error RakeError, IOE])
+        -> CommonGenSpeechOptions
+        -> IO (Either Text GenSpeechRunResult)
+    runConfiguredSpeech keyName settings CommonGenSpeechOptions{commonSpeechText, commonSpeechOutputPath} = do
+        maybeApiKey <- lookupEnv keyName
+        case maybeApiKey of
+            Nothing -> pure (Left (toText keyName <> " is required for speech generation"))
+            Just apiKey -> do
+                responseResult <- runProvider (tts (settings (toText apiKey)) commonSpeechText)
+                handleSpeechResponse commonSpeechOutputPath commonSpeechText options responseResult
+
     runProvider
         :: Eff '[Error RakeError, IOE] Audio
         -> IO (Either Text Audio)
@@ -201,15 +253,18 @@ runGenSpeech options = case options of
                         playGeneratedSpeech speechText genSpeechOptions generatedAudio
                             <&> fmap (const GenSpeechPlayed)
 
-buildOpenAISettings :: Text -> OpenAIGenSpeechOptions -> OpenAITTSSettings '[Error RakeError, IOE]
-buildOpenAISettings resolvedApiKey OpenAIGenSpeechOptions
-    { openAISpeechModel
-    , openAISpeechVoice
-    , openAISpeechInstructions
-    , openAISpeechFormat
-    , openAISpeechSpeed
-    , openAISpeechCommonOptions = _
-    } =
+buildOpenAISettings
+    :: Text -> OpenAIGenSpeechOptions -> OpenAITTSSettings '[Error RakeError, IOE]
+buildOpenAISettings
+    resolvedApiKey
+    OpenAIGenSpeechOptions
+        { openAISpeechModel
+        , openAISpeechVoice
+        , openAISpeechInstructions
+        , openAISpeechFormat
+        , openAISpeechSpeed
+        , openAISpeechCommonOptions = _
+        } =
         case defaultOpenAITTSSettings resolvedApiKey of
             OpenAITTSSettings
                 { apiKey
@@ -236,14 +291,16 @@ buildOpenAISettings resolvedApiKey OpenAIGenSpeechOptions
                         }
 
 buildXAISettings :: Text -> XAIGenSpeechOptions -> XAITTSSettings '[Error RakeError, IOE]
-buildXAISettings resolvedApiKey xaiOptions@XAIGenSpeechOptions
-    { xaiSpeechVoice
-    , xaiSpeechLanguage
-    , xaiSpeechCommonOptions = _
-    , xaiSpeechCodec = _
-    , xaiSpeechSampleRate = _
-    , xaiSpeechBitRate = _
-    } =
+buildXAISettings
+    resolvedApiKey
+    xaiOptions@XAIGenSpeechOptions
+        { xaiSpeechVoice
+        , xaiSpeechLanguage
+        , xaiSpeechCommonOptions = _
+        , xaiSpeechCodec = _
+        , xaiSpeechSampleRate = _
+        , xaiSpeechBitRate = _
+        } =
         case defaultXAITTSSettings resolvedApiKey of
             XAITTSSettings
                 { apiKey
@@ -266,28 +323,161 @@ buildXAISettings resolvedApiKey xaiOptions@XAIGenSpeechOptions
 parseGenSpeechArgs :: [Text] -> ParseGenSpeechArgsResult
 parseGenSpeechArgs = \case
     [] ->
-        ParseGenSpeechArgsError "A provider is required. Use `openai` or `xai`." GenSpeechHelpGeneral
+        ParseGenSpeechArgsError
+            "A provider is required. Use `openai`, `xai`, `elevenlabs`, or `openrouter`."
+            GenSpeechHelpGeneral
     "--help" : _ ->
         ParseGenSpeechArgsHelp GenSpeechHelpGeneral
     providerArg : rest ->
         case parseProvider providerArg of
             Nothing ->
                 ParseGenSpeechArgsError
-                    ("Unknown provider: " <> providerArg <> ". Use `openai` or `xai`.")
+                    ( "Unknown provider: "
+                        <> providerArg
+                        <> ". Use `openai`, `xai`, `elevenlabs`, or `openrouter`."
+                    )
                     GenSpeechHelpGeneral
             Just GenSpeechProviderOpenAI ->
                 parseOpenAIArgs rest
             Just GenSpeechProviderXAI ->
                 parseXAIArgs rest
+            Just GenSpeechProviderElevenLabs ->
+                parseConfiguredSpeechArgs
+                    GenSpeechHelpElevenLabs
+                    ElevenLabs.defaultElevenLabsTTSOptions
+                    ElevenLabs.validateElevenLabsTTSOptions
+                    setElevenLabsOption
+                    GenSpeechElevenLabs
+                    rest
+            Just GenSpeechProviderOpenRouter ->
+                parseConfiguredSpeechArgs
+                    GenSpeechHelpOpenRouter
+                    OpenRouter.defaultOpenRouterTTSOptions
+                    OpenRouter.validateOpenRouterTTSOptions
+                    setOpenRouterOption
+                    GenSpeechOpenRouter
+                    rest
 
 parseProvider :: Text -> Maybe GenSpeechProvider
 parseProvider = \case
+    "elevenlabs" ->
+        Just GenSpeechProviderElevenLabs
+    "openrouter" ->
+        Just GenSpeechProviderOpenRouter
     "openai" ->
         Just GenSpeechProviderOpenAI
     "xai" ->
         Just GenSpeechProviderXAI
     _ ->
         Nothing
+
+parseConfiguredSpeechArgs
+    :: forall options
+     . GenSpeechHelpTopic
+    -> options
+    -> (options -> Either RakeError ())
+    -> (Text -> Text -> options -> Either Text options)
+    -> (CommonGenSpeechOptions -> options -> GenSpeechOptions)
+    -> [Text]
+    -> ParseGenSpeechArgsResult
+parseConfiguredSpeechArgs helpTopic defaults validate setOption wrap = go defaultCommonParseState defaults
+  where
+    failure :: Text -> ParseGenSpeechArgsResult
+    failure err = ParseGenSpeechArgsError err helpTopic
+
+    go :: CommonParseState -> options -> [Text] -> ParseGenSpeechArgsResult
+    go common opts = \case
+        [] -> finalize common opts
+        "--help" : _ -> ParseGenSpeechArgsHelp helpTopic
+        "--" : rest -> finalize (appendTextParts common rest) opts
+        arg : rest
+            | "-" `T.isPrefixOf` arg ->
+                case T.breakOn "=" arg of
+                    (name, suffix) | not (T.null suffix) -> applyOption common opts name (T.drop 1 suffix) rest
+                    (name, _) -> case rest of
+                        [] -> failure ("Missing value for " <> name)
+                        value : remaining
+                            | "--" `T.isPrefixOf` value || value == "-o" -> failure ("Missing value for " <> name)
+                            | otherwise -> applyOption common opts name value remaining
+            | otherwise -> go (appendTextParts common [arg]) opts rest
+
+    applyOption
+        :: CommonParseState -> options -> Text -> Text -> [Text] -> ParseGenSpeechArgsResult
+    applyOption common opts name value rest
+        | name == "--output" || name == "-o" =
+            if T.null (T.strip value)
+                then failure "Output path must not be empty."
+                else go common{parseOutputPath = Just (toString value)} opts rest
+        | otherwise = case setOption name value opts of
+            Left err -> failure err
+            Right updated -> go common updated rest
+
+    finalize :: CommonParseState -> options -> ParseGenSpeechArgsResult
+    finalize CommonParseState{parseOutputPath, parseTextParts} opts
+        | null parseTextParts || T.null (T.strip (T.unwords parseTextParts)) =
+            failure "Input text is required."
+        | otherwise = case validate opts of
+            Left err -> failure (renderRakeError err)
+            Right () ->
+                ParseGenSpeechArgsSuccess
+                    (wrap (CommonGenSpeechOptions (T.unwords parseTextParts) parseOutputPath) opts)
+
+setElevenLabsOption
+    :: Text
+    -> Text
+    -> ElevenLabs.ElevenLabsTTSOptions
+    -> Either Text ElevenLabs.ElevenLabsTTSOptions
+setElevenLabsOption name value opts@ElevenLabs.ElevenLabsTTSOptions{controls} = case name of
+    "--model" -> Right opts{ElevenLabs.model = value}
+    "--voice" -> Right opts{ElevenLabs.voice = value}
+    "--format" -> do
+        format <- ElevenLabs.parseElevenLabsOutputFormat value
+        Right opts{ElevenLabs.outputFormat = format}
+    _ -> do
+        updated <- setElevenLabsControl name value controls
+        Right opts{ElevenLabs.controls = updated}
+
+setOpenRouterOption
+    :: Text
+    -> Text
+    -> OpenRouter.OpenRouterTTSOptions
+    -> Either Text OpenRouter.OpenRouterTTSOptions
+setOpenRouterOption name value opts@OpenRouter.OpenRouterTTSOptions{elevenLabsControls} = case name of
+    "--model" -> Right opts{OpenRouter.model = value}
+    "--voice" -> Right opts{OpenRouter.voice = value}
+    "--format" -> case value of
+        "mp3" -> Right opts{OpenRouter.responseFormat = OpenRouter.OpenRouterAudioFormatMp3}
+        "pcm" -> Right opts{OpenRouter.responseFormat = OpenRouter.OpenRouterAudioFormatPcm}
+        _ -> Left "OpenRouter --format must be mp3 or pcm"
+    _ -> do
+        updated <- setElevenLabsControl name value elevenLabsControls
+        Right opts{OpenRouter.elevenLabsControls = updated}
+
+setElevenLabsControl
+    :: Text -> Text -> ElevenLabs.ElevenLabsControls -> Either Text ElevenLabs.ElevenLabsControls
+setElevenLabsControl name value controls@ElevenLabs.ElevenLabsControls{voiceSettings} = case name of
+    "--language" -> Right controls{ElevenLabs.languageCode = Just value}
+    "--speaker-boost" -> do
+        enabled <- case value of
+            "true" -> Right True
+            "false" -> Right False
+            _ -> Left "--speaker-boost must be true or false"
+        Right
+            controls
+                { ElevenLabs.voiceSettings = voiceSettings{ElevenLabs.useSpeakerBoost = Just enabled}
+                }
+    "--speed" -> setNumber (\n -> voiceSettings{ElevenLabs.speed = Just n})
+    "--stability" -> setNumber (\n -> voiceSettings{ElevenLabs.stability = Just n})
+    "--similarity" -> setNumber (\n -> voiceSettings{ElevenLabs.similarityBoost = Just n})
+    "--style" -> setNumber (\n -> voiceSettings{ElevenLabs.style = Just n})
+    _ -> Left ("Unknown option: " <> name)
+  where
+    setNumber
+        :: (Double -> ElevenLabs.ElevenLabsVoiceSettings)
+        -> Either Text ElevenLabs.ElevenLabsControls
+    setNumber update = case readMaybe @Double (toString value) of
+        Nothing -> Left ("Invalid value for " <> name <> ": " <> value)
+        Just number -> Right controls{ElevenLabs.voiceSettings = update number}
 
 parseOpenAIArgs :: [Text] -> ParseGenSpeechArgsResult
 parseOpenAIArgs =
@@ -634,7 +824,8 @@ parseXAISampleRateOption rawValue =
                 48000 ->
                     Right XAISampleRate48000
                 _ ->
-                    Left "Unsupported value for --sample-rate. Supported values: 8000, 16000, 22050, 24000, 44100, 48000."
+                    Left
+                        "Unsupported value for --sample-rate. Supported values: 8000, 16000, 22050, 24000, 44100, 48000."
 
 parseXAIMP3BitRateOption :: Text -> Either Text XAIMP3BitRate
 parseXAIMP3BitRateOption rawValue =
@@ -654,7 +845,8 @@ parseXAIMP3BitRateOption rawValue =
                 192000 ->
                     Right XAIMP3BitRate192000
                 _ ->
-                    Left "Unsupported value for --bit-rate. Supported values: 32000, 64000, 96000, 128000, 192000."
+                    Left
+                        "Unsupported value for --bit-rate. Supported values: 32000, 64000, 96000, 128000, 192000."
 
 appendTextParts :: CommonParseState -> [Text] -> CommonParseState
 appendTextParts commonState@CommonParseState{parseTextParts} extraTextParts =
@@ -662,99 +854,174 @@ appendTextParts commonState@CommonParseState{parseTextParts} extraTextParts =
 
 renderGenSpeechHelp :: String -> GenSpeechHelpTopic -> Text
 renderGenSpeechHelp progName = \case
+    GenSpeechHelpElevenLabs ->
+        renderConfiguredSpeechHelp
+            "elevenlabs"
+            "eleven_v4"
+            "JBFqnCBsd6RMkjVDRZzb (George)"
+            "ELEVENLABS_API_KEY"
+            [ "  --format FORMAT              Native format, e.g. mp3_44100_128 (default), wav_24000, pcm_24000."
+            ]
+    GenSpeechHelpOpenRouter ->
+        renderConfiguredSpeechHelp
+            "openrouter"
+            "elevenlabs/eleven-v4"
+            "george"
+            "OPENROUTER_API_KEY"
+            [ "  --format FORMAT              mp3 (default) or pcm."
+            , "  ElevenLabs controls require an elevenlabs/ model. Custom voices require OpenRouter BYOK."
+            ]
     GenSpeechHelpGeneral ->
-        T.unlines $
-            [ "Usage:"
-            , "  " <> toText progName <> " openai [OPTIONS] TEXT"
-            , "  " <> toText progName <> " xai [OPTIONS] TEXT"
-            , ""
-            , "Providers:"
-            , "  openai  Generate speech with OpenAI. Default model: gpt-4o-mini-tts"
-            , "  xai     Generate speech with xAI TTS. Default voice: eve"
-            , ""
-            , "Common options:"
-            ]
-                <> commonOptionLines
-                <> [ ""
-                   , "openai options:"
-                   ]
-                <> openAIOptionLines
-                <> [ ""
-                   , "xai options:"
-                   ]
-                <> xaiOptionLines
-                <> [ ""
-                   , "Notes:"
-                   , "  TEXT may be quoted or split across multiple arguments."
-                   , "  With no `--output`, the CLI plays the audio locally."
-                   , "  Use `" <> toText progName <> " openai --help` or `" <> toText progName <> " xai --help` for focused help."
-                   , "  `--sample-rate` and `--bit-rate` require `--codec`."
-                   , "  `--bit-rate` is only valid with `--codec=mp3`."
-                   , "  Local playback looks for `ffplay`, `mpv`, or `afplay`."
-                   , "  OPENAI_API_KEY is required for `openai`."
-                   , "  XAI_API_KEY is required for `xai`."
-                   , ""
-                   , "Examples:"
-                   , "  " <> toText progName <> " openai \"Hello from ai-rake.\""
-                   , "  " <> toText progName <> " openai --voice=verse --format=wav -o hello.wav \"A clean narration test\""
-                   , "  " <> toText progName <> " xai --voice=rex --language=en \"Hello from ai-rake.\""
-                   , "  " <> toText progName <> " xai --codec=wav --sample-rate=24000 -o update.wav \"A short status update\""
-                   ]
+        T.unlines
+            $ [ "Usage:"
+              , "  " <> toText progName <> " openai [OPTIONS] TEXT"
+              , "  " <> toText progName <> " xai [OPTIONS] TEXT"
+              , "  " <> toText progName <> " elevenlabs [OPTIONS] TEXT"
+              , "  " <> toText progName <> " openrouter [OPTIONS] TEXT"
+              , ""
+              , "Providers:"
+              , "  openai  Generate speech with OpenAI. Default model: gpt-4o-mini-tts"
+              , "  xai     Generate speech with xAI TTS. Default voice: eve"
+              , "  elevenlabs  ElevenLabs directly. Default: Eleven v4, George, MP3."
+              , "  openrouter OpenRouter speech. Default: Eleven v4, George, MP3."
+              , ""
+              , "Common options:"
+              ]
+            <> commonOptionLines
+            <> [ ""
+               , "openai options:"
+               ]
+            <> openAIOptionLines
+            <> [ ""
+               , "xai options:"
+               ]
+            <> xaiOptionLines
+            <> [ ""
+               , "Notes:"
+               , "  TEXT may be quoted or split across multiple arguments."
+               , "  With no `--output`, the CLI plays the audio locally."
+               , "  Use `"
+                    <> toText progName
+                    <> " openai --help` or `"
+                    <> toText progName
+                    <> " xai --help` for focused help."
+               , "  `--sample-rate` and `--bit-rate` require `--codec`."
+               , "  `--bit-rate` is only valid with `--codec=mp3`."
+               , "  Local playback looks for `ffplay`, `mpv`, or `afplay`."
+               , "  OPENAI_API_KEY is required for `openai`."
+               , "  XAI_API_KEY is required for `xai`."
+               , "  ELEVENLABS_API_KEY is required for `elevenlabs`; OPENROUTER_API_KEY for `openrouter`."
+               , "  Use `"
+                    <> toText progName
+                    <> " elevenlabs --help` or `"
+                    <> toText progName
+                    <> " openrouter --help` for voice controls."
+               , ""
+               , "Examples:"
+               , "  " <> toText progName <> " openai \"Hello from ai-rake.\""
+               , "  "
+                    <> toText progName
+                    <> " openai --voice=verse --format=wav -o hello.wav \"A clean narration test\""
+               , "  " <> toText progName <> " xai --voice=rex --language=en \"Hello from ai-rake.\""
+               , "  "
+                    <> toText progName
+                    <> " xai --codec=wav --sample-rate=24000 -o update.wav \"A short status update\""
+               ]
     GenSpeechHelpOpenAI ->
-        T.unlines $
-            [ "Usage:"
-            , "  " <> toText progName <> " openai [OPTIONS] TEXT"
-            , ""
-            , "Default model: gpt-4o-mini-tts"
-            , ""
-            , "Common options:"
-            ]
-                <> commonOptionLines
-                <> [ ""
-                   , "openai options:"
-                   ]
-                <> openAIOptionLines
-                <> [ ""
-                   , "Notes:"
-                   , "  TEXT may be quoted or split across multiple arguments."
-                   , "  With no `--output`, the CLI plays the audio locally."
-                   , "  Local playback looks for `ffplay`, `mpv`, or `afplay`."
-                   , "  OPENAI_API_KEY is required."
-                   , ""
-                   , "Examples:"
-                   , "  " <> toText progName <> " openai \"Hello from ai-rake.\""
-                   , "  " <> toText progName <> " openai --model=tts-1-hd --voice=shimmer -o announcement.mp3 \"A product announcement\""
-                   , "  " <> toText progName <> " openai --instructions=\"Speak slowly\" --format=flac -o report.flac \"Status report follows\""
-                   ]
+        T.unlines
+            $ [ "Usage:"
+              , "  " <> toText progName <> " openai [OPTIONS] TEXT"
+              , ""
+              , "Default model: gpt-4o-mini-tts"
+              , ""
+              , "Common options:"
+              ]
+            <> commonOptionLines
+            <> [ ""
+               , "openai options:"
+               ]
+            <> openAIOptionLines
+            <> [ ""
+               , "Notes:"
+               , "  TEXT may be quoted or split across multiple arguments."
+               , "  With no `--output`, the CLI plays the audio locally."
+               , "  Local playback looks for `ffplay`, `mpv`, or `afplay`."
+               , "  OPENAI_API_KEY is required."
+               , ""
+               , "Examples:"
+               , "  " <> toText progName <> " openai \"Hello from ai-rake.\""
+               , "  "
+                    <> toText progName
+                    <> " openai --model=tts-1-hd --voice=shimmer -o announcement.mp3 \"A product announcement\""
+               , "  "
+                    <> toText progName
+                    <> " openai --instructions=\"Speak slowly\" --format=flac -o report.flac \"Status report follows\""
+               ]
     GenSpeechHelpXAI ->
-        T.unlines $
-            [ "Usage:"
-            , "  " <> toText progName <> " xai [OPTIONS] TEXT"
-            , ""
-            , "Default voice: eve"
-            , ""
-            , "Common options:"
-            ]
-                <> commonOptionLines
-                <> [ ""
-                   , "xai options:"
-                   ]
-                <> xaiOptionLines
-                <> [ ""
-                   , "Notes:"
-                   , "  TEXT may be quoted or split across multiple arguments."
-                   , "  With no `--output`, the CLI plays the audio locally."
-                   , "  `--sample-rate` and `--bit-rate` require `--codec`."
-                   , "  `--bit-rate` is only valid with `--codec=mp3`."
-                   , "  Local playback looks for `ffplay`, `mpv`, or `afplay`."
-                   , "  XAI_API_KEY is required."
-                   , ""
-                   , "Examples:"
-                   , "  " <> toText progName <> " xai --voice=eve --language=auto \"Hello from ai-rake.\""
-                   , "  " <> toText progName <> " xai --codec=mp3 --bit-rate=128000 -o narration.mp3 \"A polished narration\""
-                   , "  " <> toText progName <> " xai --codec=pcm --sample-rate=16000 -o prompt.pcm \"A phone-friendly prompt\""
-                   ]
+        T.unlines
+            $ [ "Usage:"
+              , "  " <> toText progName <> " xai [OPTIONS] TEXT"
+              , ""
+              , "Default voice: eve"
+              , ""
+              , "Common options:"
+              ]
+            <> commonOptionLines
+            <> [ ""
+               , "xai options:"
+               ]
+            <> xaiOptionLines
+            <> [ ""
+               , "Notes:"
+               , "  TEXT may be quoted or split across multiple arguments."
+               , "  With no `--output`, the CLI plays the audio locally."
+               , "  `--sample-rate` and `--bit-rate` require `--codec`."
+               , "  `--bit-rate` is only valid with `--codec=mp3`."
+               , "  Local playback looks for `ffplay`, `mpv`, or `afplay`."
+               , "  XAI_API_KEY is required."
+               , ""
+               , "Examples:"
+               , "  " <> toText progName <> " xai --voice=eve --language=auto \"Hello from ai-rake.\""
+               , "  "
+                    <> toText progName
+                    <> " xai --codec=mp3 --bit-rate=128000 -o narration.mp3 \"A polished narration\""
+               , "  "
+                    <> toText progName
+                    <> " xai --codec=pcm --sample-rate=16000 -o prompt.pcm \"A phone-friendly prompt\""
+               ]
   where
+    renderConfiguredSpeechHelp :: Text -> Text -> Text -> Text -> [Text] -> Text
+    renderConfiguredSpeechHelp providerName defaultModel defaultVoice keyName formatLines =
+        T.unlines
+            ( [ "Usage: " <> toText progName <> " " <> providerName <> " [OPTIONS] TEXT"
+              , "Default model: " <> defaultModel
+              , "Default voice: " <> defaultVoice
+              , ""
+              ]
+                <> commonOptionLines
+                <> [ "  --model MODEL                Provider model identifier."
+                   , "  --voice VOICE                Provider voice identifier."
+                   ]
+                <> formatLines
+                <> [ "  --language CODE              Optional language hint; unsupported by Multilingual v2."
+                   , "  --speed N                    Positive finite multiplier; unsupported by Eleven v4."
+                   , "  --stability N                0 to 1."
+                   , "  --similarity N               0 to 1."
+                   , "  --style N                    Style exaggeration: 0 (none) to 1 (maximum); unsupported by Eleven v4."
+                   , "  --speaker-boost true|false   Override the voice's speaker boost setting."
+                   , "  Voice controls are omitted unless specified; support depends on the model."
+                   , "  Eleven v4 supports stability and similarity; use text tags like [whispering] for delivery."
+                   , "  With no `--output`, the CLI plays the audio locally (ffplay, mpv, or afplay)."
+                   , "  Use --output for raw PCM or telephony formats; most players need explicit decoding settings."
+                   , "  " <> keyName <> " is required."
+                   , "Example: "
+                        <> toText progName
+                        <> " "
+                        <> providerName
+                        <> " -o hello.mp3 \"Hello from ai-rake.\""
+                   ]
+            )
+
     commonOptionLines =
         [ "  -o, --output PATH            Save audio to PATH instead of playing it."
         , "  --help                       Show help."
@@ -782,13 +1049,24 @@ slugifySpeechText =
 
 suggestedSpeechExtension :: GenSpeechOptions -> Audio -> String
 suggestedSpeechExtension genSpeechOptions Audio{mimeType, fileName} =
-    fromMaybe ".mp3" $
-        (fileName >>= urlExtension)
-            <|> (mimeType >>= audioExtensionFromMimeType)
-            <|> explicitSpeechExtension genSpeechOptions
+    fromMaybe ".mp3"
+        $ (fileName >>= urlExtension)
+        <|> (mimeType >>= audioExtensionFromMimeType)
+        <|> explicitSpeechExtension genSpeechOptions
 
 explicitSpeechExtension :: GenSpeechOptions -> Maybe String
 explicitSpeechExtension = \case
+    GenSpeechElevenLabs _ ElevenLabs.ElevenLabsTTSOptions{outputFormat} ->
+        Just
+            ( "."
+                <> toString (T.takeWhile (/= '_') (ElevenLabs.renderElevenLabsOutputFormat outputFormat))
+            )
+    GenSpeechOpenRouter _ OpenRouter.OpenRouterTTSOptions{responseFormat} ->
+        Just
+            ( case responseFormat of
+                OpenRouter.OpenRouterAudioFormatMp3 -> ".mp3"
+                OpenRouter.OpenRouterAudioFormatPcm -> ".pcm"
+            )
     GenSpeechOpenAI OpenAIGenSpeechOptions{openAISpeechFormat} ->
         case openAISpeechFormat of
             Nothing ->
@@ -862,7 +1140,8 @@ xaiOutputFormat XAIGenSpeechOptions{xaiSpeechCodec, xaiSpeechSampleRate, xaiSpee
                     { sampleRate = xaiSpeechSampleRate
                     }
 
-saveGeneratedSpeech :: Maybe FilePath -> Text -> GenSpeechOptions -> Audio -> IO (Either Text FilePath)
+saveGeneratedSpeech
+    :: Maybe FilePath -> Text -> GenSpeechOptions -> Audio -> IO (Either Text FilePath)
 saveGeneratedSpeech maybeOutput speechText genSpeechOptions generatedAudio@Audio{audioBytes} = do
     outputPaths <-
         buildOutputPaths
@@ -881,7 +1160,8 @@ playGeneratedSpeech :: Text -> GenSpeechOptions -> Audio -> IO (Either Text ())
 playGeneratedSpeech speechText genSpeechOptions generatedAudio = do
     tempDir <- getTemporaryDirectory
     let tempPathTemplate = tempDir </> "rake-tts-play"
-    saveResult <- saveGeneratedSpeech (Just tempPathTemplate) speechText genSpeechOptions generatedAudio
+    saveResult <-
+        saveGeneratedSpeech (Just tempPathTemplate) speechText genSpeechOptions generatedAudio
     case saveResult of
         Left err ->
             pure (Left err)
@@ -902,7 +1182,8 @@ playSavedSpeech savedPath = do
         Just (playerPath, buildArgs) ->
             runExternalCommand playerPath (buildArgs savedPath)
 
-findAvailablePlayer :: [(FilePath, FilePath -> [String])] -> IO (Maybe (FilePath, FilePath -> [String]))
+findAvailablePlayer
+    :: [(FilePath, FilePath -> [String])] -> IO (Maybe (FilePath, FilePath -> [String]))
 findAvailablePlayer candidates =
     go candidates
   where
@@ -931,8 +1212,8 @@ runExternalCommand executablePath args =
 runExternalCommandWithOutput :: FilePath -> [String] -> IO (Either Text Text)
 runExternalCommandWithOutput executablePath args = do
     (exitCode, stdoutText, stderrText) <- readProcessWithExitCode executablePath args ""
-    pure $
-        case exitCode of
+    pure
+        $ case exitCode of
             ExitSuccess ->
                 Right (T.strip (toText stdoutText))
             ExitFailure exitCodeValue ->

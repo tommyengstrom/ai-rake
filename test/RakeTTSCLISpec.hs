@@ -1,10 +1,12 @@
 module RakeTTSCLISpec where
 
 import Data.Text qualified as T
-import RakeTTSCLI
 import Rake (Audio (..))
+import Rake.Providers.ElevenLabs.TTS qualified as EL
 import Rake.Providers.OpenAI.TTS
+import Rake.Providers.OpenRouter.TTS qualified as OR
 import Rake.Providers.XAI.TTS
+import RakeTTSCLI
 import Relude
 import Test.Hspec
 
@@ -14,7 +16,7 @@ spec = describe "RakeTTSCLI" $ do
         it "requires a provider" $ do
             parseGenSpeechArgs []
                 `shouldBe` ParseGenSpeechArgsError
-                    "A provider is required. Use `openai` or `xai`."
+                    "A provider is required. Use `openai`, `xai`, `elevenlabs`, or `openrouter`."
                     GenSpeechHelpGeneral
 
         it "parses a minimal openai command" $ do
@@ -122,7 +124,7 @@ spec = describe "RakeTTSCLI" $ do
         it "errors on unknown providers" $ do
             parseGenSpeechArgs ["grok", "hello"]
                 `shouldBe` ParseGenSpeechArgsError
-                    "Unknown provider: grok. Use `openai` or `xai`."
+                    "Unknown provider: grok. Use `openai`, `xai`, `elevenlabs`, or `openrouter`."
                     GenSpeechHelpGeneral
 
         it "rejects xai sample-rate without a codec" $ do
@@ -143,12 +145,152 @@ spec = describe "RakeTTSCLI" $ do
                     "--bit-rate requires --codec=mp3."
                     GenSpeechHelpXAI
 
+    describe "ElevenLabs and OpenRouter commands" $ do
+        it "uses the selected defaults for both routes" $ do
+            parseGenSpeechArgs ["elevenlabs", "Hello", "world"]
+                `shouldBe` ParseGenSpeechArgsSuccess
+                    ( GenSpeechElevenLabs
+                        (CommonGenSpeechOptions "Hello world" Nothing)
+                        EL.defaultElevenLabsTTSOptions
+                    )
+            parseGenSpeechArgs ["openrouter", "Hello"]
+                `shouldBe` ParseGenSpeechArgsSuccess
+                    ( GenSpeechOpenRouter
+                        (CommonGenSpeechOptions "Hello" Nothing)
+                        OR.defaultOpenRouterTTSOptions
+                    )
+
+        it "parses direct model, voice, native format and every voice control"
+            $ parseGenSpeechArgs
+                [ "elevenlabs"
+                , "--model=eleven_flash_v2_5"
+                , "--voice"
+                , "custom"
+                , "--format=wav_24000"
+                , "--language=sv"
+                , "--speed"
+                , "1.1"
+                , "--stability=0.4"
+                , "--similarity=0.7"
+                , "--style=0.2"
+                , "--speaker-boost=false"
+                , "-o"
+                , "out.wav"
+                , "Hej"
+                ]
+            `shouldBe` ParseGenSpeechArgsSuccess
+                ( GenSpeechElevenLabs
+                    (CommonGenSpeechOptions "Hej" (Just "out.wav"))
+                    EL.defaultElevenLabsTTSOptions
+                        { EL.model = "eleven_flash_v2_5"
+                        , EL.voice = "custom"
+                        , EL.outputFormat = EL.ElevenLabsWav_24000
+                        , EL.controls =
+                            EL.ElevenLabsControls
+                                (Just "sv")
+                                (EL.ElevenLabsVoiceSettings (Just 0.4) (Just 0.7) (Just 0.2) (Just 1.1) (Just False))
+                        }
+                )
+
+        it "parses OpenRouter overrides and preserves text after --"
+            $ parseGenSpeechArgs
+                [ "openrouter"
+                , "--model"
+                , "elevenlabs/eleven-flash-v2.5"
+                , "--voice=custom"
+                , "--format=pcm"
+                , "--speaker-boost"
+                , "true"
+                , "--output=out.pcm"
+                , "--"
+                , "--literal"
+                , "text"
+                ]
+            `shouldBe` ParseGenSpeechArgsSuccess
+                ( GenSpeechOpenRouter
+                    (CommonGenSpeechOptions "--literal text" (Just "out.pcm"))
+                    OR.defaultOpenRouterTTSOptions
+                        { OR.model = "elevenlabs/eleven-flash-v2.5"
+                        , OR.voice = "custom"
+                        , OR.responseFormat = OR.OpenRouterAudioFormatPcm
+                        , OR.elevenLabsControls =
+                            EL.defaultElevenLabsControls
+                                { EL.voiceSettings = EL.defaultElevenLabsVoiceSettings{EL.useSpeakerBoost = Just True}
+                                }
+                        }
+                )
+
+        it
+            "rejects invalid controls, formats, empty identifiers, missing values and unknown flags"
+            $ forM_
+                ( [ ["--speed=NaN"]
+                  , ["--speed=Infinity"]
+                  , ["--speed=-1"]
+                  , ["--stability=1.1"]
+                  , ["--similarity=-0.1"]
+                  , ["--style=abc"]
+                  , ["--speaker-boost=yes"]
+                  , ["--format=mp3"]
+                  , ["--model="]
+                  , ["--voice= "]
+                  , ["--language="]
+                  , ["--unknown=value"]
+                  ]
+                    :: [[Text]]
+                )
+            $ \flags ->
+                parseGenSpeechArgs (["elevenlabs"] <> flags <> ["hello"]) `shouldSatisfy` isParseError
+
+        it "rejects missing text and missing option values" $ do
+            parseGenSpeechArgs ["elevenlabs"] `shouldSatisfy` isParseError
+            parseGenSpeechArgs ["openrouter", "hello", "--voice"] `shouldSatisfy` isParseError
+            parseGenSpeechArgs ["openrouter", "--format=wav", "hello"] `shouldSatisfy` isParseError
+            parseGenSpeechArgs ["openrouter", "--model=other/model", "--speed=1.1", "hello"]
+                `shouldSatisfy` isParseError
+
+        it "does not consume another option as a missing value" $ do
+            parseGenSpeechArgs ["openrouter", "hello", "--voice", "--help"]
+                `shouldSatisfy` isParseError
+            parseGenSpeechArgs ["elevenlabs", "hello", "--output", "--voice=foo"]
+                `shouldSatisfy` isParseError
+            parseGenSpeechArgs ["elevenlabs", "hello", "--model", "--"] `shouldSatisfy` isParseError
+            parseGenSpeechArgs ["elevenlabs", "hello", "--output="] `shouldSatisfy` isParseError
+
+        it "renders provider help with formats, voice controls, and credentials" $ do
+            parseGenSpeechArgs ["elevenlabs", "--help"]
+                `shouldBe` ParseGenSpeechArgsHelp GenSpeechHelpElevenLabs
+            parseGenSpeechArgs ["openrouter", "--help"]
+                `shouldBe` ParseGenSpeechArgsHelp GenSpeechHelpOpenRouter
+            renderGenSpeechHelp "rake-tts" GenSpeechHelpElevenLabs
+                `shouldSatisfy` T.isInfixOf "ELEVENLABS_API_KEY"
+            renderGenSpeechHelp "rake-tts" GenSpeechHelpOpenRouter
+                `shouldSatisfy` T.isInfixOf "OPENROUTER_API_KEY"
+            renderGenSpeechHelp "rake-tts" GenSpeechHelpOpenRouter
+                `shouldSatisfy` T.isInfixOf "--speaker-boost"
+
+        it "uses requested formats when response metadata is absent" $ do
+            suggestedSpeechExtension
+                ( GenSpeechElevenLabs
+                    (CommonGenSpeechOptions "" Nothing)
+                    EL.defaultElevenLabsTTSOptions{EL.outputFormat = EL.ElevenLabsWav_24000}
+                )
+                (Audio mempty Nothing Nothing)
+                `shouldBe` ".wav"
+            suggestedSpeechExtension
+                ( GenSpeechOpenRouter
+                    (CommonGenSpeechOptions "" Nothing)
+                    OR.defaultOpenRouterTTSOptions{OR.responseFormat = OR.OpenRouterAudioFormatPcm}
+                )
+                (Audio mempty Nothing Nothing)
+                `shouldBe` ".pcm"
+
     describe "renderGenSpeechHelp" $ do
         it "general help lists both provider option sets" $ do
             let helpText = renderGenSpeechHelp "rake-tts" GenSpeechHelpGeneral
             helpText `shouldSatisfy` T.isInfixOf "--format FORMAT"
             helpText `shouldSatisfy` T.isInfixOf "--codec CODEC"
-            helpText `shouldSatisfy` T.isInfixOf "With no `--output`, the CLI plays the audio locally."
+            helpText
+                `shouldSatisfy` T.isInfixOf "With no `--output`, the CLI plays the audio locally."
             helpText `shouldSatisfy` T.isInfixOf "rake-tts openai --help"
             helpText `shouldSatisfy` T.isInfixOf "rake-tts xai --help"
 
@@ -163,7 +305,8 @@ spec = describe "RakeTTSCLI" $ do
             let helpText = renderGenSpeechHelp "rake-tts" GenSpeechHelpXAI
             helpText `shouldSatisfy` T.isInfixOf "--bit-rate BPS"
             helpText `shouldSatisfy` T.isInfixOf "--sample-rate HZ"
-            helpText `shouldSatisfy` T.isInfixOf "With no `--output`, the CLI plays the audio locally."
+            helpText
+                `shouldSatisfy` T.isInfixOf "With no `--output`, the CLI plays the audio locally."
             helpText `shouldNotSatisfy` T.isInfixOf "--instructions TEXT"
 
     describe "helpers" $ do
@@ -266,3 +409,9 @@ spec = describe "RakeTTSCLI" $ do
                     , fileName = Nothing
                     }
                 `shouldBe` ".mp3"
+
+isParseError :: ParseGenSpeechArgsResult -> Bool
+isParseError = \case
+    ParseGenSpeechArgsError _ _ -> True
+    ParseGenSpeechArgsHelp _ -> False
+    ParseGenSpeechArgsSuccess _ -> False

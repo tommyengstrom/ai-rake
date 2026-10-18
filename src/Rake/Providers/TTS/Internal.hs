@@ -8,6 +8,7 @@ import Data.Aeson (Value, encode)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.List qualified as List
+import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TextEncoding
 import Effectful
@@ -16,7 +17,7 @@ import Network.HTTP.Client
     ( Manager
     , RequestBody (RequestBodyLBS)
     , brConsume
-    , brReadSome
+    , brRead
     , managerResponseTimeout
     , method
     , parseRequest
@@ -107,6 +108,7 @@ runBinaryAudioRequest maybeOnChunk requestLogger baseUrl path headers requestBod
                            ]
                 , requestBody = RequestBodyLBS (encode requestBodyValue)
                 , responseTimeout = responseTimeoutMicro 180_000_000
+                , HttpClient.redactHeaders = Set.insert "xi-api-key" (HttpClient.redactHeaders rawRequest)
                 }
 
     requestLogger (NativeMsgOut requestBodyValue)
@@ -194,8 +196,7 @@ consumeResponseChunks
 consumeResponseChunks invokeChunk bodyReader = go []
   where
     go chunks = do
-        chunk <- brReadSome bodyReader 32_768
-        let strictChunk = LBS.toStrict chunk
+        strictChunk <- brRead bodyReader
         if BS.null strictChunk
             then pure (Right (reverse chunks))
             else do

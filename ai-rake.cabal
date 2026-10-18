@@ -75,7 +75,7 @@ common shared_opts
     , containers
     , effectful
     , effectful-th
-    , effectful-postgresql
+    , effectful-postgresql >= 0.1.0.1 && < 0.2
     , filelock
     , http-types
     , monad-time-effectful
@@ -110,6 +110,8 @@ library
       Rake.Providers.OpenAI.Chat
       Rake.Providers.OpenAI.Images
       Rake.Providers.OpenAI.TTS
+      Rake.Providers.ElevenLabs.TTS
+      Rake.Providers.OpenRouter.TTS
       Rake.Providers.XAI.Imagine
       Rake.Providers.XAI.Chat
       Rake.Providers.XAI.TTS
@@ -126,6 +128,7 @@ library
       Rake.Providers.Chat.Responses
       Rake.Providers.Internal
       Rake.Providers.TTS.Internal
+      Rake.Providers.ElevenLabs.Types
       Rake.Providers.XAI.Imagine.Client
       Rake.Providers.XAI.Imagine.Types
       Rake.TTS.Types
@@ -160,6 +163,7 @@ test-suite ai-rake-test
       Rake.PostgresSpec
       Rake.Provider.GeminiSpec
       Rake.Provider.MediaSpec
+      Rake.Provider.SpeechSpec
       Rake.Provider.OpenAISpec
       Rake.ReplaySpec
       Rake.Provider.ResponsesRenderSpec
@@ -194,6 +198,8 @@ test-suite ai-rake-test
     , unordered-containers
     , unliftio-pool
     , yaml
+    , wai
+    , warp
 
 executable minimal-example
   import: shared_opts
