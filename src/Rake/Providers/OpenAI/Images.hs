@@ -79,13 +79,14 @@ data OpenAIImageRequest = OpenAIImageRequest
     , quality :: Maybe Text
     , size :: Maybe Text
     , user :: Maybe Text
+    , safetyIdentifier :: Maybe Text
     }
     deriving stock (Show, Eq, Generic)
 
 defaultOpenAIImageRequest :: Text -> OpenAIImageRequest
 defaultOpenAIImageRequest prompt =
     OpenAIImageRequest
-        { model = "gpt-image-2"
+        { model = "gpt-image-2.5-flare"
         , prompt
         , inputImages = []
         , mask = Nothing
@@ -98,10 +99,11 @@ defaultOpenAIImageRequest prompt =
         , quality = Nothing
         , size = Nothing
         , user = Nothing
+        , safetyIdentifier = Nothing
         }
 
 instance ToJSON OpenAIImageRequest where
-    toJSON OpenAIImageRequest{model, prompt, inputImages, mask, background, inputFidelity, moderation, n, outputCompression, outputFormat, quality, size, user} =
+    toJSON OpenAIImageRequest{model, prompt, inputImages, mask, background, inputFidelity, moderation, n, outputCompression, outputFormat, quality, size, user, safetyIdentifier} =
         object $
             [ "model" .= model
             , "prompt" .= prompt
@@ -118,6 +120,7 @@ instance ToJSON OpenAIImageRequest where
                     , ("quality" .=) <$> quality
                     , ("size" .=) <$> size
                     , ("user" .=) <$> user
+                    , ("safety_identifier" .=) <$> safetyIdentifier
                     ]
 
 type OpenAIImagesAPI =
@@ -191,13 +194,15 @@ generateOpenAIImage OpenAIImagesSettings{apiKey, baseUrl, organizationId, projec
                 pure response
 
 validateOpenAIImageRequest :: OpenAIImageRequest -> Either RakeError ()
-validateOpenAIImageRequest OpenAIImageRequest{model, inputImages, mask, background, inputFidelity}
+validateOpenAIImageRequest OpenAIImageRequest{model, inputImages, mask, background, inputFidelity, outputFormat}
     | null inputImages && isJust mask =
         Left (LlmExpectationError "OpenAI image masks require at least one input image")
     | null inputImages && isJust inputFidelity =
         Left (LlmExpectationError "OpenAI inputFidelity requires at least one input image")
-    | isGPTImage2Model model && background == Just "transparent" =
-        Left (LlmExpectationError "OpenAI gpt-image-2 does not support transparent backgrounds")
+    | background == Just "transparent"
+    , Just format <- outputFormat
+    , format `notElem` (["png", "webp"] :: [Text]) =
+        Left (LlmExpectationError "OpenAI transparent backgrounds require png or webp output")
     | isGPTImage2Model model && isJust inputFidelity =
         Left (LlmExpectationError "OpenAI gpt-image-2 automatically uses high-fidelity input images and does not support inputFidelity")
     | otherwise =

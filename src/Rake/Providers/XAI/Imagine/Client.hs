@@ -59,6 +59,7 @@ generateXAIImage
     -> XAIImagineImageRequest
     -> Eff es ImageGenerationResponse
 generateXAIImage settings request@XAIImagineImageRequest{inputImages} = do
+    either throwError pure (validateXAIImagineImageRequest request)
     let requestBody = toJSON request
     responseValue <-
         runImageRequest

@@ -3,6 +3,7 @@ module Rake.Providers.XAI.Imagine.Types
     , defaultXAIImagineSettings
     , XAIImagineImageRequest (..)
     , defaultXAIImagineImageRequest
+    , validateXAIImagineImageRequest
     , XAIImagineVideoRequest (..)
     , defaultXAIImagineVideoRequest
     , validateXAIImagineVideoRequest
@@ -40,23 +41,25 @@ data XAIImagineImageRequest = XAIImagineImageRequest
     , aspectRatio :: Maybe Text
     , resolution :: Maybe Text
     , responseFormat :: Maybe Text
+    , quality :: Maybe Text
     }
     deriving stock (Show, Eq, Generic)
 
 defaultXAIImagineImageRequest :: Text -> XAIImagineImageRequest
 defaultXAIImagineImageRequest prompt =
     XAIImagineImageRequest
-        { model = "grok-imagine-image"
+        { model = "grok-imagine-image-2.0"
         , prompt
         , inputImages = []
         , n = Nothing
         , aspectRatio = Nothing
         , resolution = Nothing
         , responseFormat = Nothing
+        , quality = Just "low"
         }
 
 instance ToJSON XAIImagineImageRequest where
-    toJSON XAIImagineImageRequest{model, prompt, inputImages, n, aspectRatio, resolution, responseFormat} =
+    toJSON XAIImagineImageRequest{model, prompt, inputImages, n, aspectRatio, resolution, responseFormat, quality} =
         object $
             [ "model" .= model
             , "prompt" .= prompt
@@ -67,6 +70,7 @@ instance ToJSON XAIImagineImageRequest where
                     , ("aspect_ratio" .=) <$> aspectRatio
                     , ("resolution" .=) <$> resolution
                     , ("response_format" .=) <$> responseFormat
+                    , ("quality" .=) <$> quality
                     ]
       where
         imageFields = case inputImages of
@@ -76,6 +80,19 @@ instance ToJSON XAIImagineImageRequest where
                 ["image" .= xaiImageReferenceValue singleImage]
             manyImages ->
                 ["images" .= map xaiImageReferenceValue manyImages]
+
+validateXAIImagineImageRequest :: XAIImagineImageRequest -> Either RakeError ()
+validateXAIImagineImageRequest XAIImagineImageRequest{model, quality}
+    | Just value <- quality
+    , value `notElem` (["low", "medium", "auto"] :: [Text]) =
+        Left (LlmExpectationError "xAI image quality must be low, medium, or auto")
+    | isJust quality
+    , model
+        `elem` (["grok-imagine-image", "grok-imagine-image-pro", "grok-imagine-image-quality"] :: [Text]) =
+        Left
+            (LlmExpectationError ("xAI image model " <> toString model <> " does not support quality"))
+    | otherwise =
+        Right ()
 
 data XAIImagineVideoRequest = XAIImagineVideoRequest
     { model :: Text

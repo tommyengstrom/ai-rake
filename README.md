@@ -214,10 +214,14 @@ main = do
 
 Validation notes:
 
+- OpenAI image requests default to `gpt-image-2.5-flare` with automatic quality. `gpt-image-2.5-sunburst` is also available for precise editing. Use `--quality=auto|low|medium|high|xhigh|max`; `xhigh` and `max` require a 2.5 model.
+- xAI image requests default to `grok-imagine-image-2.0` with explicit `low` quality for both generation and editing. Use `--quality=low|medium|auto` to override it. The legacy `grok-imagine-image` model does not support quality; library callers selecting it must also set `quality = Nothing`.
 - OpenAI image requests default to the lower documented moderation level, `low`; use `--moderation=auto` or `OpenAIImageModerationAuto` for standard filtering.
 - Gemini image requests default adjustable safety settings to `OFF`; Gemini Veo defaults `personGeneration` to `allow_all` for text-to-video and `allow_adult` for image-based requests.
 - OpenAI `mask` and `inputFidelity` require at least one input image.
-- OpenAI `gpt-image-2` does not support transparent backgrounds or explicit `inputFidelity`.
+- OpenAI transparent backgrounds require PNG or WebP output (PNG is the default). Transparency on `gpt-image-2` is a provider preview feature. Explicit `inputFidelity` remains unsupported for `gpt-image-2`.
+- OpenAI `safetyIdentifier` / `--safety-identifier` sends a privacy-preserving end-user identifier, up to 128 characters. The deprecated `user` / `--user` remains available; OpenAI gives a nonempty safety identifier precedence.
+- Image responses retain optional `model`, `outputFormat`, `size`, `quality`, `background`, and the original `usage` JSON object, including provider-specific cost fields. Each generated image also retains its optional `mimeType`. Gemini's `modelVersion` and `usageMetadata` map to the shared model and usage fields.
 - xAI's documented public Imagine API does not expose a request-side spicy mode or moderation-level option.
 - xAI `videoUrl` requests are edit operations and cannot be combined with `duration`, `aspectRatio`, or `resolution`.
 - xAI video requests may set `imageUrl` or `videoUrl`, but not both.
@@ -272,14 +276,14 @@ Each CLI has a default model. Select another with `-m MODEL` or `--model MODEL`.
 | CLI | Default | Other supported models |
 | --- | --- | --- |
 | `rake-decide` | `typesafe/jev-latest` | `typesafe/jev-1.14.0`, `typesafe/jev-1.13.0`, `typesafe/jev-preview` |
-| `rake-image` | `xai/grok-imagine-image` | `openai/gpt-image-2`, `google/gemini-2.5-flash-image` |
+| `rake-image` | `xai/grok-imagine-image-2.0` (low quality) | `openai/gpt-image-2.5-flare`, `openai/gpt-image-2.5-sunburst`, both 2.5 models' `-2026-09-08` snapshots, `openai/gpt-image-2`, `xai/grok-imagine-image`, `google/gemini-2.5-flash-image` |
 | `rake-video` | `xai/grok-imagine-video` | `google/veo-3.1-generate-preview` |
 | `rake-tts` | `xai/tts` | `openai/gpt-4o-mini-tts`, `openai/tts-1`, `openai/tts-1-hd` |
 
 Model names are case-sensitive. An exact `provider/model` match takes priority.
 Otherwise, the model part must uniquely match a catalog entry, even when a
-provider prefix was supplied. For example, `-m gpt-image-2` and
-`-m openai/gpt-image-2` select the same model. Unknown or ambiguous names fail
+provider prefix was supplied. For example, `-m gpt-image-2.5-flare` and
+`-m openai/gpt-image-2.5-flare` select the same model. Unknown or ambiguous names fail
 before reading input or making a request. `xai/tts` names xAI's fixed speech
 service; its API does not take a model field.
 
@@ -292,7 +296,8 @@ rake-decide noul "Is an error visible in images.screen?" --image screen=screensh
 cat message.txt | rake-decide score Low Medium High -q "How urgent?"
 
 rake-image "a man riding a horse on the moon"
-rake-image -m openai/gpt-image-2 "a watercolor lighthouse"
+rake-image --quality medium "a watercolor lighthouse"
+rake-image -m openai/gpt-image-2.5-flare --quality=high "a watercolor lighthouse"
 
 rake-video "She walks away" --image girl.jpg
 rake-video --extend clip.mp4 "continue the scene for 5 more seconds"
@@ -330,7 +335,7 @@ Use `-m MODEL --help` for the selected provider's controls:
 ```bash
 rake-decide --help
 rake-image --help
-rake-image -m openai/gpt-image-2 --help
+rake-image -m openai/gpt-image-2.5-flare --help
 rake-image -m google/gemini-2.5-flash-image --help
 rake-video -m google/veo-3.1-generate-preview --help
 rake-tts -m openai/gpt-4o-mini-tts --help

@@ -8,6 +8,9 @@ and this project adheres to the
 
 ## Unreleased
 
+- Updated OpenAI image defaults to `gpt-image-2.5-flare` and xAI defaults to `grok-imagine-image-2.0` with explicit low quality. The image CLI also supports Sunburst and both 2.5 dated snapshots, retains legacy models, and accepts `--quality VALUE` or `--quality=VALUE` for both providers.
+- Added `quality` to `XAIImagineImageRequest` and `safetyIdentifier` to `OpenAIImageRequest`, with a corresponding `--safety-identifier` CLI option. Legacy Grok requires quality to be omitted. Transparent OpenAI output now accepts PNG/WebP, including the `gpt-image-2` preview capability.
+- Added optional `model`, `outputFormat`, `size`, `quality`, `background`, and `usage` fields to `ImageGenerationResponse`, plus `mimeType` to `GeneratedImage`. Usage preserves provider-specific JSON, including xAI cost ticks; Gemini image MIME and response metadata are retained. Callers constructing these public records directly must supply the added fields; old response JSON remains readable.
 - Added typed OpenAI and xAI Responses reasoning-effort settings, omitted by default. OpenAI supports `none`, `low`, `medium`, `high`, `xhigh`, and `max`; xAI supports `none`, `low`, `medium`, and `high`.
 - Migrated Gemini Interactions requests, responses, structured output, and streaming to the current step-based API schema.
 - Changed canonical conversation storage to an append-only agent log. Provider-native items now carry `ItemPending` or `ItemCompleted`, and unresolved tool calls or incomplete assistant output are persisted as ordinary history instead of being hidden in transient loop state.

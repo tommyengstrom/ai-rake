@@ -1,22 +1,130 @@
+{-# LANGUAGE NoOverloadedLists #-}
+
 module Rake.Provider.MediaSpec where
 
 import Data.Aeson
+import Data.Aeson.KeyMap qualified as KM
 import Effectful
 import Effectful.Error.Static
+import Network.HTTP.Types (hContentType, status200)
+import Network.Wai qualified as Wai
+import Network.Wai.Handler.Warp (testWithApplication)
 import Rake.Error (RakeError (..))
 import Rake.Media
 import Rake.Providers.Gemini.Images
 import Rake.Providers.Gemini.Videos
 import Rake.Providers.OpenAI.Images
+import Rake.Providers.OpenAI.Images qualified as OpenAI
 import Rake.Providers.OpenAI.TTS
 import Rake.Providers.XAI.Imagine
+import Rake.Providers.XAI.Imagine qualified as XAI
 import Rake.Providers.XAI.TTS
 import Relude
 import Test.Hspec
+import Test.QuickCheck (Gen, arbitrary, elements, forAll, listOf, oneof, (===))
 
 spec :: Spec
 spec = describe "media providers" $ do
     describe "image response parsing" $ do
+        it "round-trips generated image payloads and MIME metadata"
+            $ forAll genGeneratedImage
+            $ \image ->
+                fromJSON (toJSON image) === Success image
+
+        it "round-trips image responses with optional provider metadata"
+            $ forAll genImageGenerationResponse
+            $ \response ->
+                fromJSON (toJSON response) === Success response
+
+        it "preserves OpenAI output metadata and nested token usage" $ do
+            let responseValue :: Value
+                responseValue =
+                    object
+                        [ "created" .= (123 :: Int)
+                        , "model" .= ("gpt-image-2.5-flare" :: Text)
+                        , "data" .= [object ["b64_json" .= ("YWJj" :: Text)]]
+                        , "output_format" .= ("webp" :: Text)
+                        , "size" .= ("1536x864" :: Text)
+                        , "quality" .= ("max" :: Text)
+                        , "background" .= ("transparent" :: Text)
+                        , "usage"
+                            .= object
+                                [ "input_tokens" .= (12 :: Int)
+                                , "output_tokens" .= (34 :: Int)
+                                , "input_tokens_details" .= object ["image_tokens" .= (8 :: Int)]
+                                ]
+                        ]
+            (toJSON <$> fromJSON @ImageGenerationResponse responseValue)
+                `shouldBe` Success responseValue
+
+        it "preserves xAI MIME types, resolved models, and exact cost ticks" $ do
+            let responseValue :: Value
+                responseValue =
+                    object
+                        [ "model" .= ("grok-imagine-image-2.0" :: Text)
+                        , "data"
+                            .= [ object
+                                    ["url" .= ("https://example.com/image" :: Text), "mime_type" .= ("image/jpeg" :: Text)]
+                               ]
+                        , "usage"
+                            .= object
+                                [ "cost_in_usd_ticks" .= (9007199254740993 :: Integer)
+                                , "input_tokens" .= Null
+                                , "provider_extension" .= object ["value" .= True]
+                                ]
+                        ]
+            (toJSON <$> fromJSON @ImageGenerationResponse responseValue)
+                `shouldBe` Success responseValue
+
+        it "normalizes Gemini model and usage metadata and snake-case inline images" $ do
+            let usageValue :: Value
+                usageValue = object ["totalTokenCount" .= (42 :: Int)]
+                responseValue :: Value
+                responseValue =
+                    object
+                        [ "modelVersion" .= ("gemini-2.5-flash-image" :: Text)
+                        , "usageMetadata" .= usageValue
+                        , "candidates"
+                            .= [ object
+                                    [ "content"
+                                        .= object
+                                            [ "parts"
+                                                .= [ object
+                                                        [ "inline_data"
+                                                            .= object
+                                                                ["mime_type" .= ("image/png" :: Text), "data" .= ("YWJj" :: Text)]
+                                                        ]
+                                                   ]
+                                            ]
+                                    ]
+                               ]
+                        ]
+                expectedValue :: Value
+                expectedValue =
+                    object
+                        [ "model" .= ("gemini-2.5-flash-image" :: Text)
+                        , "usage" .= usageValue
+                        , "data" .= [object ["b64_json" .= ("YWJj" :: Text), "mime_type" .= ("image/png" :: Text)]]
+                        ]
+            (toJSON <$> fromJSON @ImageGenerationResponse responseValue)
+                `shouldBe` Success expectedValue
+
+        it "accepts null optional response metadata" $ do
+            let responseValue :: Value
+                responseValue =
+                    object
+                        [ "created" .= Null
+                        , "data" .= ([] :: [Value])
+                        , "model" .= Null
+                        , "usage" .= Null
+                        , "output_format" .= Null
+                        , "size" .= Null
+                        , "quality" .= Null
+                        , "background" .= Null
+                        ]
+            (toJSON <$> fromJSON @ImageGenerationResponse responseValue)
+                `shouldBe` Success (object ["data" .= ([] :: [Value])])
+
         it "parses GPT Image responses with base64 payloads" $ do
             let responseValue =
                     object
@@ -35,11 +143,18 @@ spec = describe "media providers" $ do
                 `shouldBe` Success
                     ImageGenerationResponse
                         { created = Just 123
+                        , model = Nothing
+                        , outputFormat = Nothing
+                        , size = Nothing
+                        , quality = Nothing
+                        , background = Nothing
+                        , usage = Nothing
                         , images =
                             [ GeneratedImage
                                 { url = Nothing
                                 , b64Json = Just "YWJj"
                                 , revisedPrompt = Just "A refined prompt"
+                                , mimeType = Nothing
                                 }
                             ]
                         }
@@ -60,11 +175,18 @@ spec = describe "media providers" $ do
                 `shouldBe` Success
                     ImageGenerationResponse
                         { created = Nothing
+                        , model = Nothing
+                        , outputFormat = Nothing
+                        , size = Nothing
+                        , quality = Nothing
+                        , background = Nothing
+                        , usage = Nothing
                         , images =
                             [ GeneratedImage
                                 { url = Just "https://example.com/image.png"
                                 , b64Json = Nothing
                                 , revisedPrompt = Nothing
+                                , mimeType = Nothing
                                 }
                             ]
                         }
@@ -98,11 +220,18 @@ spec = describe "media providers" $ do
                 `shouldBe` Success
                     ImageGenerationResponse
                         { created = Nothing
+                        , model = Nothing
+                        , outputFormat = Nothing
+                        , size = Nothing
+                        , quality = Nothing
+                        , background = Nothing
+                        , usage = Nothing
                         , images =
                             [ GeneratedImage
                                 { url = Nothing
                                 , b64Json = Just "YWJj"
                                 , revisedPrompt = Nothing
+                                , mimeType = Just "image/jpeg"
                                 }
                             ]
                         }
@@ -137,11 +266,18 @@ spec = describe "media providers" $ do
                 `shouldBe` Success
                     ImageGenerationResponse
                         { created = Nothing
+                        , model = Nothing
+                        , outputFormat = Nothing
+                        , size = Nothing
+                        , quality = Nothing
+                        , background = Nothing
+                        , usage = Nothing
                         , images =
                             [ GeneratedImage
                                 { url = Nothing
                                 , b64Json = Just "YWJj"
                                 , revisedPrompt = Nothing
+                                , mimeType = Just "image/png"
                                 }
                             ]
                         }
@@ -305,7 +441,8 @@ spec = describe "media providers" $ do
             case fromJSON responseValue of
                 Error err ->
                     expectationFailure err
-                Success operation@GeminiVideoOperation{done = True, response = Just videoResponse, error = Nothing} -> do
+                Success
+                    operation@GeminiVideoOperation{done = True, response = Just videoResponse, error = Nothing} -> do
                     case videoResponse of
                         GeminiGenerateVideoResponse{generatedVideos = []} ->
                             pure ()
@@ -404,10 +541,34 @@ spec = describe "media providers" $ do
             geminiVideoOperationFailureMessage operation `shouldBe` Nothing
 
     describe "request encoding" $ do
-        it "encodes default OpenAI image requests for gpt-image-2" $ do
+        it "defaults to Grok 2.0 with explicit low quality" $ do
+            toJSON (defaultXAIImagineImageRequest "draw a lighthouse")
+                `shouldBe` object
+                    [ "model" .= ("grok-imagine-image-2.0" :: Text)
+                    , "prompt" .= ("draw a lighthouse" :: Text)
+                    , "quality" .= ("low" :: Text)
+                    ]
+
+        it "forwards both OpenAI identifiers without changing provider precedence" $ do
+            let request :: OpenAIImageRequest
+                request =
+                    (defaultOpenAIImageRequest "draw a lighthouse")
+                        { user = Just "legacy-user"
+                        , safetyIdentifier = Just "hashed-user"
+                        }
+            toJSON request
+                `shouldBe` object
+                    [ "model" .= ("gpt-image-2.5-flare" :: Text)
+                    , "prompt" .= ("draw a lighthouse" :: Text)
+                    , "moderation" .= ("low" :: Text)
+                    , "user" .= ("legacy-user" :: Text)
+                    , "safety_identifier" .= ("hashed-user" :: Text)
+                    ]
+
+        it "encodes default OpenAI image requests for gpt-image-2.5-flare" $ do
             toJSON (defaultOpenAIImageRequest "draw a lighthouse")
                 `shouldBe` object
-                    [ "model" .= ("gpt-image-2" :: Text)
+                    [ "model" .= ("gpt-image-2.5-flare" :: Text)
                     , "prompt" .= ("draw a lighthouse" :: Text)
                     , "moderation" .= ("low" :: Text)
                     ]
@@ -419,7 +580,7 @@ spec = describe "media providers" $ do
                     }
                 )
                 `shouldBe` object
-                    [ "model" .= ("gpt-image-2" :: Text)
+                    [ "model" .= ("gpt-image-2.5-flare" :: Text)
                     , "prompt" .= ("draw a lighthouse" :: Text)
                     , "moderation" .= ("auto" :: Text)
                     ]
@@ -439,7 +600,7 @@ spec = describe "media providers" $ do
 
             toJSON request
                 `shouldBe` object
-                    [ "model" .= ("gpt-image-2" :: Text)
+                    [ "model" .= ("gpt-image-2.5-flare" :: Text)
                     , "prompt" .= ("add a moon" :: Text)
                     , "images"
                         .= ( [ object ["image_url" .= ("https://example.com/base.png" :: Text)]
@@ -464,6 +625,7 @@ spec = describe "media providers" $ do
                         , aspectRatio = Just "16:9"
                         , resolution = Just "2k"
                         , responseFormat = Just "b64_json"
+                        , quality = Nothing
                         }
 
             toJSON request
@@ -540,6 +702,7 @@ spec = describe "media providers" $ do
                         , aspectRatio = Nothing
                         , resolution = Nothing
                         , responseFormat = Nothing
+                        , quality = Nothing
                         }
 
             toJSON request
@@ -567,6 +730,7 @@ spec = describe "media providers" $ do
                         , aspectRatio = Nothing
                         , resolution = Nothing
                         , responseFormat = Nothing
+                        , quality = Nothing
                         }
 
             toJSON request
@@ -840,6 +1004,88 @@ spec = describe "media providers" $ do
                     , "resolution" .= ("480p" :: Text)
                     ]
 
+    describe "image HTTP requests" $ do
+        forM_
+            ["gpt-image-2", "gpt-image-2-2026-04-21", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"] $ \imageModel ->
+            forM_ [Nothing, Just "png", Just "webp"] $ \format ->
+                forM_ [[], [OpenAIImageUrl "https://example.com/input.png"]] $ \inputImages ->
+                    it
+                        ( "sends transparent "
+                            <> toString imageModel
+                            <> " with "
+                            <> show format
+                            <> " and "
+                            <> show (length inputImages)
+                            <> " inputs"
+                        ) $ do
+                        let request :: OpenAIImageRequest
+                            request =
+                                (defaultOpenAIImageRequest "draw a transparent icon")
+                                    { model = imageModel
+                                    , background = Just "transparent"
+                                    , outputFormat = format
+                                    , inputImages
+                                    , safetyIdentifier = Just "hashed-user"
+                                    }
+                        (result, requests) <- captureImageRequest $ \baseUrl ->
+                            runLlmError
+                                $ generateOpenAIImage
+                                    (defaultOpenAIImagesSettings "test-key"){OpenAI.baseUrl = baseUrl}
+                                    request
+                        result `shouldSatisfy` isRight
+                        requests
+                            `shouldBe` [
+                                           ( if null inputImages then "/v1/images/generations" else "/v1/images/edits"
+                                           , toJSON request
+                                           )
+                                       ]
+
+        forM_ [Nothing, Just "low", Just "medium", Just "auto"] $ \quality ->
+            forM_ [[], ["https://example.com/input.png"]] $ \inputImages ->
+                it
+                    ( "sends Grok quality "
+                        <> show quality
+                        <> " with "
+                        <> show (length inputImages)
+                        <> " inputs"
+                    ) $ do
+                    let request :: XAIImagineImageRequest
+                        request = (defaultXAIImagineImageRequest "draw a lighthouse"){XAI.quality = quality, inputImages}
+                        expectedBody :: Value
+                        expectedBody =
+                            object
+                                $ ["model" .= ("grok-imagine-image-2.0" :: Text), "prompt" .= ("draw a lighthouse" :: Text)]
+                                <> maybe [] (\value -> ["quality" .= value]) quality
+                                <> [ "image" .= object ["url" .= imageUrl, "type" .= ("image_url" :: Text)]
+                                   | imageUrl <- inputImages
+                                   ]
+                    (result, requests) <- captureImageRequest $ \baseUrl ->
+                        runLlmError
+                            $ generateXAIImage (defaultXAIImagineSettings "test-key"){XAI.baseUrl = baseUrl} request
+                    result `shouldSatisfy` isRight
+                    requests
+                        `shouldBe` [ (if null inputImages then "/v1/images/generations" else "/v1/images/edits", expectedBody)
+                                   ]
+
+        it "allows legacy Grok when quality is omitted" $ do
+            let request :: XAIImagineImageRequest
+                request =
+                    (defaultXAIImagineImageRequest "draw a lighthouse")
+                        { model = "grok-imagine-image"
+                        , XAI.quality = Nothing
+                        }
+            (result, requests) <- captureImageRequest $ \baseUrl ->
+                runLlmError
+                    $ generateXAIImage (defaultXAIImagineSettings "test-key"){XAI.baseUrl = baseUrl} request
+            result `shouldSatisfy` isRight
+            requests
+                `shouldBe` [
+                               ( "/v1/images/generations"
+                               , object
+                                    ["model" .= ("grok-imagine-image" :: Text), "prompt" .= ("draw a lighthouse" :: Text)]
+                               )
+                           ]
+
     describe "request validation" $ do
         it "fails fast on OpenAI masks without input images" $ do
             let request =
@@ -867,10 +1113,12 @@ spec = describe "media providers" $ do
             result
                 `shouldBe` Left (LlmExpectationError "OpenAI inputFidelity requires at least one input image")
 
-        it "fails fast on transparent backgrounds for gpt-image-2" $ do
-            let request =
+        it "fails fast on transparent backgrounds with JPEG output" $ do
+            let request :: OpenAIImageRequest
+                request =
                     (defaultOpenAIImageRequest "draw a transparent icon")
-                        { background = Just "transparent"
+                        { OpenAI.background = Just "transparent"
+                        , outputFormat = Just "jpeg"
                         }
 
             result <-
@@ -878,12 +1126,39 @@ spec = describe "media providers" $ do
                     $ generateOpenAIImage (defaultOpenAIImagesSettings "test-key") request
 
             result
-                `shouldBe` Left (LlmExpectationError "OpenAI gpt-image-2 does not support transparent backgrounds")
+                `shouldBe` Left (LlmExpectationError "OpenAI transparent backgrounds require png or webp output")
+
+        it "rejects invalid Grok quality before HTTP" $ do
+            result <-
+                runLlmError
+                    $ generateXAIImage
+                        (defaultXAIImagineSettings "test-key"){XAI.baseUrl = "invalid URL"}
+                        (defaultXAIImagineImageRequest "draw a lighthouse"){XAI.quality = Just "high"}
+            result
+                `shouldBe` Left (LlmExpectationError "xAI image quality must be low, medium, or auto")
+
+        forM_
+            (["grok-imagine-image", "grok-imagine-image-pro", "grok-imagine-image-quality"] :: [Text]) $ \legacyModel ->
+            it ("rejects quality on legacy model " <> toString legacyModel) $ do
+                result <-
+                    runLlmError
+                        $ generateXAIImage
+                            (defaultXAIImagineSettings "test-key"){XAI.baseUrl = "invalid URL"}
+                            (defaultXAIImagineImageRequest "draw a lighthouse")
+                                { model = legacyModel
+                                , XAI.quality = Just "low"
+                                }
+                result
+                    `shouldBe` Left
+                        ( LlmExpectationError
+                            ("xAI image model " <> toString legacyModel <> " does not support quality")
+                        )
 
         it "fails fast on explicit input fidelity for gpt-image-2" $ do
             let request =
                     (defaultOpenAIImageRequest "sharpen this")
-                        { inputImages = [OpenAIImageUrl "https://example.com/base.png"]
+                        { model = "gpt-image-2"
+                        , inputImages = [OpenAIImageUrl "https://example.com/base.png"]
                         , inputFidelity = Just "high"
                         }
 
@@ -892,7 +1167,10 @@ spec = describe "media providers" $ do
                     $ generateOpenAIImage (defaultOpenAIImagesSettings "test-key") request
 
             result
-                `shouldBe` Left (LlmExpectationError "OpenAI gpt-image-2 automatically uses high-fidelity input images and does not support inputFidelity")
+                `shouldBe` Left
+                    ( LlmExpectationError
+                        "OpenAI gpt-image-2 automatically uses high-fidelity input images and does not support inputFidelity"
+                    )
 
         it "fails fast on OpenAI TTS instructions for unsupported models" $ do
             let settings :: OpenAITTSSettings '[Error RakeError, IOE]
@@ -992,6 +1270,70 @@ spec = describe "media providers" $ do
                     ( LlmExpectationError
                         "Gemini Veo first/last frame interpolation requires durationSeconds=8"
                     )
+
+captureImageRequest
+    :: (Text -> IO (Either RakeError ImageGenerationResponse))
+    -> IO (Either RakeError ImageGenerationResponse, [(ByteString, Value)])
+captureImageRequest action = do
+    requests <- newIORef []
+    let application :: Wai.Application
+        application request respond = do
+            body <- Wai.strictRequestBody request
+            modifyIORef' requests (<> [(Wai.rawPathInfo request, fromMaybe Null (decode body))])
+            respond
+                $ Wai.responseLBS
+                    status200
+                    [(hContentType, "application/json")]
+                    (encode (object ["data" .= [object ["b64_json" .= ("YWJj" :: Text)]]]))
+    result <- testWithApplication (pure application) $ \port ->
+        action ("http://127.0.0.1:" <> show port)
+    (result,) <$> readIORef requests
+
+genOptionalText :: Gen (Maybe Text)
+genOptionalText = fmap toText <$> arbitrary @(Maybe String)
+
+genGeneratedImage :: Gen GeneratedImage
+genGeneratedImage = do
+    payload <- toText <$> arbitrary @String
+    (url, b64Json) <-
+        elements [(Just payload, Nothing), (Nothing, Just payload), (Just payload, Just payload)]
+    revisedPrompt <- genOptionalText
+    mimeType <- genOptionalText
+    pure GeneratedImage{url, b64Json, revisedPrompt, mimeType}
+
+genImageGenerationResponse :: Gen ImageGenerationResponse
+genImageGenerationResponse = do
+    created <- arbitrary
+    images <- listOf genGeneratedImage
+    model <- genOptionalText
+    outputFormat <- genOptionalText
+    size <- genOptionalText
+    quality <- genOptionalText
+    background <- genOptionalText
+    ticks <- arbitrary @Integer
+    usage <-
+        oneof
+            [ pure Nothing
+            , pure
+                ( Just
+                    ( KM.fromList
+                        [ ("cost_in_usd_ticks", toJSON ticks)
+                        , ("input_tokens_details", object ["text_tokens" .= ticks])
+                        ]
+                    )
+                )
+            ]
+    pure
+        ImageGenerationResponse
+            { created
+            , images
+            , model
+            , outputFormat
+            , size
+            , quality
+            , background
+            , usage
+            }
 
 runLlmError :: Eff '[Error RakeError, IOE] a -> IO (Either RakeError a)
 runLlmError =

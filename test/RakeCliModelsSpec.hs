@@ -62,7 +62,7 @@ spec = describe "CLI model selection" $ do
 
     describe "catalogs and help" $ do
         it "uses the agreed defaults" $ do
-            qualifiedModel (NonEmpty.head imageModels) `shouldBe` "xai/grok-imagine-image"
+            qualifiedModel (NonEmpty.head imageModels) `shouldBe` "xai/grok-imagine-image-2.0"
             qualifiedModel (NonEmpty.head videoModels) `shouldBe` "xai/grok-imagine-video"
             qualifiedModel (NonEmpty.head speechModels) `shouldBe` "xai/tts"
             qualifiedModel (NonEmpty.head decideModels) `shouldBe` "typesafe/jev-latest"

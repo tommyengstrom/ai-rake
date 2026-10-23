@@ -61,6 +61,7 @@ data OpenAIGenImageOptions = OpenAIGenImageOptions
     , openAIBackground :: Maybe Text
     , openAIModeration :: Maybe OpenAIImageModeration
     , openAIUser :: Maybe Text
+    , openAISafetyIdentifier :: Maybe Text
     , openAIInputImageSources :: [Text]
     , openAIInputFileIds :: [Text]
     , openAIMaskSource :: Maybe Text
@@ -76,6 +77,7 @@ data XAIGenImageOptions = XAIGenImageOptions
     , xaiAspectRatio :: Maybe Text
     , xaiResolution :: Maybe Text
     , xaiResponseFormat :: Text
+    , xaiQuality :: Maybe Text
     }
     deriving stock (Show, Eq)
 
@@ -123,7 +125,7 @@ defaultOpenAIGenImageOptions =
                 , commonOutputPath = Nothing
                 , commonImageCount = 1
                 }
-        , openAIModel = "gpt-image-2"
+        , openAIModel = "gpt-image-2.5-flare"
         , openAISize = Nothing
         , openAIQuality = Nothing
         , openAIOutputFormat = "png"
@@ -131,6 +133,7 @@ defaultOpenAIGenImageOptions =
         , openAIBackground = Nothing
         , openAIModeration = Just OpenAIImageModerationLow
         , openAIUser = Nothing
+        , openAISafetyIdentifier = Nothing
         , openAIInputImageSources = []
         , openAIInputFileIds = []
         , openAIMaskSource = Nothing
@@ -147,11 +150,12 @@ defaultXAIGenImageOptions =
                 , commonOutputPath = Nothing
                 , commonImageCount = 1
                 }
-        , xaiModel = "grok-imagine-image"
+        , xaiModel = "grok-imagine-image-2.0"
         , xaiInputImageSources = []
         , xaiAspectRatio = Nothing
         , xaiResolution = Nothing
         , xaiResponseFormat = "b64_json"
+        , xaiQuality = Just "low"
         }
 
 defaultBanana2GenImageOptions :: Banana2GenImageOptions
@@ -203,6 +207,7 @@ runGenImage = \case
             , openAIBackground
             , openAIModeration
             , openAIUser
+            , openAISafetyIdentifier
             , openAIInputImageSources
             , openAIInputFileIds
             , openAIMaskSource
@@ -246,6 +251,7 @@ runGenImage = \case
                                                 , quality = openAIQuality
                                                 , size = openAISize
                                                 , user = openAIUser
+                                                , safetyIdentifier = openAISafetyIdentifier
                                                 }
                                     responseResult <- runProvider (generateOpenAIImage settings request)
                                     handleImageResponse commonOutputPath commonPromptText responseResult
@@ -258,6 +264,7 @@ runGenImage = \case
             , xaiAspectRatio
             , xaiResolution
             , xaiResponseFormat
+            , xaiQuality
             } -> do
             maybeApiKey <- lookupEnv "XAI_API_KEY"
             case maybeApiKey of
@@ -280,6 +287,7 @@ runGenImage = \case
                                         , aspectRatio = xaiAspectRatio
                                         , resolution = xaiResolution
                                         , responseFormat = Just xaiResponseFormat
+                                        , quality = xaiQuality
                                         }
                             responseResult <- runProvider (generateXAIImage settings request)
                             handleImageResponse commonOutputPath commonPromptText responseResult
@@ -338,8 +346,13 @@ runGenImage = \case
 
 imageModels :: NonEmpty (CliModel GenImageProvider)
 imageModels =
-    CliModel "xai" "grok-imagine-image" GenImageProviderXAI
-        :| [ CliModel "openai" "gpt-image-2" GenImageProviderOpenAI
+    CliModel "xai" "grok-imagine-image-2.0" GenImageProviderXAI
+        :| [ CliModel "openai" "gpt-image-2.5-flare" GenImageProviderOpenAI
+           , CliModel "openai" "gpt-image-2.5-sunburst" GenImageProviderOpenAI
+           , CliModel "openai" "gpt-image-2.5-flare-2026-09-08" GenImageProviderOpenAI
+           , CliModel "openai" "gpt-image-2.5-sunburst-2026-09-08" GenImageProviderOpenAI
+           , CliModel "openai" "gpt-image-2" GenImageProviderOpenAI
+           , CliModel "xai" "grok-imagine-image" GenImageProviderXAI
            , CliModel "google" "gemini-2.5-flash-image" GenImageProviderBanana2
            ]
 
@@ -369,6 +382,7 @@ parseGenImageArgs args =
         , "--background"
         , "--moderation"
         , "--user"
+        , "--safety-identifier"
         , "--image"
         , "--image-file-id"
         , "--mask"
@@ -431,6 +445,8 @@ parseOpenAIArgs selectedModel =
                     go commonState openAIOptions{openAIModeration = Just moderation} rest
         "--user" : userValue : rest ->
             go commonState openAIOptions{openAIUser = Just userValue} rest
+        "--safety-identifier" : identifier : rest ->
+            go commonState openAIOptions{openAISafetyIdentifier = Just identifier} rest
         "--image" : imageSource : rest ->
             go commonState (appendOpenAIInputImageSource openAIOptions imageSource) rest
         "--image-file-id" : fileId : rest ->
@@ -472,6 +488,8 @@ parseOpenAIArgs selectedModel =
                         go commonState openAIOptions{openAIModeration = Just moderation} rest
             | Just userValue <- T.stripPrefix "--user=" arg ->
                 go commonState openAIOptions{openAIUser = Just userValue} rest
+            | Just identifier <- T.stripPrefix "--safety-identifier=" arg ->
+                go commonState openAIOptions{openAISafetyIdentifier = Just identifier} rest
             | Just imageSource <- T.stripPrefix "--image=" arg ->
                 go commonState (appendOpenAIInputImageSource openAIOptions imageSource) rest
             | Just fileId <- T.stripPrefix "--image-file-id=" arg ->
@@ -506,8 +524,14 @@ parseOpenAIArgs selectedModel =
 
 parseXAIArgs :: Text -> [Text] -> ParseGenImageArgsResult
 parseXAIArgs selectedModel =
-    go defaultCommonParseState defaultXAIGenImageOptions{xaiModel = selectedModel}
+    go
+        defaultCommonParseState
+        defaultXAIGenImageOptions
+            { xaiModel = selectedModel
+            , xaiQuality = if selectedModel == "grok-imagine-image" then Nothing else Just "low"
+            }
   where
+    go :: CommonParseState -> XAIGenImageOptions -> [Text] -> ParseGenImageArgsResult
     go commonState xaiOptions = \case
         [] ->
             finalize commonState xaiOptions
@@ -541,6 +565,8 @@ parseXAIArgs selectedModel =
             go commonState xaiOptions{xaiResolution = Just resolutionValue} rest
         "--response-format" : responseFormatValue : rest ->
             go commonState xaiOptions{xaiResponseFormat = responseFormatValue} rest
+        "--quality" : qualityValue : rest ->
+            go commonState xaiOptions{xaiQuality = Just qualityValue} rest
         arg : rest
             | Just path <- T.stripPrefix "--output=" arg ->
                 go commonState{parseOutputPath = Just (toString path)} xaiOptions rest
@@ -558,14 +584,24 @@ parseXAIArgs selectedModel =
                 go commonState xaiOptions{xaiResolution = Just resolutionValue} rest
             | Just responseFormatValue <- T.stripPrefix "--response-format=" arg ->
                 go commonState xaiOptions{xaiResponseFormat = responseFormatValue} rest
+            | Just qualityValue <- T.stripPrefix "--quality=" arg ->
+                go commonState xaiOptions{xaiQuality = Just qualityValue} rest
             | "-" `T.isPrefixOf` arg ->
                 ParseGenImageArgsError ("Unknown xai option: " <> arg) GenImageHelpXAI
             | otherwise ->
                 go (appendPromptParts commonState [arg]) xaiOptions rest
 
-    finalize CommonParseState{parseOutputPath, parseImageCount, parsePromptParts} xaiOptions
+    finalize :: CommonParseState -> XAIGenImageOptions -> ParseGenImageArgsResult
+    finalize CommonParseState{parseOutputPath, parseImageCount, parsePromptParts} xaiOptions@XAIGenImageOptions{xaiQuality}
         | null parsePromptParts =
             ParseGenImageArgsError "A prompt is required." GenImageHelpXAI
+        | Just value <- xaiQuality
+        , value `notElem` (["low", "medium", "auto"] :: [Text]) =
+            ParseGenImageArgsError "xAI image quality must be low, medium, or auto" GenImageHelpXAI
+        | selectedModel == "grok-imagine-image" && isJust xaiQuality =
+            ParseGenImageArgsError
+                "xAI image model grok-imagine-image does not support quality"
+                GenImageHelpXAI
         | otherwise =
             ParseGenImageArgsSuccess
                 $ GenImageXAI
@@ -727,9 +763,9 @@ renderGenImageHelp progName topic =
                    , "  SOURCE can be a URL, a data URL, or a local image path."
                    , "  Use `"
                         <> toText progName
-                        <> " -m openai/gpt-image-2 --help`, `"
+                        <> " -m openai/gpt-image-2.5-flare --help`, `"
                         <> toText progName
-                        <> " -m xai/grok-imagine-image --help`, or `"
+                        <> " -m xai/grok-imagine-image-2.0 --help`, or `"
                         <> toText progName
                         <> " -m google/gemini-2.5-flash-image --help` for focused help."
                    , "  OPENAI_API_KEY is required for `openai`."
@@ -739,10 +775,10 @@ renderGenImageHelp progName topic =
                    , "Examples:"
                    , "  "
                         <> toText progName
-                        <> " -m xai/grok-imagine-image \"a man riding a horse on the moon\""
+                        <> " -m xai/grok-imagine-image-2.0 \"a man riding a horse on the moon\""
                    , "  "
                         <> toText progName
-                        <> " -m openai/gpt-image-2 --size=1536x1024 --quality=high \"a glass terrarium city\""
+                        <> " -m openai/gpt-image-2.5-flare --size=1536x1024 --quality=high \"a glass terrarium city\""
                    , "  "
                         <> toText progName
                         <> " -m google/gemini-2.5-flash-image --aspect-ratio=1:1 \"a tiny blue square on white background\""
@@ -750,7 +786,7 @@ renderGenImageHelp progName topic =
         GenImageHelpOpenAI ->
             T.unlines
                 $ [ "Usage:"
-                  , "  " <> toText progName <> " -m openai/gpt-image-2 [OPTIONS] PROMPT"
+                  , "  " <> toText progName <> " -m openai/gpt-image-2.5-flare [OPTIONS] PROMPT"
                   , ""
                   , "Select a model with -m; see the model list above."
                   , ""
@@ -769,18 +805,18 @@ renderGenImageHelp progName topic =
                    , "  OPENAI_API_KEY is required."
                    , ""
                    , "Examples:"
-                   , "  " <> toText progName <> " -m openai/gpt-image-2 \"a ceramic mug on linen\""
+                   , "  " <> toText progName <> " -m openai/gpt-image-2.5-flare \"a ceramic mug on linen\""
                    , "  "
                         <> toText progName
-                        <> " -m openai/gpt-image-2 --size=1536x1024 --quality=high \"a brutalist library in fog\""
+                        <> " -m openai/gpt-image-2.5-flare --size=1536x1024 --quality=high \"a brutalist library in fog\""
                    , "  "
                         <> toText progName
-                        <> " -m openai/gpt-image-2 --image=base.png --mask=mask.png \"add a moon\""
+                        <> " -m openai/gpt-image-2.5-flare --image=base.png --mask=mask.png \"add a moon\""
                    ]
         GenImageHelpXAI ->
             T.unlines
                 $ [ "Usage:"
-                  , "  " <> toText progName <> " -m xai/grok-imagine-image [OPTIONS] PROMPT"
+                  , "  " <> toText progName <> " -m xai/grok-imagine-image-2.0 [OPTIONS] PROMPT"
                   , ""
                   , "Select a model with -m; see the model list above."
                   , ""
@@ -800,13 +836,13 @@ renderGenImageHelp progName topic =
                    , "Examples:"
                    , "  "
                         <> toText progName
-                        <> " -m xai/grok-imagine-image \"a man riding a horse on the moon\""
+                        <> " -m xai/grok-imagine-image-2.0 \"a man riding a horse on the moon\""
                    , "  "
                         <> toText progName
-                        <> " -m xai/grok-imagine-image --aspect-ratio=16:9 --resolution=2k \"a floating city at sunrise\""
+                        <> " -m xai/grok-imagine-image-2.0 --aspect-ratio=16:9 --resolution=2k \"a floating city at sunrise\""
                    , "  "
                         <> toText progName
-                        <> " -m xai/grok-imagine-image --image=base.png \"turn this into a watercolor postcard\""
+                        <> " -m xai/grok-imagine-image-2.0 --image=base.png \"turn this into a watercolor postcard\""
                    ]
         GenImageHelpBanana2 ->
             T.unlines
@@ -854,12 +890,13 @@ renderGenImageHelp progName topic =
     openAIOptionLines :: [Text]
     openAIOptionLines =
         [ "  --size SIZE                  Image size, for example 1024x1024."
-        , "  --quality QUALITY            Image quality, for example low, medium, or high."
+        , "  --quality QUALITY            Quality: auto, low, medium, high; 2.5 also supports xhigh, max. Default: auto"
         , "  --output-format FORMAT       Output format. Default: png"
         , "  --output-compression N       Compression level from 0 to 100."
-        , "  --background MODE            Background mode, for example opaque or auto."
+        , "  --background MODE            Background: transparent, opaque, auto. Transparency requires png or webp."
         , "  --moderation MODE            Moderation level: low or auto. Default: low"
-        , "  --user USER_ID               User identifier for provider-side tracking."
+        , "  --safety-identifier ID       Privacy-preserving end-user identifier (up to 128 characters)."
+        , "  --user USER_ID               Deprecated; use --safety-identifier."
         , "  --image SOURCE               Repeatable. Add input image URLs or local files."
         , "  --image-file-id FILE_ID      Repeatable. Add OpenAI uploaded file ids."
         , "  --mask SOURCE                Optional mask URL or local file."
@@ -873,6 +910,7 @@ renderGenImageHelp progName topic =
         , "  --aspect-ratio RATIO         Aspect ratio, for example 16:9."
         , "  --resolution RESOLUTION      Resolution hint, for example 2k."
         , "  --response-format FORMAT     Response format. Default: b64_json"
+        , "  --quality QUALITY            low, medium, auto. Default: low (grok-imagine-image-2.0 only)."
         ]
 
     banana2OptionLines :: [Text]

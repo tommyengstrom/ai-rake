@@ -158,7 +158,7 @@ spec = do
                                 streamedChunks `shouldBe` audioBytes
 
                 describe "standalone images" $ do
-                    it "generates a non-empty image with gpt-image-2" $ do
+                    it "generates a non-empty image with gpt-image-2.5-flare" $ do
                         let openAISettings = defaultOpenAIImagesSettings (T.pack apiKey)
                             request =
                                 (defaultOpenAIImageRequest "a tiny blue square on white background")
