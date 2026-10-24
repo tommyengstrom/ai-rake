@@ -1,7 +1,7 @@
 # Jev decisions
 
 `TypeSafe.Jev` is an independent Effectful client for TypeSafe AI's Jev models. Its
-modules do not depend on `Rake` and can be extracted into a separate package.
+modules live in the independent `airake-jev` package and do not depend on `Rake`.
 
 Build a `Batch a` using `choice`, `score`, `noul`, and ordinary applicative
 composition. `assess` submits every question in the batch against the same state
@@ -94,7 +94,7 @@ image header automatically.
 ## Complete example
 
 This example is also compiled and exercised against a local HTTP fixture in
-`test/TypeSafe/JevExample.hs` and `test/TypeSafe/JevSpec.hs`.
+`packages/airake-jev/test/TypeSafe/JevExample.hs` and `packages/airake-jev/test/TypeSafe/JevSpec.hs`.
 
 ```haskell
 {-# LANGUAGE DataKinds #-}

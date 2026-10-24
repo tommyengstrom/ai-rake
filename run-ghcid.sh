@@ -1,28 +1,16 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
-# Exit on error
-set -x
-set -e
-
-# Configuration
-LOG_FILE="ghcid.log"
-
-echo "Starting ghciwatch"
-echo "Logging to: $LOG_FILE"
-echo "----------------------------------------"
-
-# Run ghciwatch with:
-# - hpack before each startup/restart to regenerate .cabal files
-# - cabal repl with the specific test-dev component
-# - output redirected to log file
-#
-#
-components=$(gen-hie |grep component|grep '".*"' -o|sed "s:\"::g" | xargs echo)
-
-echo cabal v2-repl --enable-multi-repl $components
-
-ghcid \
-  --command "cabal v2-repl --enable-multi-repl $components" \
-  --restart "cabal.project" \
-  --restart "ai-rake.cabal" \
-  -o $LOG_FILE
+project="${AIRAKE_REPL_PROJECT:-cabal.project}"
+restart_args=(--restart cabal.project --restart "$project")
+targets=()
+for manifest in packages/*/*.cabal; do
+    restart_args+=(--restart "$manifest")
+    package_name="$(basename "$manifest" .cabal)"
+    targets+=("$package_name:lib:$package_name")
+done
+if [[ -n "${AIRAKE_REPL_TARGET:-}" ]]; then
+    read -r -a targets <<< "$AIRAKE_REPL_TARGET"
+fi
+printf -v repl_command '%q ' cabal repl --enable-multi-repl -O0 --project-file "$project" "${targets[@]}"
+exec ghcid --command "$repl_command" "${restart_args[@]}" -o ghcid.log

@@ -1,342 +1,158 @@
-# ai-rake
+# airake
 
-A Haskell library for provider-agnostic LLM chat with local tool execution, Effectful integration, and storage backends.
+Haskell AI clients with typed model settings, automatic local tool calls, streaming,
+and durable conversations. Applications normally depend on `airake` and use
+OpenRouter; other backends remain independent packages.
 
-Standalone TypeSafe AI Jev support is available through `TypeSafe.Jev`. Combine
-typed Choice, Score, and Noul questions into one applicative request. The modules
-are independent of Rake's chat API; see the [complete Jev example](docs/jev.md).
-The `rake-decide` CLI accepts positional choices and context from files or stdin:
-`rake-decide choice Billing Support Sales -c message.txt`. It reads
-`TYPESAFE_API_KEY`; see the [CLI examples](docs/jev.md#command-line-client).
-Jev defaults to `jev-latest`; select `jev-1.14.0` to pin that version. Use
-`assessWithAssets` or CLI `--image screen=screenshot.png` to include PNG/JPEG
-images; attaching images enables the experimental image header automatically.
+| Package | Purpose | Depends on |
+| --- | --- | --- |
+| `airake` | Application facade, OpenRouter defaults, media CLIs | core, chat, OpenRouter |
+| `airake-core` | Neutral history, effects, errors, media, backend interpreter API | No backend or database |
+| `airake-chat` | Tool loop, replay, resumable conversations, storage interfaces and in-memory/directory storage | core |
+| `airake-openrouter` | Chat, images, speech and video jobs through OpenRouter | core |
+| `airake-openai` | Direct OpenAI chat, image and speech APIs | core |
+| `airake-jev` | Independent `TypeSafe.Jev` API and `rake-decide` CLI | No Rake packages |
+| `airake-postgres` | PostgreSQL conversation storage and response logger | core, chat |
 
-## Basic Usage
+`airake` reexports the public modules of core, chat and OpenRouter. Depending on it
+is enough to import `Rake`, `Rake.Providers.OpenRouter.Images`, and the other
+OpenRouter modules. It does not pull in PostgreSQL, direct OpenAI or Jev.
+
+## Chat
 
 ```haskell
-{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DataKinds, OverloadedStrings, TypeApplications #-}
 
 import Effectful
 import Effectful.Concurrent
 import Effectful.Error.Static
 import Rake
-import Rake.Error (renderRakeError)
-import Rake.Providers.OpenAI.Chat
-import Relude
-import System.Environment (getEnv)
+import Rake.MediaStorage.InMemory
 
 main :: IO ()
 main = do
-  apiKey <- toText <$> getEnv "OPENAI_API_KEY"
-  runEff
-    . runConcurrent
-    . runErrorNoCallStackWith @RakeError (error . toString . renderRakeError)
-    $ runRakeOpenAIChat (defaultOpenAIChatSettings apiKey) do
-        outcome <-
-          chatOutcome
-            defaultChatConfig{maxToolRounds = 8}
-            [ system "You are a helpful assistant."
-            , user "What is 2 + 2?"
-            ]
-
-        case outcome of
-          ChatFinished{appendedItems} ->
-            print (lastAssistantTextsStrict appendedItems)
-          other ->
-            print other
+    result <- runEff . runConcurrent . runErrorNoCallStack @RakeError
+        . runRakeMediaStorageInMemory
+        . runRakeOpenRouterChat (defaultOpenRouterSettings "your-key") defaultGpt41Mini
+        $ chatOutcome defaultChatConfig [user "What is 2 + 2?"]
+    print result
 ```
 
-## Current Scope
+Use `CustomChatModel "author/model" settings` to select any supported chat model.
+The adapter uses stateless `/responses`, including tools and SSE, and submits
+history on every round. See [chat and persistence](docs/chat.md) for tool loops,
+recovery, streaming, and storage semantics. The executable
+[minimal example](packages/airake/app/MinimalExample.hs) reads `OPENROUTER_API_KEY`.
 
-- Canonical conversations are `[HistoryItem]`
-- Generic chat entrypoint is `chatOutcome`
-- `withResumableChat` is the recommended durable wrapper for agent loops that need persistence
-- `streamChatOutcome` and `withResumableStreamingChat` add ephemeral shared streaming on top of the same durable history model
-- Supported chat providers are OpenAI Chat, xAI Chat, and Gemini Chat
-- Shared/local history items cover text messages, tool calls, and tool results
-- Provider-native history is preserved for OpenAI Responses, xAI Responses, and Gemini Interactions items
-- Local storage backends support in-memory and PostgreSQL persistence
+## Typed models and custom JSON
 
-The old `ChatMsg` API and the `openai` package dependency have been removed.
-
-Notes:
-
-- `lastAssistantTexts` and `decodeLastAssistant` are best-effort helpers.
-- `lastAssistantTextsStrict` and `decodeLastAssistantStrict` only look at the latest contiguous assistant tail.
-- Canonical conversations are append-only agent logs. Provider-native items can be marked `ItemPending` or `ItemCompleted` inside persisted history.
-- Anything named `appendedItems` is the newly returned append-only suffix, not the full conversation history.
-- History items get stable `HistoryItemId`s before replay and persistence. When storage is used, the embedded item id matches the storage row id.
-- Provider-backed history items store the local `ToolDeclaration`s that were available to the model for the request that produced the provider item. This is debug/provenance data only; replay and tool execution still use the current `ChatConfig.tools`.
-- `chatOutcome` and `withResumableChat` require `IOE` because the library assigns `HistoryItemId`s before replay and persistence.
-- `streamChatOutcome` and `withResumableStreamingChat` also require `IOE`; they surface live assistant text/refusal deltas through `StreamCallbacks` but still only persist finalized `HistoryItem` suffixes.
-- Set `llmCallTimeout = Just 60` on `ChatConfig` to bound each individual provider LLM round. This is separate from `maxToolRounds`, which only bounds local tool-loop recursion.
-- `chatOutcome` returns an append-only canonical suffix plus explicit pause/failure state. Failed outcomes append a durable `ReplayBarrier` control item into the returned suffix.
-- `withResumableChat` is the recommended durable wrapper for append-only loops. It persists paused and failed suffixes through `chatOutcome`.
-- Shared streaming is text-first today. Provider-native reasoning deltas, partial tool arguments, and partial multimodal outputs stay out of the shared API.
-- Stored unresolved tool calls are resumed locally before the next provider request instead of being replayed back at the model.
-- Historical unresolved tool calls whose local tool no longer exists are resumed into a synthetic `"Tool not found"` result and the loop continues.
-- `chatOutcome` throws `ConversationBlocked` for blocked histories and includes the latest valid reset checkpoint when the supplied history already has stable item ids.
-- `validResetCheckpoints`, `latestValidCheckpoint`, and `resetToLatestValidCheckpoint` work with `HistoryItemId` checkpoints, not raw log offsets. Use `resetTo` for item checkpoints and `resetToStart` to rewind to the beginning.
-- `withStorage` and `withStorageBy` are snapshot-based helpers; they load the current history, run the action, and append the returned suffix.
-- `withStorageBy chatOutcomeAppendedItems (chatOutcome config)` is the advanced low-level storage pattern for resumable agent loops, but `withResumableChat` is the preferred public entrypoint.
-- `modifyConversationAtomic` is the short-lived mutation helper to use when concurrent writers matter.
-- `renderRakeError` gives user-facing text for blocked conversations, including when no concrete reset checkpoint can be suggested for id-less direct histories.
-- Shared/local multipart content is text-only for now; richer media remains provider-native until both adapters support the same generic representation.
-- Provider-switch conversion warnings are logged to stderr by default when native items lose information during projection.
-- OpenAI and xAI chat adapters target the Responses API; Gemini chat targets the Interactions API.
-- Gemini-specific built-in Interactions tools are available through `GeminiChatSettings.providerTools`, while local function tools still flow through the shared chat loop.
-- Stored provider item tool provenance covers local Rake tools only; Gemini provider-native `providerTools` are not included in `availableLocalTools`.
-- Switching away from Gemini keeps generic unresolved tool state portable. Gemini-only pending `thought` metadata is reused only for same-provider Gemini continuation and is dropped when replaying into OpenAI/xAI.
-- Gemini image generation, OpenAI image generation, and xAI Grok Imagine image/video generation are available through provider-specific helper modules instead of the shared chat API.
-- Standalone TTS helpers are available for OpenAI and xAI through the shared `tts` and `ttsStreaming` entrypoints, plus provider-specific modules when you need provider-native settings.
-
-## Persistence
-
-PostgreSQL storage now uses validated identifiers instead of raw table-name `Text`:
+Each operation has its own model class: `OpenRouterChatModel`,
+`OpenRouterImageModel`, `OpenRouterVideoModel`, and `OpenRouterSpeechModel`.
+Model records hold model-specific settings; credentials, routing, logging and
+transport timeouts live in `OpenRouterSettings`. Inputs live in request records.
+Use `withOpenRouterManager` to reuse connections across standalone operations;
+chat interpreters and video polling reuse connections within their workflows.
 
 ```haskell
-{-# LANGUAGE DataKinds #-}
+import Rake.Providers.OpenRouter.Images
+import Rake.Providers.OpenRouter.Models.GptImage25Flare qualified as Flare
 
-import Database.PostgreSQL.Simple (close, connectPostgreSQL)
-import Effectful
-import Effectful.PostgreSQL.Connection.Pool
-import Rake
-import Rake.Storage.Postgres
-import Relude
-import UnliftIO.Pool (mkDefaultPoolConfig, newPool)
+flare :: GptImage25Flare
+flare = defaultGptImage25Flare
+    { Flare.quality = GptQualityHigh
+    , Flare.dimensions = Just (ImageAspectRatio GptRatio16x9)
+    }
 
-main :: IO ()
-main = do
-  prefix <- either (error . toString) pure (mkPgIdentifier "ai_rake")
-  tables <- either (error . toString) pure (conversationTablesFromPrefix prefix)
-  config <- mkDefaultPoolConfig (connectPostgreSQL "dbname=chatcompletion-test") close 60 5
-  pool <- newPool config
-
-  runEff
-    . runWithConnectionPool pool
-    $ setupConversationTables tables
+-- Inside an Eff stack with IOE and Error RakeError:
+-- generateOpenRouterImage settings flare (defaultImageRequest "A lighthouse")
 ```
 
-Use `withResumableChat config conversationId` for resumable append-only agent logs, `withStorageBy chatOutcomeAppendedItems (chatOutcome config)` for advanced manual suffix persistence, and `modifyConversationAtomic` for short-lived read-modify-write mutations that must serialize correctly under concurrent access.
+`CustomImageModel`, `CustomVideoModel`, `CustomSpeechModel`, and `CustomChatModel`
+accept a full model ID and an `Aeson.Object`. This supports newly released models
+and options without a library release. Custom settings bypass the known-model
+validation but cannot overwrite fields owned by the operation, such as `model`,
+`prompt`, `input`, or tool/history fields. Client routing and nested provider
+options merge recursively; conflicting explicit values fail rather than silently
+winning. Model IDs and availability are controlled by OpenRouter.
 
-`chatOutcome` is the durable path for failed rounds. If a run returns `ChatFailed`, the returned `appendedItems` suffix includes a `ReplayBarrier`, and later `chatOutcome`/`withResumableChat` calls will refuse to continue until you append a reset control item that rewinds before the blocked suffix.
+The protocols differ: images return image data, speech returns binary audio,
+and video creates a job which must be polled and downloaded. The library exposes
+those lifecycles directly. `generateOpenRouterVideo` is a bounded polling convenience;
+`startOpenRouterVideo` and `getOpenRouterVideo` support application-managed jobs.
+Video downloads use the authenticated content endpoint on the configured base URL.
 
-PostgreSQL item ids are unique per conversation, not globally. `setupConversationTables` also performs a best-effort migration away from the library's older global `item_id` uniqueness constraint; if an older installation renamed that legacy constraint manually, drop it yourself and rerun setup.
+## Command-line tools
 
-Minimal resumable loop:
+All media CLIs use `OPENROUTER_API_KEY`. Options accept `--flag VALUE` and
+`--flag=VALUE`; unknown full `author/model` IDs are accepted.
 
-```haskell
-outcome <-
-  withResumableChat
-    defaultChatConfig{tools = [myTool]}
-    conversationId
-
-case outcome of
-  ChatFinished{appendedItems} ->
-    print (lastAssistantTextsStrict appendedItems)
-
-  ChatPaused{pauseReason} ->
-    print pauseReason
-
-  ChatFailed{failureReason} ->
-    print failureReason
+```sh
+rake-image --quality medium "A lighthouse"
+rake-image -m openai/gpt-image-2.5-flare --quality high --output-format webp "A lighthouse"
+rake-image -m google/gemini-nano-banana-2.1 --resolution 2K "A lighthouse"
+rake-image -m author/new-model --model-options '{"new_option":true}' "A lighthouse"
+rake-video -m google/veo-3.1 --duration 8 --resolution 1080p "Waves around a lighthouse"
+rake-tts --voice eve -o greeting.mp3 "Hello there"
 ```
 
-Recover from a blocked append-only history:
+Image defaults remain Grok Imagine Image 2.0 with **low** quality. The typed
+OpenAI default is **GPT Image 2.5 Flare**; Sunburst is also available. Gemini image
+options include Nano Banana 2.1, Flash Lite Image 3.1, and Pro Image 3. Video defaults
+to Grok Imagine Video 1.5, with Lite and Veo 3.1 options. Speech defaults to Grok
+Voice TTS 1.0, Eve, MP3.
 
-```haskell
-history <- getConversation conversationId
+`--model-options` replaces known-model defaults with the supplied object and
+allows new settings on existing models too. Explicit flags may supplement it;
+duplicate keys are rejected. `--image` accepts local files, HTTPS URLs and data
+URLs. `rake-video --extend` extracts the last frame and appends a generated
+continuation locally using ffmpeg; it is not a native video extension request.
+`rake-tts` plays audio locally unless `--output` is supplied; raw PCM requires an
+output path. See each CLI's `--help` for supported options.
 
-case resetToLatestValidCheckpoint history of
-  Nothing ->
-    pure ()
-  Just rewindItem ->
-    appendItems conversationId [rewindItem]
+Direct-provider features absent from OpenRouter's normalized API are explicit
+migration gaps, including masks/file IDs and some image safety/thinking controls,
+native video edits, and some provider-specific speech codecs. The CLIs reject
+unsupported native flags. Direct OpenAI APIs remain available in `airake-openai`.
+
+Jev is unchanged in `airake-jev`; `rake-decide` still uses `TYPESAFE_API_KEY`.
+See [Jev documentation](docs/jev.md).
+
+## Backend authors and migration
+
+Implement the `Rake` effect using the public `Rake.Backend.runChatProvider` helper
+and return `ProviderRound`s. Depend on `airake-core` only. The
+[independent backend fixture](fixtures/backend/Main.hs) compiles and tests that
+boundary without importing chat, a concrete backend, or a database. Frontend
+applications choose a backend interpreter around `chatOutcome`.
+
+The package dependency changes are intentional for version 0.2. Existing `Rake.*`
+module names remain where practical; `Rake.Chat` exposes the chat frontend on its
+own. Stored history JSON, provider-family identifiers, item IDs and PostgreSQL
+schemas are unchanged. See [migration notes](docs/migration-0.2.md).
+
+## Development
+
+Start `nix develop -c process-compose up` from the repository root. The server
+uses port 6599. Use the managed jobs instead of invoking builds/tests separately:
+
+```sh
+process-compose process restart backend-3-cabal-build-all
+process-compose process restart backend-4-cabal-test-all
+process-compose process logs backend-4-cabal-test-all
 ```
 
-If you need to present all reset options to a user, inspect `validResetCheckpoints history`. The checkpoints target `HistoryItemId`s from the active conversation branch, not append-log offsets.
-Compute those checkpoints from the full stored conversation, not from `appendedItems`.
+The default suite is offline and includes local HTTP fixtures. `ghcid.log` contains
+compiler feedback. `AIRAKE_REPL_TARGET` selects watched components; the default watches all seven
+libraries. Use `AIRAKE_REPL_PROJECT=cabal.integration.project` for optional
+integration components. The HLS cradle uses that project so optional test modules
+can be edited without running their tests.
 
-## Media Generation
+The following jobs are disabled until explicitly started:
 
-```haskell
-{-# LANGUAGE DataKinds #-}
+- `backend-6-build-integration`: compile the database and direct OpenAI live suites.
+- `backend-7-test-postgres`: create a disposable PostgreSQL cluster, run storage/logger tests, then remove it.
+- `backend-8-test-live-openai`: paid live tests, requiring `AIRAKE_LIVE_TESTS=1` and `OPENAI_API_KEY` in the manager environment.
+- `backend-9-sdist`: build all seven packages and their offline tests from extracted source distributions.
 
-import Effectful
-import Effectful.Error.Static
-import Rake
-import Rake.Error (renderRakeError)
-import Rake.Providers.Gemini.Images
-import Rake.Providers.Gemini.Videos
-import Rake.Providers.OpenAI.Images
-import Rake.Providers.XAI.Imagine
-import Relude
-import System.Environment (getEnv)
-
-main :: IO ()
-main = do
-  geminiKey <- toText <$> getEnv "GEMINI_API_KEY"
-  openAiKey <- toText <$> getEnv "OPENAI_API_KEY"
-  xaiKey <- toText <$> getEnv "XAI_API_KEY"
-  runEff
-    . runErrorNoCallStackWith @RakeError (error . toString . renderRakeError)
-    $ do
-        geminiImage <-
-          generateGeminiImage
-            (defaultGeminiImagesSettings geminiKey)
-            (defaultGeminiImageRequest "A tiny watercolor postcard of a lighthouse")
-
-        openAiImage <-
-          generateOpenAIImage
-            (defaultOpenAIImagesSettings openAiKey)
-            (defaultOpenAIImageRequest "A clean product photo of a ceramic mug on linen")
-
-        xaiVideo <-
-          generateXAIVideo
-            (defaultXAIImagineSettings xaiKey)
-            ( defaultXAIImagineVideoRequest
-                "Animate this still into a gentle dusk timelapse"
-            ){imageUrl = Just "https://example.com/still.png", duration = Just 8}
-
-        veoVideo <-
-          generateGeminiVideo
-            (defaultGeminiVideoSettings geminiKey)
-            ( defaultGeminiVideoRequest
-                "A cinematic shot of a ghostly swing moving from the first frame to the last"
-            )
-
-        print geminiImage
-        print openAiImage
-        print xaiVideo
-        print veoVideo
-```
-
-Validation notes:
-
-- OpenAI image requests default to `gpt-image-2.5-flare` with automatic quality. `gpt-image-2.5-sunburst` is also available for precise editing. Use `--quality=auto|low|medium|high|xhigh|max`; `xhigh` and `max` require a 2.5 model.
-- xAI image requests default to `grok-imagine-image-2.0` with explicit `low` quality for both generation and editing. Use `--quality=low|medium|auto` to override it. The legacy `grok-imagine-image` model does not support quality; library callers selecting it must also set `quality = Nothing`.
-- OpenAI image requests default to the lower documented moderation level, `low`; use `--moderation=auto` or `OpenAIImageModerationAuto` for standard filtering.
-- Gemini image requests default adjustable safety settings to `OFF`; Gemini Veo defaults `personGeneration` to `allow_all` for text-to-video and `allow_adult` for image-based requests.
-- OpenAI `mask` and `inputFidelity` require at least one input image.
-- OpenAI transparent backgrounds require PNG or WebP output (PNG is the default). Transparency on `gpt-image-2` is a provider preview feature. Explicit `inputFidelity` remains unsupported for `gpt-image-2`.
-- OpenAI `safetyIdentifier` / `--safety-identifier` sends a privacy-preserving end-user identifier, up to 128 characters. The deprecated `user` / `--user` remains available; OpenAI gives a nonempty safety identifier precedence.
-- Image responses retain optional `model`, `outputFormat`, `size`, `quality`, `background`, and the original `usage` JSON object, including provider-specific cost fields. Each generated image also retains its optional `mimeType`. Gemini's `modelVersion` and `usageMetadata` map to the shared model and usage fields.
-- xAI's documented public Imagine API does not expose a request-side spicy mode or moderation-level option.
-- xAI `videoUrl` requests are edit operations and cannot be combined with `duration`, `aspectRatio`, or `resolution`.
-- xAI video requests may set `imageUrl` or `videoUrl`, but not both.
-- Gemini Veo `image` requests animate one still image as the first frame; `lastFrame` must also set `image` and is only for first-frame/last-frame interpolation.
-
-## Text To Speech
-
-```haskell
-{-# LANGUAGE DataKinds #-}
-
-import Data.ByteString qualified as BS
-import Effectful
-import Effectful.Error.Static
-import Rake
-import Rake.Error (renderRakeError)
-import Rake.Providers.OpenAI.TTS
-import Relude
-import System.Environment (getEnv)
-
-main :: IO ()
-main = do
-  apiKey <- toText <$> getEnv "OPENAI_API_KEY"
-  runEff
-    . runErrorNoCallStackWith @RakeError (error . toString . renderRakeError)
-    $ do
-        audio <-
-          tts
-            (TTSOpenAI (defaultOpenAITTSSettings apiKey))
-            "Hello from ai-rake."
-
-        liftIO (BS.writeFile "hello.mp3" audioBytes)
-```
-
-Use `ttsStreaming` when you want chunk callbacks during generation and the final aggregated `Audio` value at the end:
-
-```haskell
-audio <-
-  ttsStreaming
-    TTSStreamCallbacks
-      { onAudioChunk = \chunk ->
-          liftIO (putStrLn ("received " <> show (BS.length chunk) <> " bytes"))
-      }
-    (TTSStreamingXAI (defaultXAITTSStreamingSettings xaiKey))
-    "Hello from ai-rake."
-```
-
-## CLIs
-
-Each CLI has a default model. Select another with `-m MODEL` or `--model MODEL`.
-`--help` lists the supported models without contacting a provider.
-
-| CLI | Default | Other supported models |
-| --- | --- | --- |
-| `rake-decide` | `typesafe/jev-latest` | `typesafe/jev-1.14.0`, `typesafe/jev-1.13.0`, `typesafe/jev-preview` |
-| `rake-image` | `xai/grok-imagine-image-2.0` (low quality) | `openai/gpt-image-2.5-flare`, `openai/gpt-image-2.5-sunburst`, both 2.5 models' `-2026-09-08` snapshots, `openai/gpt-image-2`, `xai/grok-imagine-image`, `google/gemini-2.5-flash-image` |
-| `rake-video` | `xai/grok-imagine-video` | `google/veo-3.1-generate-preview` |
-| `rake-tts` | `xai/tts` | `openai/gpt-4o-mini-tts`, `openai/tts-1`, `openai/tts-1-hd` |
-
-Model names are case-sensitive. An exact `provider/model` match takes priority.
-Otherwise, the model part must uniquely match a catalog entry, even when a
-provider prefix was supplied. For example, `-m gpt-image-2.5-flare` and
-`-m openai/gpt-image-2.5-flare` select the same model. Unknown or ambiguous names fail
-before reading input or making a request. `xai/tts` names xAI's fixed speech
-service; its API does not take a model field.
-
-The examples below assume the executables are installed on your `PATH`:
-
-```bash
-rake-decide choice "Give a fuck" "Give no fuck" -q "Should we give a fuck?" -c message.txt
-rake-decide noul "Is this spam?" -c message.txt
-rake-decide noul "Is an error visible in images.screen?" --image screen=screenshot.png
-cat message.txt | rake-decide score Low Medium High -q "How urgent?"
-
-rake-image "a man riding a horse on the moon"
-rake-image --quality medium "a watercolor lighthouse"
-rake-image -m openai/gpt-image-2.5-flare --quality=high "a watercolor lighthouse"
-
-rake-video "She walks away" --image girl.jpg
-rake-video --extend clip.mp4 "continue the scene for 5 more seconds"
-rake-video -m google/veo-3.1-generate-preview --image start.png --last-frame end.png "transition between these frames"
-
-rake-tts "Hello from ai-rake."
-rake-tts --codec=wav --sample-rate=24000 -o update.wav "A short status update"
-rake-tts -m openai/tts-1-hd "Hello from OpenAI."
-```
-
-From a checkout, build through the managed process-compose build job, then
-locate an executable with `cabal list-bin -O0 exe:NAME`. For example:
-
-```bash
-"$(cabal list-bin -O0 exe:rake-decide)" noul "Is this spam?" -c message.txt
-```
-
-`rake-decide` writes a JSON answer to stdout. Without images, it reads context
-from stdin when `-c` / `--context` is omitted. With `--image`, use `-c -` to add
-piped text. See [Jev decisions](docs/jev.md) for images, choice descriptions,
-multiple files, JSON context, and response fields.
-
-- No `--output` writes to `./generated/<timestamp>-<slug>.png` for images.
-- No `--output` writes to `./generated/<timestamp>-<slug>.mp4` for videos.
-- No `--output` plays speech locally; playback looks for `ffplay`, `mpv`, or `afplay`.
-- `rake-tts --output PATH ...` saves speech to `PATH` instead of playing it.
-- `rake-video --extend ...` appends a continuation generated from the last frame; it requires local `ffmpeg` and `ffprobe`.
-
-The CLIs read `TYPESAFE_API_KEY` for TypeSafe, `OPENAI_API_KEY` for OpenAI,
-`XAI_API_KEY` for xAI, and `GEMINI_API_KEY` for Google models.
-Provider names are selected through `-m`, and are no longer positional commands.
-
-Use `-m MODEL --help` for the selected provider's controls:
-
-```bash
-rake-decide --help
-rake-image --help
-rake-image -m openai/gpt-image-2.5-flare --help
-rake-image -m google/gemini-2.5-flash-image --help
-rake-video -m google/veo-3.1-generate-preview --help
-rake-tts -m openai/gpt-4o-mini-tts --help
-```
+Each package is independently distributable. Nix exposes all seven packages and
+uses `airake` as its default output.

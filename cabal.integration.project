@@ -1,0 +1,2 @@
+import: cabal.project
+constraints: airake-openai +integration, airake-postgres +integration

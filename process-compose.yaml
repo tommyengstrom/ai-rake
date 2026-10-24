@@ -16,7 +16,7 @@ processes:
         condition: process_completed_successfully
 
   backend-3-cabal-build-all:
-    command: cabal build all -O0
+    command: cabal build all --enable-tests -O0
     availability:
       restart: "no"
     depends_on:
@@ -25,7 +25,7 @@ processes:
 
   backend-4-cabal-test-all:
     # Use static colored output so process-compose does not duplicate redrawn rows.
-    command: cabal test all -O0 --test-show-details=direct --test-options="--color --format=specdoc"
+    command: cabal test airake-core:unit airake-chat:unit airake-openrouter:unit airake-openai:unit airake-jev:unit airake:unit airake-backend-fixture:independent-backend -O0 --test-show-details=direct
     availability:
       restart: "no"
     depends_on:
@@ -38,3 +38,19 @@ processes:
     depends_on:
       backend-3-cabal-build-all:
         condition: process_completed_successfully
+
+  backend-6-build-integration:
+    command: cabal build airake-openai:live airake-postgres:unit --enable-tests --constraint='airake-openai +integration' --constraint='airake-postgres +integration' -O0
+    disabled: true
+
+  backend-7-test-postgres:
+    command: ./scripts/test-postgres.sh
+    disabled: true
+
+  backend-8-test-live-openai:
+    command: cabal test airake-openai:live --constraint='airake-openai +integration' -O0 --test-show-details=direct
+    disabled: true
+
+  backend-9-sdist:
+    command: ./scripts/check-sdist.sh
+    disabled: true

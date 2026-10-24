@@ -1,7 +1,5 @@
-packages: .
+packages: packages/* fixtures/backend
 
 with-compiler: ghc-9.10.3
-
-
 test-show-details: direct
 multi-repl: True

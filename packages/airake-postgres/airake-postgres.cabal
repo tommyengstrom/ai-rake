@@ -1,0 +1,93 @@
+cabal-version: 3.8
+name: airake-postgres
+version: 0.2.0.0
+synopsis: Typed AI operations and composable backends
+category: AI
+license: BSD-3-Clause
+license-file: LICENSE
+build-type: Simple
+author: Tommy Engström
+maintainer: tommy@tommyengstrom.com
+homepage: https://github.com/tommyengstrom/ai-rake
+description: See README.md for the package interface and architecture.
+extra-source-files: README.md
+
+common shared_opts
+  default-language: GHC2024
+  default-extensions:
+      AllowAmbiguousTypes
+      BlockArguments
+      DataKinds
+      DefaultSignatures
+      DeriveAnyClass
+      DerivingStrategies
+      DerivingVia
+      DuplicateRecordFields
+      FunctionalDependencies
+      GeneralizedNewtypeDeriving
+      LambdaCase
+      NoFieldSelectors
+      NoImplicitPrelude
+      NoStarIsType
+      OverloadedLabels
+      OverloadedLists
+      OverloadedStrings
+      RecordWildCards
+      StrictData
+      TemplateHaskell
+      TupleSections
+      TypeApplications
+      TypeFamilyDependencies
+      TypeOperators
+      ViewPatterns
+
+  ghc-options:
+    -Weverything
+    -Werror
+    -Wno-all-missed-specialisations
+    -Wno-missed-specialisations
+    -Wno-implicit-prelude
+    -Wno-missing-export-lists
+    -Wno-missing-import-lists
+    -Wno-missing-local-signatures
+    -Wno-missing-safe-haskell-mode
+    -Wno-prepositive-qualified-module
+    -Wno-safe
+    -Wno-unsafe
+    -Wno-missing-kind-signatures
+    -Wno-missing-poly-kind-signatures
+    -Wno-monomorphism-restriction
+    -Wno-missing-role-annotations
+    -Wno-partial-fields
+    -Wno-unused-packages
+
+
+library
+  import: shared_opts
+  hs-source-dirs: src
+  exposed-modules:
+      Rake.PostgresLogger
+      Rake.Storage.Postgres
+  other-modules:
+      Rake.Postgres.Internal
+  build-depends: base >=4.20 && <5, aeson, bytestring, containers, effectful, effectful-core, relude, text, time, vector, airake-core, airake-chat, effectful-postgresql >=0.1.0.1 && <0.2, postgresql-simple, uuid
+
+flag integration
+  description: Enable explicitly requested database or provider integration tests
+  default: False
+  manual: True
+
+test-suite unit
+  import: shared_opts
+  type: exitcode-stdio-1.0
+  main-is: Main.hs
+  hs-source-dirs: test
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N2
+  other-modules:
+      Rake.PostgresLoggerSpec
+      Rake.PostgresPoolSpec
+      Rake.PostgresSpec
+  build-tool-depends: hspec-discover:hspec-discover
+  build-depends: base >=4.20 && <5, aeson, bytestring, containers, effectful, effectful-core, relude, text, time, vector, hspec, QuickCheck, directory, filepath, unliftio, process, effectful-plugin, airake-postgres, airake-core, airake-chat, postgresql-simple, effectful-postgresql, monad-time-effectful, uuid, unliftio-pool
+  if !flag(integration)
+    buildable: False

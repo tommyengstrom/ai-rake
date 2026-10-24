@@ -8,6 +8,14 @@ and this project adheres to the
 
 ## Unreleased
 
+- Split the workspace into `airake`, `airake-core`, `airake-chat`, `airake-openrouter`, `airake-openai`, `airake-jev`, and `airake-postgres` (0.2.0.0).
+- Made OpenRouter the facade/CLI default with typed per-model settings and custom JSON for chat, images, speech and video jobs. Retired direct xAI/Gemini clients; direct OpenAI and Jev remain opt-in.
+- Added a public backend interpreter API, neutral provider errors, offline HTTP contract tests, an independent backend fixture, and explicit PostgreSQL/live test jobs.
+- Preserved stored history JSON, IDs and database schemas. See `docs/migration-0.2.md` for source API and CLI migration details.
+
+### Earlier changes in this development cycle
+
+
 - Updated OpenAI image defaults to `gpt-image-2.5-flare` and xAI defaults to `grok-imagine-image-2.0` with explicit low quality. The image CLI also supports Sunburst and both 2.5 dated snapshots, retains legacy models, and accepts `--quality VALUE` or `--quality=VALUE` for both providers.
 - Added `quality` to `XAIImagineImageRequest` and `safetyIdentifier` to `OpenAIImageRequest`, with a corresponding `--safety-identifier` CLI option. Legacy Grok requires quality to be omitted. Transparent OpenAI output now accepts PNG/WebP, including the `gpt-image-2` preview capability.
 - Added optional `model`, `outputFormat`, `size`, `quality`, `background`, and `usage` fields to `ImageGenerationResponse`, plus `mimeType` to `GeneratedImage`. Usage preserves provider-specific JSON, including xAI cost ticks; Gemini image MIME and response metadata are retained. Callers constructing these public records directly must supply the added fields; old response JSON remains readable.

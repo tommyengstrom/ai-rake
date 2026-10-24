@@ -1,0 +1,131 @@
+cabal-version: 3.8
+name: airake
+version: 0.2.0.0
+synopsis: Typed AI operations and composable backends
+category: AI
+license: BSD-3-Clause
+license-file: LICENSE
+build-type: Simple
+author: Tommy Engström
+maintainer: tommy@tommyengstrom.com
+homepage: https://github.com/tommyengstrom/ai-rake
+description: See README.md for the package interface and architecture.
+extra-source-files: README.md
+
+common shared_opts
+  default-language: GHC2024
+  default-extensions:
+      AllowAmbiguousTypes
+      BlockArguments
+      DataKinds
+      DefaultSignatures
+      DeriveAnyClass
+      DerivingStrategies
+      DerivingVia
+      DuplicateRecordFields
+      FunctionalDependencies
+      GeneralizedNewtypeDeriving
+      LambdaCase
+      NoFieldSelectors
+      NoImplicitPrelude
+      NoStarIsType
+      OverloadedLabels
+      OverloadedLists
+      OverloadedStrings
+      RecordWildCards
+      StrictData
+      TemplateHaskell
+      TupleSections
+      TypeApplications
+      TypeFamilyDependencies
+      TypeOperators
+      ViewPatterns
+
+  ghc-options:
+    -Weverything
+    -Werror
+    -Wno-all-missed-specialisations
+    -Wno-missed-specialisations
+    -Wno-implicit-prelude
+    -Wno-missing-export-lists
+    -Wno-missing-import-lists
+    -Wno-missing-local-signatures
+    -Wno-missing-safe-haskell-mode
+    -Wno-prepositive-qualified-module
+    -Wno-safe
+    -Wno-unsafe
+    -Wno-missing-kind-signatures
+    -Wno-missing-poly-kind-signatures
+    -Wno-monomorphism-restriction
+    -Wno-missing-role-annotations
+    -Wno-partial-fields
+    -Wno-unused-packages
+
+
+library
+  import: shared_opts
+  hs-source-dirs: src
+  exposed-modules:
+      Rake
+      Rake.TTS
+  build-depends: base >=4.20 && <5, aeson, bytestring, containers, effectful, effectful-core, relude, text, time, vector, airake-core, airake-chat, airake-openrouter
+  reexported-modules: airake-core:Rake.Backend, airake-core:Rake.Effect, airake-core:Rake.Error, airake-core:Rake.Media, airake-core:Rake.MediaStorage.Effect, airake-core:Rake.Schema, airake-core:Rake.TTS.Types, airake-core:Rake.Types, airake-chat:Rake.Chat, airake-chat:Rake.MediaStorage.Directory, airake-chat:Rake.MediaStorage.InMemory, airake-chat:Rake.Storage.Effect, airake-chat:Rake.Storage.InMemory, airake-chat:Rake.Tool, airake-openrouter:Rake.Providers.OpenRouter.Chat, airake-openrouter:Rake.Providers.OpenRouter.ImageModels, airake-openrouter:Rake.Providers.OpenRouter.Images, airake-openrouter:Rake.Providers.OpenRouter.Models.GeminiFlashLiteImage31, airake-openrouter:Rake.Providers.OpenRouter.Models.GeminiNanoBanana21, airake-openrouter:Rake.Providers.OpenRouter.Models.GeminiProImage3, airake-openrouter:Rake.Providers.OpenRouter.Models.GptImage25Flare, airake-openrouter:Rake.Providers.OpenRouter.Models.GptImage25Sunburst, airake-openrouter:Rake.Providers.OpenRouter.Models.GrokImagineImage20, airake-openrouter:Rake.Providers.OpenRouter.Models.GrokImagineVideo15, airake-openrouter:Rake.Providers.OpenRouter.Models.Veo31, airake-openrouter:Rake.Providers.OpenRouter.Settings, airake-openrouter:Rake.Providers.OpenRouter.TTS, airake-openrouter:Rake.Providers.OpenRouter.Videos
+
+executable minimal-example
+  import: shared_opts
+  hs-source-dirs: app
+  main-is: MinimalExample.hs
+  ghc-options: -threaded
+  build-depends: base >=4.20 && <5, aeson, bytestring, containers, effectful, effectful-core, relude, text, time, vector, airake, base64-bytestring, directory, filepath, http-client, http-client-tls, process, transformers
+
+executable rake-image
+  import: shared_opts
+  hs-source-dirs: app
+  main-is: RakeImage.hs
+  other-modules:
+      RakeImageCLI
+      RakeMediaOptions
+      RakeCliSupport
+  ghc-options: -threaded
+  build-depends: base >=4.20 && <5, aeson, bytestring, containers, effectful, effectful-core, relude, text, time, vector, airake, base64-bytestring, directory, filepath, http-client, http-client-tls, process, transformers
+
+executable rake-tts
+  import: shared_opts
+  hs-source-dirs: app
+  main-is: RakeTTS.hs
+  other-modules:
+      RakeTTSCLI
+      RakeMediaOptions
+      RakeCliSupport
+  ghc-options: -threaded
+  build-depends: base >=4.20 && <5, aeson, bytestring, containers, effectful, effectful-core, relude, text, time, vector, airake, base64-bytestring, directory, filepath, http-client, http-client-tls, process, transformers
+
+executable rake-video
+  import: shared_opts
+  hs-source-dirs: app
+  main-is: RakeVideo.hs
+  other-modules:
+      RakeVideoCLI
+      RakeVideoFiles
+      RakeMediaOptions
+      RakeCliSupport
+  ghc-options: -threaded
+  build-depends: base >=4.20 && <5, aeson, bytestring, containers, effectful, effectful-core, relude, text, time, vector, airake, base64-bytestring, directory, filepath, http-client, http-client-tls, process, transformers
+
+test-suite unit
+  import: shared_opts
+  type: exitcode-stdio-1.0
+  main-is: Main.hs
+  hs-source-dirs: test app
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N2
+  other-modules:
+      RakeCliSupportSpec
+      RakeMediaCLISpec
+      RakeImageCLI
+      RakeVideoCLI
+      RakeVideoFiles
+      RakeTTSCLI
+      RakeMediaOptions
+      RakeCliSupport
+  build-tool-depends: hspec-discover:hspec-discover
+  build-depends: base >=4.20 && <5, aeson, bytestring, containers, effectful, effectful-core, relude, text, time, vector, hspec, QuickCheck, directory, filepath, unliftio, process, effectful-plugin, airake, airake-core, airake-openrouter, base64-bytestring, http-client, http-client-tls, transformers

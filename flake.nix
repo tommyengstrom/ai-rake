@@ -1,5 +1,5 @@
 {
-  description = "Development shell and package for ai-rake";
+  description = "airake libraries and development shell";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -9,32 +9,21 @@
   outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = import nixpkgs {
-          inherit system;
-          config.allowBroken = true;  # needed because openai is marked broken
-        };
+        pkgs = import nixpkgs { inherit system; };
+        names = [ "airake-core" "airake-chat" "airake-openrouter" "airake-openai" "airake-jev" "airake-postgres" "airake" ];
         haskellPackages = pkgs.haskell.packages.ghc9103.override {
-          overrides = self: super: {
-            openai = pkgs.haskell.lib.dontCheck super.openai;
-          };
+          overrides = final: prev: builtins.listToAttrs (map (name: {
+            inherit name;
+            value = final.callCabal2nix name (./packages + "/${name}") { };
+          }) names);
         };
-        ai-rake = haskellPackages.callCabal2nix "ai-rake" ./. { };
-        libraryPath = pkgs.lib.makeLibraryPath [
-          pkgs.libpq
-          pkgs.zlib
-        ];
-      in
-      {
-        packages.default = ai-rake;
-
+        libraries = builtins.listToAttrs (map (name: { inherit name; value = haskellPackages.${name}; }) names);
+      in {
+        packages = libraries // { default = libraries.airake; };
         devShells.default = haskellPackages.shellFor {
-          packages = _: [ ai-rake ];
+          packages = p: map (name: p.${name}) names;
           withHoogle = false;
-
-          nativeBuildInputs = [
-            pkgs.pkg-config
-          ];
-
+          nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = [
             haskellPackages.cabal-install
             haskellPackages.ghcid
@@ -48,10 +37,11 @@
             pkgs.postgresql
             pkgs.process-compose
             pkgs.zlib
+            pkgs.ffmpeg
           ];
-
           shellHook = ''
             export PC_PORT_NUM=6599
+            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ pkgs.libpq pkgs.zlib ]}:''${LD_LIBRARY_PATH:-}
           '';
         };
       });

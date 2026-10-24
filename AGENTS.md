@@ -36,3 +36,22 @@ process-compose process restart backend-5-ghcid
 process-compose process restart backend-4-cabal-test-all
 process-compose process list
 ```
+
+## Workspace
+
+The application facade is `packages/airake`. Core types and backend authoring
+helpers live in `packages/airake-core`; the chat/tool/replay frontend is
+`packages/airake-chat`. OpenRouter, direct OpenAI, Jev, and PostgreSQL each have
+separate packages. The independent backend fixture is in `fixtures/backend`.
+
+The default test job is offline. Additional jobs are disabled until explicitly
+started:
+
+- `backend-6-build-integration` compiles optional integration suites.
+- `backend-7-test-postgres` runs against a disposable local PostgreSQL cluster.
+- `backend-8-test-live-openai` requires `AIRAKE_LIVE_TESTS=1` and credentials;
+  running it makes paid provider calls.
+- `backend-9-sdist` builds extracted distributions without workspace sources.
+
+Use `cabal.integration.project` for editor/repl integration components. It enables
+the integration build flags without running tests.

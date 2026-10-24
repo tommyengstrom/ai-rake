@@ -1,0 +1,213 @@
+module Rake.Providers.OpenAI.Images
+    ( OpenAIImagesSettings (..)
+    , defaultOpenAIImagesSettings
+    , OpenAIImageReference (..)
+    , OpenAIImageModeration (..)
+    , OpenAIImageRequest (..)
+    , defaultOpenAIImageRequest
+    , generateOpenAIImage
+    ) where
+
+import Data.Aeson
+import Data.Text qualified as T
+import Effectful
+import Effectful.Error.Static
+import Rake.Effect
+import Rake.Media
+import Network.HTTP.Client (managerResponseTimeout, responseTimeoutMicro)
+import Network.HTTP.Client.TLS (newTlsManagerWith, tlsManagerSettings)
+import Rake.Providers.Internal (providerClientError, defaultWarningLogger)
+import Relude
+import Servant.API (Header, JSON, Post, ReqBody)
+import Servant.API qualified as Servant
+import Servant.Client
+
+data OpenAIImagesSettings es = OpenAIImagesSettings
+    { apiKey :: Text
+    , baseUrl :: Text
+    , organizationId :: Maybe Text
+    , projectId :: Maybe Text
+    , requestLogger :: NativeMsgFormat -> Eff es ()
+    }
+
+defaultOpenAIImagesSettings :: Text -> OpenAIImagesSettings es
+defaultOpenAIImagesSettings apiKey =
+    OpenAIImagesSettings
+        { apiKey
+        , baseUrl = "https://api.openai.com"
+        , organizationId = Nothing
+        , projectId = Nothing
+        , requestLogger = defaultWarningLogger "openai.images"
+        }
+
+data OpenAIImageReference
+    = OpenAIImageUrl Text
+    | OpenAIImageFileId Text
+    deriving stock (Show, Eq, Generic)
+
+instance ToJSON OpenAIImageReference where
+    toJSON = \case
+        OpenAIImageUrl imageUrl ->
+            object ["image_url" .= imageUrl]
+        OpenAIImageFileId fileId ->
+            object ["file_id" .= fileId]
+
+data OpenAIImageModeration
+    = OpenAIImageModerationAuto
+    | OpenAIImageModerationLow
+    deriving stock (Show, Eq, Generic)
+
+instance ToJSON OpenAIImageModeration where
+    toJSON =
+        String . \case
+            OpenAIImageModerationAuto ->
+                "auto"
+            OpenAIImageModerationLow ->
+                "low"
+
+data OpenAIImageRequest = OpenAIImageRequest
+    { model :: Text
+    , prompt :: Text
+    , inputImages :: [OpenAIImageReference]
+    , mask :: Maybe OpenAIImageReference
+    , background :: Maybe Text
+    , inputFidelity :: Maybe Text
+    , moderation :: Maybe OpenAIImageModeration
+    , n :: Maybe Int
+    , outputCompression :: Maybe Int
+    , outputFormat :: Maybe Text
+    , quality :: Maybe Text
+    , size :: Maybe Text
+    , user :: Maybe Text
+    , safetyIdentifier :: Maybe Text
+    }
+    deriving stock (Show, Eq, Generic)
+
+defaultOpenAIImageRequest :: Text -> OpenAIImageRequest
+defaultOpenAIImageRequest prompt =
+    OpenAIImageRequest
+        { model = "gpt-image-2.5-flare"
+        , prompt
+        , inputImages = []
+        , mask = Nothing
+        , background = Nothing
+        , inputFidelity = Nothing
+        , moderation = Just OpenAIImageModerationLow
+        , n = Nothing
+        , outputCompression = Nothing
+        , outputFormat = Nothing
+        , quality = Nothing
+        , size = Nothing
+        , user = Nothing
+        , safetyIdentifier = Nothing
+        }
+
+instance ToJSON OpenAIImageRequest where
+    toJSON OpenAIImageRequest{model, prompt, inputImages, mask, background, inputFidelity, moderation, n, outputCompression, outputFormat, quality, size, user, safetyIdentifier} =
+        object $
+            [ "model" .= model
+            , "prompt" .= prompt
+            ]
+                <> catMaybes
+                    [ ("images" .=) <$> viaNonEmpty identity (fromList inputImages)
+                    , ("mask" .=) <$> mask
+                    , ("background" .=) <$> background
+                    , ("input_fidelity" .=) <$> inputFidelity
+                    , ("moderation" .=) <$> moderation
+                    , ("n" .=) <$> n
+                    , ("output_compression" .=) <$> outputCompression
+                    , ("output_format" .=) <$> outputFormat
+                    , ("quality" .=) <$> quality
+                    , ("size" .=) <$> size
+                    , ("user" .=) <$> user
+                    , ("safety_identifier" .=) <$> safetyIdentifier
+                    ]
+
+type OpenAIImagesAPI =
+    "v1"
+        Servant.:> "images"
+        Servant.:> ( "generations"
+                        Servant.:> Header "Authorization" Text
+                        Servant.:> Header "OpenAI-Organization" Text
+                        Servant.:> Header "OpenAI-Project" Text
+                        Servant.:> ReqBody '[JSON] Value
+                        Servant.:> Post '[JSON] Value
+                  Servant.:<|> "edits"
+                        Servant.:> Header "Authorization" Text
+                        Servant.:> Header "OpenAI-Organization" Text
+                        Servant.:> Header "OpenAI-Project" Text
+                        Servant.:> ReqBody '[JSON] Value
+                        Servant.:> Post '[JSON] Value
+                  )
+
+openAIImagesApi :: Proxy OpenAIImagesAPI
+openAIImagesApi = Proxy
+
+generateOpenAIImage
+    :: forall es
+     . ( IOE :> es
+       , Error RakeError :> es
+       )
+    => OpenAIImagesSettings es
+    -> OpenAIImageRequest
+    -> Eff es ImageGenerationResponse
+generateOpenAIImage OpenAIImagesSettings{apiKey, baseUrl, organizationId, projectId, requestLogger} request@OpenAIImageRequest{inputImages} = do
+    either throwError pure (validateOpenAIImageRequest request)
+
+    manager <- liftIO $ newTlsManagerWith tlsManagerSettings{managerResponseTimeout = responseTimeoutMicro 180_000_000}
+    parsedBaseUrl <- either (throwError . invalidBaseUrl) pure $ parseBaseUrl (toString baseUrl)
+    let clientEnv = mkClientEnv manager parsedBaseUrl
+        createImage Servant.:<|> editImage = client openAIImagesApi
+        requestBody = toJSON request
+        clientCall
+            | null inputImages =
+                createImage
+                    (Just ("Bearer " <> apiKey))
+                    organizationId
+                    projectId
+                    requestBody
+            | otherwise =
+                editImage
+                    (Just ("Bearer " <> apiKey))
+                    organizationId
+                    projectId
+                    requestBody
+
+    requestLogger (NativeMsgOut requestBody)
+    responseValue <-
+        liftIO (runClientM clientCall clientEnv) >>= \case
+            Left err -> do
+                requestLogger (NativeRequestFailure (providerClientError err))
+                throwError (LlmClientError (providerClientError err))
+            Right responseValue -> pure responseValue
+    requestLogger (NativeMsgIn responseValue)
+    decodeResponse responseValue
+  where
+    invalidBaseUrl err =
+        LlmExpectationError ("Invalid base URL: " <> show err)
+
+    decodeResponse responseValue =
+        case fromJSON responseValue of
+            Error err ->
+                throwError (LlmExpectationError ("Failed to decode OpenAI image response: " <> err))
+            Success response ->
+                pure response
+
+validateOpenAIImageRequest :: OpenAIImageRequest -> Either RakeError ()
+validateOpenAIImageRequest OpenAIImageRequest{model, inputImages, mask, background, inputFidelity, outputFormat}
+    | null inputImages && isJust mask =
+        Left (LlmExpectationError "OpenAI image masks require at least one input image")
+    | null inputImages && isJust inputFidelity =
+        Left (LlmExpectationError "OpenAI inputFidelity requires at least one input image")
+    | background == Just "transparent"
+    , Just format <- outputFormat
+    , format `notElem` (["png", "webp"] :: [Text]) =
+        Left (LlmExpectationError "OpenAI transparent backgrounds require png or webp output")
+    | isGPTImage2Model model && isJust inputFidelity =
+        Left (LlmExpectationError "OpenAI gpt-image-2 automatically uses high-fidelity input images and does not support inputFidelity")
+    | otherwise =
+        Right ()
+
+isGPTImage2Model :: Text -> Bool
+isGPTImage2Model model =
+    model == "gpt-image-2" || "gpt-image-2-" `T.isPrefixOf` model
