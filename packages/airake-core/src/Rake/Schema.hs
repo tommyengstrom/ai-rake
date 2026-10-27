@@ -22,7 +22,7 @@ normalizeSchema = \case
                 then normalizeObjectSchema normalizedObject
                 else Object normalizedObject
       where
-        normalizedObject = KM.mapWithKey normalizeSchemaField objectValue
+        normalizedObject = normalizeIntegerBounds (KM.mapWithKey normalizeSchemaField objectValue)
     Array values ->
         Array (normalizeSchema <$> values)
     other ->
@@ -30,10 +30,21 @@ normalizeSchema = \case
 
 normalizeSchemaField :: Key.Key -> Value -> Value
 normalizeSchemaField fieldName fieldValue
+    | fieldName `elem` (["default", "enum", "const", "example", "examples"] :: [Key.Key]) =
+        fieldValue
     | fieldName `elem` schemaMapFields =
         normalizeSchemaMap fieldValue
     | otherwise =
         normalizeSchema fieldValue
+
+normalizeIntegerBounds :: KM.KeyMap Value -> KM.KeyMap Value
+normalizeIntegerBounds objectValue
+    -- OpenAI can return zero-token incomplete responses for the derived Int64 minimum.
+    | KM.lookup "type" objectValue == Just (String "integer")
+    , KM.lookup "minimum" objectValue == Just (Number (-9223372036854775808))
+    , KM.lookup "maximum" objectValue == Just (Number 9223372036854775807) =
+        KM.delete "minimum" objectValue
+    | otherwise = objectValue
 
 normalizeSchemaMap :: Value -> Value
 normalizeSchemaMap = \case

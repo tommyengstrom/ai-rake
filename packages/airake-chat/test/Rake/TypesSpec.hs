@@ -8,6 +8,7 @@ import Data.OpenApi.Optics ()
 import Data.UUID qualified as UUID
 import Optics.Core ((?~))
 import Rake.Chat
+import Rake.Schema (normalizeStructuredOutputSchema)
 import Relude
 import StructuredSchemaTestTypes
 import Test.Hspec
@@ -67,6 +68,31 @@ spec = describe "Rake.Types" $ do
                     expectationFailure "Expected parameterSchema from defineToolWithArgument"
 
     describe "jsonSchemaFormat" $ do
+        it "omits the machine minimum in nested Int response and tool schemas" $ do
+            case jsonSchemaFormat @[Int] of
+                JsonSchema schemaValue -> do
+                    lookupPath ["items", "minimum"] schemaValue `shouldBe` Nothing
+                    lookupPath ["items", "maximum"] schemaValue `shouldBe` Just (toJSON (maxBound :: Int))
+                    case defineToolWithArgument @[Int] "ints" "ints" (\_ -> pure (Right "ok")) of
+                        ToolDef{parameterSchema} -> parameterSchema `shouldBe` Just schemaValue
+                _ -> expectationFailure "Expected JsonSchema from jsonSchemaFormat"
+
+        it "preserves custom integer bounds and non-integer schemas" $ do
+            forM_
+                ( [ object ["type" .= ("integer" :: Text), "minimum" .= (0 :: Int), "maximum" .= (1000 :: Int)]
+                  , object ["type" .= ("integer" :: Text), "minimum" .= (minBound :: Int)]
+                  , object ["type" .= ("number" :: Text), "minimum" .= (minBound :: Int), "maximum" .= (maxBound :: Int)]
+                  ] :: [Value]
+                ) $ \schemaValue -> normalizeStructuredOutputSchema schemaValue `shouldBe` schemaValue
+
+        it "preserves schema-looking data in literal keywords" $ do
+            let payload :: Value
+                payload = toJSON ([object ["type" .= ("integer" :: Text), "minimum" .= (minBound :: Int), "maximum" .= (maxBound :: Int)]] :: [Value])
+            forM_ (["default", "enum", "const", "example", "examples"] :: [Key.Key]) $ \keyword -> do
+                let schemaValue :: Value
+                    schemaValue = object [keyword .= payload]
+                normalizeStructuredOutputSchema schemaValue `shouldBe` schemaValue
+
         it "adds additionalProperties false when the typed schema leaves it absent" $ do
             case jsonSchemaFormat @ClosedRecord of
                 JsonSchema schemaValue ->

@@ -561,14 +561,14 @@ decodeResponsesResponse providerTag responseValue = do
                 [ statusContext
                     "Responses response status was "
                     responseStatus
-                    (providerFailureDetail responseObject)
+                    (providerStatusDetail responseObject)
                 ]
                 <> mapMaybe
                     ( \(_, payloadObject) ->
                         statusContext
                             "Responses output item status was "
                             (lookupText "status" payloadObject)
-                            (providerFailureDetail payloadObject)
+                            (providerStatusDetail payloadObject)
                     )
                     parsedOutputItems
         classifiedOutputItems =
@@ -672,9 +672,9 @@ statusFailureReason (prefix, statusText, maybeDetail) = case statusText of
         Just (FailureContract (appendProviderFailureDetail ("Unsupported Responses status: " <> otherStatus) maybeDetail))
 
 statusIncompletePause :: (Text, Text, Maybe Text) -> Maybe ChatPauseReason
-statusIncompletePause (prefix, statusText, _) = case statusText of
+statusIncompletePause (prefix, statusText, maybeDetail) = case statusText of
     "incomplete" ->
-        Just (PauseIncomplete (prefix <> statusText))
+        Just (PauseIncomplete (appendProviderFailureDetail (prefix <> statusText) maybeDetail))
     _ ->
         Nothing
 
@@ -695,11 +695,16 @@ appendProviderFailureDetail :: Text -> Maybe Text -> Text
 appendProviderFailureDetail base maybeDetail =
     maybe base ((base <> ": ") <>) maybeDetail
 
-providerFailureDetail :: Object -> Maybe Text
-providerFailureDetail objectValue =
-    (KM.lookup "error" objectValue >>= providerErrorValueDetail)
-        <|> lookupText "message" objectValue
-        <|> lookupText "failure_reason" objectValue
+providerStatusDetail :: Object -> Maybe Text
+providerStatusDetail objectValue
+    | lookupText "status" objectValue == Just "incomplete" =
+        case KM.lookup "incomplete_details" objectValue of
+            Just (Object details) -> lookupText "reason" details
+            _ -> Nothing
+    | otherwise =
+        (KM.lookup "error" objectValue >>= providerErrorValueDetail)
+            <|> lookupText "message" objectValue
+            <|> lookupText "failure_reason" objectValue
 
 providerErrorValueDetail :: Value -> Maybe Text
 providerErrorValueDetail = \case

@@ -27,6 +27,8 @@ spec = describe "OpenAI Responses" $ do
                     object
                         [ "type" .= ("object" :: Text)
                         , "additionalProperties" .= True
+                        , "properties" .= object
+                            [ "value" .= object ["type" .= ("integer" :: Text), "minimum" .= (minBound :: Int), "maximum" .= (maxBound :: Int)] ]
                         ]
 
             requestBody <-
@@ -862,6 +864,36 @@ spec = describe "OpenAI Responses" $ do
                         []
                         (ProviderRoundPaused (PauseIncomplete "Responses response status was incomplete"))
                     )
+
+        it "preserves incomplete reasons without copying response content" $
+            forM_
+                ( [ (Nothing, ""), (Just Null, ""), (Just (String "malformed"), "")
+                  , (Just (object ["reason" .= Null]), "")
+                  , (Just (object ["reason" .= (1 :: Int)]), "")
+                  ]
+                    <> [(Just (object ["reason" .= reason]), ": " <> reason) | reason <- ["max_output_tokens", "content_filter", "future_reason"]]
+                    :: [(Maybe Value, Text)]
+                ) $ \(details, suffix) ->
+                forM_ ([False, True] :: [Bool]) $ \itemLevel -> do
+                    let incomplete :: Value
+                        incomplete = object $
+                            [ "status" .= ("incomplete" :: Text)
+                            , "type" .= ("message" :: Text), "role" .= ("assistant" :: Text)
+                            , "content" .= ([object ["type" .= ("output_text" :: Text), "text" .= ("private text" :: Text)]] :: [Value])
+                            , "message" .= ("private text" :: Text), "failure_reason" .= ("private text" :: Text)
+                            , "error" .= object ["message" .= ("private text" :: Text)]
+                            ] <> maybe [] (\value -> ["incomplete_details" .= value]) details
+                        response :: Value
+                        response = if itemLevel
+                            then object ["status" .= ("completed" :: Text), "output" .= ([incomplete] :: [Value])]
+                            else incomplete
+                    case decodeOpenAIResponse response of
+                        Right ProviderRound{action, roundItems} -> do
+                            action `shouldBe` ProviderRoundPaused
+                                (PauseIncomplete ("Responses " <> (if itemLevel then "output item" else "response") <> " status was incomplete" <> suffix))
+                            map itemLifecycle roundItems
+                                `shouldBe` if itemLevel then [ItemPending] else []
+                        Left err -> expectationFailure (show err)
 
         it "propagates top-level Responses failure details" $ do
             let response =
